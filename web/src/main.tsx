@@ -5,10 +5,20 @@ import { PrivyProvider } from "@privy-io/react-auth";
 import { SmartWalletsProvider } from "@privy-io/react-auth/smart-wallets";
 import App from "./App";
 import { AccountRoleProvider } from "./context/AccountRoleContext";
+import { ReferralProvider } from "./context/ReferralContext";
 import { PRIVY_APP_ID } from "./config";
 import { arcTestnet } from "./chains";
 import "./index.css";
 import "./landing.css";
+
+if ("fonts" in document) {
+  document.fonts
+    .load('24px "Material Symbols Outlined"')
+    .then(() => {
+      document.documentElement.classList.add("material-symbols-ready");
+    })
+    .catch(() => {});
+}
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
@@ -27,7 +37,9 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       <SmartWalletsProvider>
         <BrowserRouter>
           <AccountRoleProvider>
-            <App />
+            <ReferralProvider>
+              <App />
+            </ReferralProvider>
           </AccountRoleProvider>
         </BrowserRouter>
       </SmartWalletsProvider>

@@ -1,4 +1,4 @@
-import { getDb } from "../db/database";
+import { one, query } from "../db/database";
 
 export type AccountActivityRecord = {
   type: string;
@@ -6,6 +6,7 @@ export type AccountActivityRecord = {
   tx_hash: string | null;
   timestamp: number;
   author_handle?: string | null;
+  profileImageUrl?: string | null;
   tweet_id?: string | null;
   from_addr?: string | null;
   from_address?: string | null;
@@ -44,75 +45,91 @@ function normalizeRows(rows: AccountActivityRecord[]): AccountActivityRecord[] {
   }));
 }
 
-export function getAccountActivity(options: {
+export async function getAccountActivity(options: {
   address: string;
   limit?: number;
   tipContractAddress?: string;
-}): AccountActivityRecord[] {
-  const db = getDb();
+}): Promise<AccountActivityRecord[]> {
   const address = options.address.toLowerCase();
   const limit = Math.min(options.limit || 50, 100);
   const currentContract = (options.tipContractAddress || "").toLowerCase();
 
   const tipsSent = currentContract
-    ? db.prepare(
+    ? await query<AccountActivityRecord>(
         `SELECT CASE WHEN m.kind = 'direct_creator_tip' THEN 'direct_creator_tip' ELSE 'tip_sent' END as type,
                 t.amount, t.tx_hash, t.timestamp,
-                m.author_handle, m.tweet_id
+                m.author_handle, m.tweet_id,
+                COALESCE(
+                  (SELECT profile_image_url FROM verified_claims WHERE author_id = t.author_id AND profile_image_url IS NOT NULL ORDER BY verified_at DESC LIMIT 1),
+                  (SELECT profile_image_url FROM verified_claims WHERE LOWER(username) = LOWER(COALESCE(m.author_handle, '')) AND profile_image_url IS NOT NULL ORDER BY verified_at DESC LIMIT 1)
+                ) as profileImageUrl
          FROM tips t
          LEFT JOIN tip_metadata m ON t.content_id = m.content_id
          WHERE t.from_address = ? AND t.tip_contract_address = ?
          ORDER BY t.timestamp DESC
          LIMIT ?`
-      ).all(address, currentContract, limit) as AccountActivityRecord[]
-    : db.prepare(
+      , [address, currentContract, limit])
+    : await query<AccountActivityRecord>(
         `SELECT CASE WHEN m.kind = 'direct_creator_tip' THEN 'direct_creator_tip' ELSE 'tip_sent' END as type,
                 t.amount, t.tx_hash, t.timestamp,
-                m.author_handle, m.tweet_id
+                m.author_handle, m.tweet_id,
+                COALESCE(
+                  (SELECT profile_image_url FROM verified_claims WHERE author_id = t.author_id AND profile_image_url IS NOT NULL ORDER BY verified_at DESC LIMIT 1),
+                  (SELECT profile_image_url FROM verified_claims WHERE LOWER(username) = LOWER(COALESCE(m.author_handle, '')) AND profile_image_url IS NOT NULL ORDER BY verified_at DESC LIMIT 1)
+                ) as profileImageUrl
          FROM tips t
          LEFT JOIN tip_metadata m ON t.content_id = m.content_id
          WHERE t.from_address = ?
          ORDER BY t.timestamp DESC
          LIMIT ?`
-      ).all(address, limit) as AccountActivityRecord[];
+      , [address, limit]);
 
-  const claim = db.prepare(
-    "SELECT username, author_id FROM verified_claims WHERE owner_address = ? ORDER BY verified_at DESC LIMIT 1"
-  ).get(address) as { username: string; author_id: string } | undefined;
+  const claim = await one<{ username: string; author_id: string }>(
+    "SELECT username, author_id FROM verified_claims WHERE owner_address = ? ORDER BY verified_at DESC LIMIT 1",
+    [address]
+  );
 
   let tipsReceived: AccountActivityRecord[] = [];
   if (claim) {
     tipsReceived = currentContract
-      ? db.prepare(
+      ? await query<AccountActivityRecord>(
           `SELECT 'tip_received' as type, t.amount, t.tx_hash, t.timestamp,
-                  t.from_address as from_addr, m.author_handle, m.tweet_id
+                  t.from_address as from_addr, m.author_handle, m.tweet_id,
+                  COALESCE(
+                    (SELECT profile_image_url FROM verified_claims WHERE author_id = t.author_id AND profile_image_url IS NOT NULL ORDER BY verified_at DESC LIMIT 1),
+                    (SELECT profile_image_url FROM verified_claims WHERE LOWER(username) = LOWER(COALESCE(m.author_handle, '')) AND profile_image_url IS NOT NULL ORDER BY verified_at DESC LIMIT 1)
+                  ) as profileImageUrl
            FROM tips t
            LEFT JOIN tip_metadata m ON t.content_id = m.content_id
            WHERE (t.author_id = ? OR LOWER(COALESCE(m.author_handle, '')) = LOWER(?))
              AND t.tip_contract_address = ?
            ORDER BY t.timestamp DESC
            LIMIT ?`
-        ).all(claim.author_id, claim.username, currentContract, limit) as AccountActivityRecord[]
-      : db.prepare(
+        , [claim.author_id, claim.username, currentContract, limit])
+      : await query<AccountActivityRecord>(
           `SELECT 'tip_received' as type, t.amount, t.tx_hash, t.timestamp,
-                  t.from_address as from_addr, m.author_handle, m.tweet_id
+                  t.from_address as from_addr, m.author_handle, m.tweet_id,
+                  COALESCE(
+                    (SELECT profile_image_url FROM verified_claims WHERE author_id = t.author_id AND profile_image_url IS NOT NULL ORDER BY verified_at DESC LIMIT 1),
+                    (SELECT profile_image_url FROM verified_claims WHERE LOWER(username) = LOWER(COALESCE(m.author_handle, '')) AND profile_image_url IS NOT NULL ORDER BY verified_at DESC LIMIT 1)
+                  ) as profileImageUrl
            FROM tips t
            LEFT JOIN tip_metadata m ON t.content_id = m.content_id
            WHERE t.author_id = ? OR LOWER(COALESCE(m.author_handle, '')) = LOWER(?)
            ORDER BY t.timestamp DESC
            LIMIT ?`
-        ).all(claim.author_id, claim.username, limit) as AccountActivityRecord[];
+        , [claim.author_id, claim.username, limit]);
   }
 
-  const referralFees = db.prepare(
+  const referralFees = await query<AccountActivityRecord>(
     `SELECT type, amount, tx_hash, timestamp, to_address, from_address, detail
      FROM user_activity
      WHERE to_address = ? AND type = 'referral_fee_received'
      ORDER BY timestamp DESC
      LIMIT ?`
-  ).all(address, limit) as AccountActivityRecord[];
+  , [address, limit]);
 
-  const fundingRows = db.prepare(
+  const fundingRows = await query<AccountActivityRecord>(
     `SELECT
        CASE
          WHEN kind = 'crypto_receive' THEN 'deposit'
@@ -121,10 +138,10 @@ export function getAccountActivity(options: {
          ELSE 'funding'
        END as type,
        CASE
-         WHEN json_extract(metadata_json, '$.amountRaw') IS NOT NULL THEN json_extract(metadata_json, '$.amountRaw')
-         ELSE CAST(CAST(COALESCE(json_extract(metadata_json, '$.amount'), '0') AS REAL) * 1000000 AS INTEGER)
+         WHEN metadata_json::jsonb ->> 'amountRaw' IS NOT NULL THEN metadata_json::jsonb ->> 'amountRaw'
+         ELSE CAST((CAST(COALESCE(metadata_json::jsonb ->> 'amount', '0') AS NUMERIC) * 1000000) AS BIGINT)::TEXT
        END as amount,
-       COALESCE(json_extract(metadata_json, '$.txHash'), json_extract(metadata_json, '$.hash'), provider_session_id) as tx_hash,
+       COALESCE(metadata_json::jsonb ->> 'txHash', metadata_json::jsonb ->> 'hash', provider_session_id) as tx_hash,
        CAST(created_at / 1000 AS INTEGER) as timestamp,
        CASE
          WHEN kind = 'faucet' THEN 'Faucet Funding'
@@ -137,9 +154,9 @@ export function getAccountActivity(options: {
        AND status IN ('completed', 'success', 'confirmed', 'synced')
      ORDER BY created_at DESC
      LIMIT ?`
-  ).all(address, limit) as AccountActivityRecord[];
+  , [address, limit]);
 
-  const withdrawalRows = db.prepare(
+  const withdrawalRows = await query<AccountActivityRecord>(
     `SELECT
        'withdraw' as type,
        amount_raw as amount,
@@ -151,7 +168,7 @@ export function getAccountActivity(options: {
      WHERE LOWER(owner_address) = ?
      ORDER BY created_at DESC
      LIMIT ?`
-  ).all(address, limit) as AccountActivityRecord[];
+  , [address, limit]);
 
   const normalizedRows = normalizeRows([...tipsSent, ...tipsReceived, ...fundingRows, ...withdrawalRows, ...referralFees]);
   const seenTxHash = new Set<string>();

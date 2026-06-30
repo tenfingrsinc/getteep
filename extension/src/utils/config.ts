@@ -35,6 +35,7 @@ export const CONFIG = {
 
   // Minimum tip in USDC (display value)
   MIN_TIP_USDC: 0.01,
+  MAX_TIP_USDC: 10_000,
 
   // Demo mode: blur email address (set via env at build time)
   BLUR_EMAIL: process.env.BLUR_EMAIL === "true" || false,
@@ -43,8 +44,8 @@ export const CONFIG = {
   // Production builds are guarded in webpack.config.js so this cannot ship empty.
   WEB_APP_URL: process.env.WEB_APP_URL || (IS_PRODUCTION ? "" : "http://localhost:5174"),
 
-  // Primary domain for receipt/tx links when sharing tip on X (e.g. tipcoin.xyz)
-  RECEIPT_BASE_URL: process.env.RECEIPT_BASE_URL || process.env.WEB_APP_URL || "https://tipcoin.xyz",
+  // Primary domain for receipt/tx links when sharing tip on X.
+  RECEIPT_BASE_URL: process.env.RECEIPT_BASE_URL || process.env.WEB_APP_URL || "https://getteep.xyz",
 
   // Funding / cash movement gates
   FUNDING_ENV: process.env.FUNDING_ENV || "arcTestnet",

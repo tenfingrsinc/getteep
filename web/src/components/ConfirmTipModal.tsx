@@ -1,6 +1,6 @@
-import { useEffect } from "react";
 import { CHROME_STORE_URL } from "../config";
 import TeepTipModal from "./TeepTipModal";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 
 interface ConfirmTipModalProps {
   open: boolean;
@@ -24,16 +24,7 @@ export default function ConfirmTipModal({
   sending = false,
   error,
 }: ConfirmTipModalProps) {
-  useEffect(() => {
-    if (!open) return;
-    const handleEscape = (e: KeyboardEvent) => e.key === "Escape" && !sending && onClose();
-    document.addEventListener("keydown", handleEscape);
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.removeEventListener("keydown", handleEscape);
-      document.body.style.overflow = "";
-    };
-  }, [open, onClose, sending]);
+  const dialogRef = useDialogFocus<HTMLDivElement>(open && !onConfirm, onClose, !sending);
 
   if (!open) return null;
 
@@ -68,7 +59,7 @@ export default function ConfirmTipModal({
       aria-labelledby="confirm-tip-title"
       onClick={(e) => e.target === e.currentTarget && !sending && onClose()}
     >
-      <div className="modal-panel modal-panel--confirm">
+      <div ref={dialogRef} className="modal-panel modal-panel--confirm" tabIndex={-1}>
         <h2 id="confirm-tip-title" className="modal-title">Confirm tip</h2>
         <p className="modal-tip-summary">
           <strong>${amountUsd}</strong> USD to @{cleanHandle}
@@ -76,7 +67,7 @@ export default function ConfirmTipModal({
         {error && <p className="modal-error" style={{ color: "var(--text-muted)", fontSize: "var(--text-small)", marginTop: 4 }}>{error}</p>}
         <p className="modal-hint">Complete this tip in the Teep extension on the post.</p>
         <div className="modal-actions">
-          <a href={postUrl} target="_blank" rel="noopener noreferrer" className="btn-primary modal-btn-primary">
+          <a href={postUrl} target="_blank" rel="noopener noreferrer" className="btn-primary modal-btn-primary" data-autofocus>
             Open post on X to tip
           </a>
           <a href={CHROME_STORE_URL} target="_blank" rel="noopener noreferrer" className="btn-secondary modal-btn-secondary">

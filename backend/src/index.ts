@@ -19,6 +19,10 @@ import statsRouter from "./routes/stats";
 import leaderboardRouter from "./routes/leaderboard";
 import apiV1Router from "./routes/api-v1";
 import opsRouter from "./routes/ops";
+import defiRouter from "./routes/defi";
+import xBotInternalRouter from "./routes/x-bot-internal";
+import xBalanceRouter from "./routes/x-balance";
+import { mountWebProfileRenderer } from "./services/webProfileRenderer";
 
 const PORT = parseInt(process.env.PORT || "3001");
 const LOCAL_URL_RE = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/|$)/i;
@@ -28,6 +32,8 @@ function assertProductionEnv() {
 
   const required = [
     "CORS_ORIGIN",
+    "WEB_APP_URL",
+    "RECEIPT_BASE_URL",
     "ATTESTATION_PRIVATE_KEY",
     "X_CLIENT_ID",
     "X_CLIENT_SECRET",
@@ -45,8 +51,10 @@ function assertProductionEnv() {
     throw new Error(`Production backend is missing required env: ${missing.join(", ")}`);
   }
 
-  if (LOCAL_URL_RE.test(process.env.CORS_ORIGIN || "")) {
-    throw new Error("Production backend cannot use a localhost CORS_ORIGIN.");
+  for (const key of ["CORS_ORIGIN", "WEB_APP_URL", "RECEIPT_BASE_URL"]) {
+    if (LOCAL_URL_RE.test(process.env[key] || "")) {
+      throw new Error(`Production backend cannot use a localhost ${key}.`);
+    }
   }
   if (process.env.ENABLE_FAUCET === "true") {
     throw new Error("Production backend cannot enable ENABLE_FAUCET.");
@@ -60,8 +68,18 @@ function assertProductionEnv() {
   if (process.env.ALLOW_INSECURE_OEMBED_TLS === "true") {
     throw new Error("Production backend cannot enable ALLOW_INSECURE_OEMBED_TLS.");
   }
+  if (process.env.ALLOW_INSECURE_AVATAR_TLS === "true") {
+    throw new Error("Production backend cannot enable ALLOW_INSECURE_AVATAR_TLS.");
+  }
   if (process.env.ALLOW_UNSIGNED_REFERRAL_WRITES === "true" || process.env.ALLOW_UNSIGNED_ATTESTATION === "true") {
     throw new Error("Production backend cannot allow unsigned writes or attestations.");
+  }
+  if (process.env.ENABLE_DEFI_TRANSACTIONS === "true") {
+    const defiRequired = ["DEFI_STRATEGIES_JSON"];
+    const missingDefi = defiRequired.filter((key) => !process.env[key]);
+    if (missingDefi.length) {
+      throw new Error(`Production DeFi transactions are enabled but missing env: ${missingDefi.join(", ")}`);
+    }
   }
   if (process.env.WITHDRAWAL_REQUIRE_EMAIL_CONFIRMATION !== "false" && !process.env.WITHDRAWAL_EMAIL_WEBHOOK_URL) {
     throw new Error("Production backend requires WITHDRAWAL_EMAIL_WEBHOOK_URL when withdrawal email confirmation is enabled.");
@@ -74,6 +92,7 @@ function assertProductionEnv() {
 assertProductionEnv();
 
 const app = express();
+app.disable("x-powered-by");
 app.set("trust proxy", process.env.TRUST_PROXY === "true" ? 1 : false);
 
 // Middleware
@@ -103,12 +122,26 @@ const writeLimiter = rateLimit({
   max: Number(process.env.WRITE_RATE_LIMIT_MAX || 60),
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => req.method === "GET",
+  handler: (_req, res) => {
+    res.status(429).json({
+      error: "Too many write attempts. Wait a moment and try again.",
+      code: "WRITE_RATE_LIMIT",
+    });
+  },
 });
 const withdrawalLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
   max: Number(process.env.WITHDRAWAL_RATE_LIMIT_MAX || 10),
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => req.method === "GET",
+  handler: (_req, res) => {
+    res.status(429).json({
+      error: "Too many withdrawal attempts. Wait a moment and try again.",
+      code: "WITHDRAWAL_RATE_LIMIT",
+    });
+  },
 });
 
 // Routes
@@ -122,7 +155,9 @@ app.use("/milestones", milestonesRouter);
 app.use("/profile", profileRouter);
 app.use("/stats", statsRouter);
 app.use("/leaderboard", leaderboardRouter);
-app.use("/ops", opsRouter);
+app.use("/defi", defiRouter);
+app.use("/internal/x-bot", xBotInternalRouter);
+app.use("/x-balance", xBalanceRouter);
 
 // External API (versioned, documented)
 const apiLimiter = rateLimit({
@@ -131,7 +166,13 @@ const apiLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
+app.use("/api/v1/profile", apiLimiter, profileRouter);
+app.use("/api/ops", opsRouter);
 app.use("/api/v1", apiLimiter, apiV1Router);
+
+// Optional production web shell. When web/dist exists, creator profile URLs can
+// return crawler-visible OpenGraph/Twitter metadata before the React app hydrates.
+mountWebProfileRenderer(app);
 
 // 404 handler
 app.use((_req, res) => {
@@ -147,7 +188,7 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 // Start
 async function main() {
   // Initialize database
-  initDb();
+  await initDb();
 
   // Start indexer
   const indexer = new Indexer();

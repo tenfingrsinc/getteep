@@ -1,17 +1,31 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation, useSearchParams } from "react-router-dom";
 import { usePrivy } from "@privy-io/react-auth";
 import { useSmartWallets } from "@privy-io/react-auth/smart-wallets";
 import { getTeepActivityTitle } from "@teep/shared";
 import { API_BASE } from "../config";
 import DashboardShell from "../components/DashboardShell";
+import { DashboardConnectPage, DashboardPreparingPage } from "../components/DashboardAuthState";
 
 const PAGE_SIZE = 7;
 
-type SettingsTab = "identity" | "tipping" | "receipts" | "funding" | "notifications" | "privacy" | "support";
+type SettingsTab = "identity" | "tipping" | "receipts" | "funding" | "grow" | "notifications" | "privacy" | "engagement" | "support";
+
+const SETTINGS_TABS: SettingsTab[] = ["identity", "tipping", "receipts", "funding", "grow", "notifications", "privacy", "engagement", "support"];
+
+function isSettingsTab(value: string | null): value is SettingsTab {
+  return SETTINGS_TABS.includes(value as SettingsTab);
+}
 
 type TipperSettings = {
   username: string;
+  socialXHandle: string | null;
+  creatorIdentity: {
+    authorId: string;
+    username: string;
+    displayName: string | null;
+    profileImageUrl: string | null;
+  } | null;
   defaultTipAmount: string;
   receipts: {
     shareLinksEnabled: boolean;
@@ -22,11 +36,33 @@ type TipperSettings = {
     creatorClaimed: boolean;
     lowBalance: boolean;
     receiptReady: boolean;
+    newTip: boolean;
+    repeatSupporter: boolean;
+    claimWalletActivity: boolean;
+    withdrawalCompleted: boolean;
+    growTipsStatus: boolean;
   };
   privacy: {
     hideAddress: boolean;
     privateActivity: boolean;
     requireVerification: boolean;
+    hideSupporterNamesPublicly: boolean;
+    hideGrowthActivity: boolean;
+  };
+  payout: {
+    defaultDestination: string;
+    confirmationPreference: "email" | "wallet" | "both";
+    notifications: boolean;
+  };
+  growTips: {
+    defaultStrategyId: string;
+    riskVisibilityLevel: "minimal" | "standard" | "detailed";
+    maturityExitReminders: boolean;
+  };
+  engagement: {
+    defaultThankYouMessage: string;
+    autoSuggestXThankYou: boolean;
+    repeatSupporterReminders: boolean;
   };
 };
 
@@ -47,6 +83,10 @@ type FundingRecord = {
 
 type WithdrawalRecord = {
   destinationAddress: string;
+  destinationIdentity?: {
+    displayName?: string | null;
+    truncatedAddress?: string | null;
+  } | null;
   source: string;
   amountRaw: string;
   txHash: string;
@@ -75,6 +115,8 @@ function normalizeUsernameInput(value: string) {
 function defaultSettings(username: string): TipperSettings {
   return {
     username,
+    socialXHandle: null,
+    creatorIdentity: null,
     defaultTipAmount: "5.00",
     receipts: {
       shareLinksEnabled: true,
@@ -85,11 +127,33 @@ function defaultSettings(username: string): TipperSettings {
       creatorClaimed: true,
       lowBalance: true,
       receiptReady: false,
+      newTip: true,
+      repeatSupporter: true,
+      claimWalletActivity: true,
+      withdrawalCompleted: true,
+      growTipsStatus: true,
     },
     privacy: {
       hideAddress: true,
       privateActivity: true,
       requireVerification: true,
+      hideSupporterNamesPublicly: false,
+      hideGrowthActivity: false,
+    },
+    payout: {
+      defaultDestination: "",
+      confirmationPreference: "email",
+      notifications: true,
+    },
+    growTips: {
+      defaultStrategyId: "teep-treasury-stable",
+      riskVisibilityLevel: "standard",
+      maturityExitReminders: true,
+    },
+    engagement: {
+      defaultThankYouMessage: "Thank you for supporting my work on Teep.",
+      autoSuggestXThankYou: true,
+      repeatSupporterReminders: true,
     },
   };
 }
@@ -142,6 +206,10 @@ function withdrawalActivityLabel(record: WithdrawalRecord) {
   return "Withdrawal";
 }
 
+function withdrawalDestinationLabel(record: WithdrawalRecord) {
+  return record.destinationIdentity?.displayName || record.destinationIdentity?.truncatedAddress || shortAddress(record.destinationAddress);
+}
+
 function statusClass(status: string) {
   const normalized = status.toLowerCase();
   if (["completed", "confirmed", "success", "succeeded", "sent", "synced", "used"].includes(normalized)) return "is-success";
@@ -187,14 +255,20 @@ function Pagination({ page, total, onPage }: { page: number; total: number; onPa
 }
 
 export default function DashboardSettings() {
+  const { pathname } = useLocation();
+  const isCreatorSettings = pathname.startsWith("/creator");
+  const [searchParams, setSearchParams] = useSearchParams();
   const privy = usePrivy();
-  const { ready, authenticated, login, user, logout } = privy;
+  const { ready, authenticated, user, logout } = privy;
   const { client: smartWalletClient } = useSmartWallets();
   const address = (ready && authenticated ? smartWalletClient?.account?.address || "" : "").toLowerCase();
   const email = user?.email?.address || "Not connected";
   const fallbackUsername = useMemo(() => usernameFallback(email), [email]);
 
-  const [activeTab, setActiveTab] = useState<SettingsTab>("identity");
+  const [activeTab, setActiveTab] = useState<SettingsTab>(() => {
+    const requestedTab = searchParams.get("tab");
+    return isSettingsTab(requestedTab) ? requestedTab : "identity";
+  });
   const [settings, setSettings] = useState<TipperSettings>(() => defaultSettings(fallbackUsername));
   const [savedSettings, setSavedSettings] = useState<TipperSettings>(() => defaultSettings(fallbackUsername));
   const [loadingSettings, setLoadingSettings] = useState(false);
@@ -237,7 +311,9 @@ export default function DashboardSettings() {
 
     let cancelled = false;
     setLoadingSettings(true);
-    fetch(`${API_BASE}/api/v1/wallet/${address}/settings`)
+    const preferredUsername = email.includes("@") ? fallbackUsername : "";
+    const query = preferredUsername ? `?preferredUsername=${encodeURIComponent(preferredUsername)}` : "";
+    fetch(`${API_BASE}/api/v1/wallet/${address}/settings${query}`)
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (cancelled) return;
@@ -245,10 +321,23 @@ export default function DashboardSettings() {
         const hydrated: TipperSettings = {
           ...next,
           username: data?.username || fallbackUsername,
+          socialXHandle: data?.socialXHandle || null,
+          creatorIdentity: data?.creatorIdentity || null,
           defaultTipAmount: data?.defaultTipAmount || next.defaultTipAmount,
           receipts: { ...next.receipts, ...(data?.receipts || {}) },
           notifications: { ...next.notifications, ...(data?.notifications || {}) },
           privacy: { ...next.privacy, ...(data?.privacy || {}) },
+          payout: {
+            ...next.payout,
+            ...(data?.payout || {}),
+            defaultDestination: data?.payout?.defaultDestination || "",
+          },
+          growTips: {
+            ...next.growTips,
+            ...(data?.growTips || {}),
+            defaultStrategyId: data?.growTips?.defaultStrategyId || next.growTips.defaultStrategyId,
+          },
+          engagement: { ...next.engagement, ...(data?.engagement || {}) },
         };
         setSettings(hydrated);
         setSavedSettings(hydrated);
@@ -323,6 +412,16 @@ export default function DashboardSettings() {
     return () => document.removeEventListener("mousedown", handleOutsideClick);
   }, [accountHelpOpen]);
 
+  useEffect(() => {
+    const requestedTab = searchParams.get("tab");
+    if (!isSettingsTab(requestedTab) || requestedTab === activeTab) return;
+    if (hasUnsavedChanges) {
+      showToast("Save your changes before leaving this settings page.");
+      return;
+    }
+    setActiveTab(requestedTab);
+  }, [activeTab, hasUnsavedChanges, searchParams, showToast]);
+
   const updateSettings = useCallback((patch: Partial<TipperSettings>) => {
     setSettings((current) => ({
       ...current,
@@ -330,6 +429,9 @@ export default function DashboardSettings() {
       receipts: { ...current.receipts, ...(patch.receipts || {}) },
       notifications: { ...current.notifications, ...(patch.notifications || {}) },
       privacy: { ...current.privacy, ...(patch.privacy || {}) },
+      payout: { ...current.payout, ...(patch.payout || {}) },
+      growTips: { ...current.growTips, ...(patch.growTips || {}) },
+      engagement: { ...current.engagement, ...(patch.engagement || {}) },
     }));
   }, []);
 
@@ -340,7 +442,16 @@ export default function DashboardSettings() {
       return;
     }
     setActiveTab(tab);
-  }, [activeTab, hasUnsavedChanges, showToast]);
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      if (tab === "identity") {
+        next.delete("tab");
+      } else {
+        next.set("tab", tab);
+      }
+      return next;
+    }, { replace: true });
+  }, [activeTab, hasUnsavedChanges, setSearchParams, showToast]);
 
   const saveSettings = useCallback(async () => {
     const username = normalizeUsernameInput(settings.username);
@@ -353,6 +464,15 @@ export default function DashboardSettings() {
       showToast("Default tip amount must be greater than zero.");
       return;
     }
+    const payoutDestination = settings.payout.defaultDestination.trim();
+    if (payoutDestination && !/^0x[a-fA-F0-9]{40}$/.test(payoutDestination)) {
+      showToast("Default withdrawal destination must be a valid wallet address.");
+      return;
+    }
+    if (settings.engagement.defaultThankYouMessage.trim().length > 280) {
+      showToast("Thank-you message must stay under 280 characters.");
+      return;
+    }
 
     setSavingSettings(true);
     try {
@@ -363,10 +483,22 @@ export default function DashboardSettings() {
           ...settings,
           username,
           defaultTipAmount: amount.toFixed(2),
+          socialXHandle: settings.socialXHandle,
           receipts: {
             shareLinksEnabled: true,
             shareAmountEnabled: settings.receipts.shareAmountEnabled,
             postAwareCopyEnabled: true,
+          },
+          notifications: settings.notifications,
+          privacy: settings.privacy,
+          payout: {
+            ...settings.payout,
+            defaultDestination: payoutDestination || null,
+          },
+          growTips: settings.growTips,
+          engagement: {
+            ...settings.engagement,
+            defaultThankYouMessage: settings.engagement.defaultThankYouMessage.trim(),
           },
         }),
       });
@@ -374,10 +506,23 @@ export default function DashboardSettings() {
       if (!response.ok) throw new Error(payload.error || "Could not save settings.");
       const next: TipperSettings = {
         username: payload.username || username,
+        socialXHandle: payload.socialXHandle || null,
+        creatorIdentity: payload.creatorIdentity || settings.creatorIdentity,
         defaultTipAmount: payload.defaultTipAmount || amount.toFixed(2),
         receipts: { shareLinksEnabled: true, shareAmountEnabled: payload.receipts?.shareAmountEnabled !== false, postAwareCopyEnabled: true },
         notifications: payload.notifications || settings.notifications,
         privacy: payload.privacy || settings.privacy,
+        payout: {
+          ...settings.payout,
+          ...(payload.payout || {}),
+          defaultDestination: payload.payout?.defaultDestination || "",
+        },
+        growTips: {
+          ...settings.growTips,
+          ...(payload.growTips || {}),
+          defaultStrategyId: payload.growTips?.defaultStrategyId || settings.growTips.defaultStrategyId,
+        },
+        engagement: payload.engagement || settings.engagement,
       };
       setSettings(next);
       setSavedSettings(next);
@@ -418,7 +563,7 @@ export default function DashboardSettings() {
   const downloadCsv = useCallback((kind: "funding" | "withdrawals") => {
     const rows = kind === "funding"
       ? [["date", "type", "amount", "status"], ...fundingRecords.map((r) => [formatDate(r.createdAt), fundingActivityLabel(r), formatFundingAmount(r), statusLabel(r.status)])]
-      : [["date", "type", "amount", "status"], ...withdrawalRecords.map((r) => [formatDate(r.createdAt), withdrawalActivityLabel(r), formatUsdRaw(r.amountRaw), "Completed"])];
+      : [["date", "type", "destination", "amount", "status"], ...withdrawalRecords.map((r) => [formatDate(r.createdAt), withdrawalActivityLabel(r), withdrawalDestinationLabel(r), formatUsdRaw(r.amountRaw), "Completed"])];
     const csv = rows.map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -507,37 +652,25 @@ export default function DashboardSettings() {
   }, [address, deactivateText, logout, requestWalletProof, settings.privacy.requireVerification, user?.id]);
 
   if (!ready) {
-    return (
-      <DashboardShell title="Settings">
-        <main className="dashboard-body-inner">
-          <div className="dashboard-empty-auth"><h1>Settings</h1><p>Preparing your dashboard.</p></div>
-        </main>
-      </DashboardShell>
-    );
+    return <DashboardPreparingPage title="Settings" />;
   }
   if (!authenticated) {
-    return (
-      <DashboardShell title="Settings">
-        <main className="dashboard-body-inner">
-          <div className="dashboard-empty-auth">
-            <h1>Connect your account</h1>
-            <p>Sign in to manage your Teep settings.</p>
-            <button type="button" className="btn-primary" onClick={login}>Connect</button>
-          </div>
-        </main>
-      </DashboardShell>
-    );
+    return <DashboardConnectPage title="Settings" />;
   }
 
-  const tabs: Array<{ id: SettingsTab; icon: string; label: string; detail: string; ready?: boolean }> = [
+  const allTabs = [
     { id: "identity", icon: "badge", label: "Identity", detail: "Username and account" },
     { id: "tipping", icon: "payments", label: "Tipping", detail: "Extension default" },
     { id: "receipts", icon: "receipt_long", label: "Receipts", detail: "Sharing and exports" },
-    { id: "funding", icon: "account_balance_wallet", label: "Funding", detail: "Funding and withdrawals" },
+    { id: "funding", icon: "account_balance_wallet", label: isCreatorSettings ? "Payouts" : "Funding", detail: isCreatorSettings ? "Destination and history" : "Funding and withdrawals" },
+    { id: "grow", icon: "psychiatry", label: "Grow Tips", detail: "Strategy preferences" },
     { id: "notifications", icon: "notifications", label: "Notifications", detail: "Account alerts" },
     { id: "privacy", icon: "shield", label: "Privacy", detail: "Visibility and safety" },
+    { id: "engagement", icon: "volunteer_activism", label: "Engagement", detail: "Supporter follow-up" },
     { id: "support", icon: "help", label: "Support", detail: "Help and policies" },
-  ];
+  ] satisfies Array<{ id: SettingsTab; icon: string; label: string; detail: string; ready?: boolean }>;
+  const tabs = allTabs.filter((tab) => isCreatorSettings || (tab.id !== "grow" && tab.id !== "engagement"));
+  const currentTab = tabs.some((tab) => tab.id === activeTab) ? activeTab : "identity";
 
   return (
     <DashboardShell
@@ -548,7 +681,7 @@ export default function DashboardSettings() {
           <div className="dashboard-page-heading">
             <div>
               <h1>Settings</h1>
-              <p>Manage the account details and product preferences that shape your Teep experience across the dashboard and extension.</p>
+              <p>{isCreatorSettings ? "Manage creator payouts, growth preferences, supporter engagement, and the shared Teep settings used across your account." : "Manage the account details and product preferences that shape your Teep experience across the dashboard and extension."}</p>
             </div>
             <button type="button" className={hasUnsavedChanges ? "btn-primary" : "btn-secondary"} onClick={saveSettings} disabled={savingSettings || loadingSettings || !hasUnsavedChanges}>
               {savingSettings ? "Saving..." : hasUnsavedChanges ? "Save Changes" : "Saved"}
@@ -558,7 +691,7 @@ export default function DashboardSettings() {
           <div className="dashboard-settings-workspace">
             <nav className="dashboard-settings-menu" aria-label="Settings sections">
               {tabs.map((tab) => (
-                <button key={tab.id} type="button" className={activeTab === tab.id ? "is-active" : ""} onClick={() => switchTab(tab.id)}>
+                <button key={tab.id} type="button" className={currentTab === tab.id ? "is-active" : ""} onClick={() => switchTab(tab.id)}>
                   <span className="material-symbols-outlined" aria-hidden>{tab.icon}</span>
                   <span><strong>{tab.label}</strong><small>{tab.detail}</small></span>
                 </button>
@@ -566,7 +699,7 @@ export default function DashboardSettings() {
             </nav>
 
             <section className="dashboard-settings-panel">
-              {activeTab === "identity" && (
+              {currentTab === "identity" && (
                 <>
                   <div className="dashboard-settings-panel-head">
                     <div><h3>Identity</h3><p>Choose the public username Teep uses on receipts, direct tips, referral records, and account-facing surfaces.</p></div>
@@ -616,13 +749,23 @@ export default function DashboardSettings() {
                             </button>
                           </div>
                         </div>
+                        {isCreatorSettings && (
+                          <div className="dashboard-settings-row">
+                            <span>Connected X account</span>
+                            <strong>
+                              {settings.creatorIdentity?.username
+                                ? `@${settings.creatorIdentity.username.replace(/^@/, "")}`
+                                : "No verified X account connected"}
+                            </strong>
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
                 </>
               )}
 
-              {activeTab === "tipping" && (
+              {currentTab === "tipping" && (
                 <>
                   <div className="dashboard-settings-panel-head">
                     <div><h3>Tipping preferences</h3><p>Set the default amount the Teep extension pre-fills when you tip from supported social posts.</p></div>
@@ -648,7 +791,7 @@ export default function DashboardSettings() {
                 </>
               )}
 
-              {activeTab === "receipts" && (
+              {currentTab === "receipts" && (
                 <>
                   <div className="dashboard-settings-panel-head">
                     <div><h3>Receipts and sharing</h3><p>Every tip gets an in-house Teep receipt. These controls are persisted for receipt/share surfaces.</p></div>
@@ -661,12 +804,54 @@ export default function DashboardSettings() {
                 </>
               )}
 
-              {activeTab === "funding" && (
+              {currentTab === "funding" && (
                 <>
                   <div className="dashboard-settings-panel-head">
-                    <div><h3>Funding and withdrawals</h3><p>Review money added to and withdrawn from your Teep account.</p></div>
+                    <div><h3>{isCreatorSettings ? "Payouts" : "Funding and withdrawals"}</h3><p>{isCreatorSettings ? "Set creator payout defaults and review money moving in or out of your Teep account." : "Review money added to and withdrawn from your Teep account."}</p></div>
                   </div>
                   <div className="dashboard-settings-panel-body">
+                    {isCreatorSettings && (
+                      <div className="dashboard-settings-subcard">
+                        <h4>Payout defaults</h4>
+                        <p>These preferences help prefill withdrawal flows. Live withdrawals still require account confirmation.</p>
+                        <div className="dashboard-settings-two-col">
+                          <div className="dashboard-settings-field">
+                            <label htmlFor="payout-destination">Default withdrawal destination</label>
+                            <div className="dashboard-settings-input-row is-editing">
+                              <span className="material-symbols-outlined" aria-hidden>account_balance_wallet</span>
+                              <input
+                                id="payout-destination"
+                                value={settings.payout.defaultDestination}
+                                onChange={(event) => updateSettings({ payout: { ...settings.payout, defaultDestination: event.target.value.trim() } })}
+                                placeholder="0x..."
+                                spellCheck={false}
+                              />
+                            </div>
+                          </div>
+                          <div className="dashboard-settings-field">
+                            <label>Withdrawal confirmation</label>
+                            <div className="dashboard-settings-segmented" role="group" aria-label="Withdrawal confirmation preference">
+                              {(["email", "wallet", "both"] as const).map((value) => (
+                                <button
+                                  key={value}
+                                  type="button"
+                                  className={settings.payout.confirmationPreference === value ? "is-active" : ""}
+                                  onClick={() => updateSettings({ payout: { ...settings.payout, confirmationPreference: value } })}
+                                >
+                                  {value === "email" ? "Email" : value === "wallet" ? "Wallet" : "Both"}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="dashboard-settings-list">
+                          <div className="dashboard-settings-list-row">
+                            <div><strong>Payout notifications</strong><span>Notify me when withdrawals and payout-related events complete.</span></div>
+                            <Toggle checked={settings.payout.notifications} onChange={(next) => updateSettings({ payout: { ...settings.payout, notifications: next } })} />
+                          </div>
+                        </div>
+                      </div>
+                    )}
                     <div className="dashboard-settings-history-card">
                       <div className="dashboard-settings-history-card-head">
                         <div>
@@ -716,7 +901,12 @@ export default function DashboardSettings() {
                       <div className="dashboard-settings-table">
                         <div className="dashboard-settings-table-row dashboard-settings-table-row--withdrawal is-head"><div>Type</div><div>Amount</div><div>Date</div><div>Status</div></div>
                         {withdrawalLoading && withdrawalRecords.length === 0 ? <div className="dashboard-settings-table-empty dashboard-settings-table-empty--syncing">Syncing latest withdrawal activity...</div> : withdrawalRecords.length === 0 ? <div className="dashboard-settings-table-empty">No withdrawals yet.</div> : withdrawalRecords.map((record) => (
-                          <div className="dashboard-settings-table-row dashboard-settings-table-row--withdrawal" key={record.txHash}><div data-label="Type">{withdrawalActivityLabel(record)}</div><div data-label="Amount">{formatUsdRaw(record.amountRaw)}</div><div data-label="Date">{formatDate(record.createdAt)}</div><div data-label="Status"><span className="dashboard-settings-status-pill is-success">Completed</span></div></div>
+                          <div className="dashboard-settings-table-row dashboard-settings-table-row--withdrawal" key={`${record.txHash || record.createdAt}-${record.source}`}>
+                            <div data-label="Type">{withdrawalActivityLabel(record)}<small>To {withdrawalDestinationLabel(record)}</small></div>
+                            <div data-label="Amount">{formatUsdRaw(record.amountRaw)}</div>
+                            <div data-label="Date">{formatDate(record.createdAt)}</div>
+                            <div data-label="Status"><span className="dashboard-settings-status-pill is-success">Completed</span></div>
+                          </div>
                         ))}
                       </div>
                       <Pagination page={withdrawalPage} total={withdrawalTotal} onPage={setWithdrawalPage} />
@@ -725,7 +915,65 @@ export default function DashboardSettings() {
                 </>
               )}
 
-              {activeTab === "notifications" && (
+              {currentTab === "grow" && (
+                <>
+                  <div className="dashboard-settings-panel-head">
+                    <div><h3>Grow Tips</h3><p>Choose the default growth option and how much risk detail Teep should show before you opt in.</p></div>
+                  </div>
+                  <div className="dashboard-settings-panel-body">
+                    <div className="dashboard-settings-subcard">
+                      <h4>Default strategy preference</h4>
+                      <p>This preselects a strategy on Grow Tips. It never starts a position automatically.</p>
+                      <div className="dashboard-settings-choice-list">
+                        {[
+                          { id: "teep-treasury-stable", name: "Teep Treasury (Stable)", detail: "Lower-risk capital preservation", meta: "3.8% APY" },
+                          { id: "morpho-usdc-yield", name: "Morpho USDC Yield", detail: "Optimized lending on Base", meta: "4.8% APY" },
+                        ].map((strategy) => (
+                          <button
+                            key={strategy.id}
+                            type="button"
+                            className={settings.growTips.defaultStrategyId === strategy.id ? "is-active" : ""}
+                            onClick={() => updateSettings({ growTips: { ...settings.growTips, defaultStrategyId: strategy.id } })}
+                          >
+                            <span className="material-symbols-outlined" aria-hidden>{strategy.id.includes("morpho") ? "account_balance" : "shield"}</span>
+                            <span><strong>{strategy.name}</strong><small>{strategy.detail}</small></span>
+                            <em>{strategy.meta}</em>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="dashboard-settings-subcard">
+                      <h4>Risk and timing</h4>
+                      <div className="dashboard-settings-two-col">
+                        <div className="dashboard-settings-field">
+                          <label>Risk visibility level</label>
+                          <div className="dashboard-settings-segmented" role="group" aria-label="Grow Tips risk visibility level">
+                            {(["minimal", "standard", "detailed"] as const).map((value) => (
+                              <button
+                                key={value}
+                                type="button"
+                                className={settings.growTips.riskVisibilityLevel === value ? "is-active" : ""}
+                                onClick={() => updateSettings({ growTips: { ...settings.growTips, riskVisibilityLevel: value } })}
+                              >
+                                {value === "minimal" ? "Light" : value === "standard" ? "Standard" : "Detailed"}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="dashboard-settings-list">
+                          <div className="dashboard-settings-list-row">
+                            <div><strong>Maturity and exit reminders</strong><span>Remind me when a strategy has an exit window or important timing update.</span></div>
+                            <Toggle checked={settings.growTips.maturityExitReminders} onChange={(next) => updateSettings({ growTips: { ...settings.growTips, maturityExitReminders: next } })} />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {currentTab === "notifications" && (
                 <>
                   <div className="dashboard-settings-panel-head">
                     <div><h3>Notifications</h3><p>Choose which account alerts Teep should send when activity changes.</p></div>
@@ -735,12 +983,21 @@ export default function DashboardSettings() {
                       <div className="dashboard-settings-list-row"><div><strong>Creator claimed funds</strong><span>Notify me when a creator claims tips I sent.</span></div><Toggle checked={settings.notifications.creatorClaimed} onChange={(next) => updateSettings({ notifications: { ...settings.notifications, creatorClaimed: next } })} /></div>
                       <div className="dashboard-settings-list-row"><div><strong>Low balance</strong><span>Warn me when my balance drops below my default tip amount.</span></div><Toggle checked={settings.notifications.lowBalance} onChange={(next) => updateSettings({ notifications: { ...settings.notifications, lowBalance: next } })} /></div>
                       <div className="dashboard-settings-list-row"><div><strong>Receipt ready</strong><span>Notify me when a Teep receipt is ready to view or share.</span></div><Toggle checked={settings.notifications.receiptReady} onChange={(next) => updateSettings({ notifications: { ...settings.notifications, receiptReady: next } })} /></div>
+                      {isCreatorSettings && (
+                        <>
+                          <div className="dashboard-settings-list-row"><div><strong>New tip</strong><span>Notify me when a supporter sends a new tip to my creator account.</span></div><Toggle checked={settings.notifications.newTip} onChange={(next) => updateSettings({ notifications: { ...settings.notifications, newTip: next } })} /></div>
+                          <div className="dashboard-settings-list-row"><div><strong>Repeat supporter</strong><span>Notify me when someone backs my work more than once.</span></div><Toggle checked={settings.notifications.repeatSupporter} onChange={(next) => updateSettings({ notifications: { ...settings.notifications, repeatSupporter: next } })} /></div>
+                          <div className="dashboard-settings-list-row"><div><strong>Claim-wallet activity</strong><span>Notify me about creator claim-wallet deployment and activity.</span></div><Toggle checked={settings.notifications.claimWalletActivity} onChange={(next) => updateSettings({ notifications: { ...settings.notifications, claimWalletActivity: next } })} /></div>
+                          <div className="dashboard-settings-list-row"><div><strong>Withdrawal completed</strong><span>Notify me when a payout or withdrawal is completed.</span></div><Toggle checked={settings.notifications.withdrawalCompleted} onChange={(next) => updateSettings({ notifications: { ...settings.notifications, withdrawalCompleted: next } })} /></div>
+                          <div className="dashboard-settings-list-row"><div><strong>Grow Tips status</strong><span>Notify me when a growth strategy status changes.</span></div><Toggle checked={settings.notifications.growTipsStatus} onChange={(next) => updateSettings({ notifications: { ...settings.notifications, growTipsStatus: next } })} /></div>
+                        </>
+                      )}
                     </div>
                   </div>
                 </>
               )}
 
-              {activeTab === "privacy" && (
+              {currentTab === "privacy" && (
                 <>
                   <div className="dashboard-settings-panel-head">
                     <div><h3>Privacy and safety</h3><p>These controls are persisted and should be enforced across public receipts, profiles, activity, and sharing.</p></div>
@@ -749,6 +1006,12 @@ export default function DashboardSettings() {
                     <div className="dashboard-settings-list">
                       <div className="dashboard-settings-list-row"><div><strong>Hide account address publicly</strong><span>Use username and receipt identity instead across public Teep pages.</span></div><Toggle checked={settings.privacy.hideAddress} onChange={(next) => updateSettings({ privacy: { ...settings.privacy, hideAddress: next } })} /></div>
                       <div className="dashboard-settings-list-row"><div><strong>Private activity by default</strong><span>Dashboard activity is private unless you explicitly share a receipt.</span></div><Toggle checked={settings.privacy.privateActivity} onChange={(next) => updateSettings({ privacy: { ...settings.privacy, privateActivity: next } })} /></div>
+                      {isCreatorSettings && (
+                        <>
+                          <div className="dashboard-settings-list-row"><div><strong>Hide supporter names publicly</strong><span>Public creator profile proof keeps totals visible but anonymizes supporter identities.</span></div><Toggle checked={settings.privacy.hideSupporterNamesPublicly} onChange={(next) => updateSettings({ privacy: { ...settings.privacy, hideSupporterNamesPublicly: next } })} /></div>
+                          <div className="dashboard-settings-list-row"><div><strong>Hide growth activity</strong><span>Keep Grow Tips activity out of public creator-facing surfaces.</span></div><Toggle checked={settings.privacy.hideGrowthActivity} onChange={(next) => updateSettings({ privacy: { ...settings.privacy, hideGrowthActivity: next } })} /></div>
+                        </>
+                      )}
                       <div className="dashboard-settings-list-row"><div><strong>Require confirmation for sensitive changes</strong><span>Ask for an extra confirmation before privacy, export, or account deletion actions.</span></div><Toggle checked={settings.privacy.requireVerification} onChange={(next) => updateSettings({ privacy: { ...settings.privacy, requireVerification: next } })} /></div>
                     </div>
                     <div className="dashboard-settings-actions"><button type="button" className="btn-secondary" onClick={exportMyData}>Export My Data</button><button type="button" className="dashboard-danger-btn" onClick={() => { setDeactivateConfirmOpen(true); setDeactivateMsg(""); setDeactivateText(""); }}>Delete Account</button></div>
@@ -756,7 +1019,36 @@ export default function DashboardSettings() {
                 </>
               )}
 
-              {activeTab === "support" && (
+              {currentTab === "engagement" && (
+                <>
+                  <div className="dashboard-settings-panel-head">
+                    <div><h3>Supporter engagement</h3><p>Set creator follow-up defaults for thanking supporters without making the workflow noisy.</p></div>
+                  </div>
+                  <div className="dashboard-settings-panel-body">
+                    <div className="dashboard-settings-subcard">
+                      <h4>Thank-you defaults</h4>
+                      <div className="dashboard-settings-field">
+                        <label htmlFor="thank-you-message">Default thank-you message</label>
+                        <textarea
+                          id="thank-you-message"
+                          className="dashboard-settings-textarea"
+                          value={settings.engagement.defaultThankYouMessage}
+                          onChange={(event) => updateSettings({ engagement: { ...settings.engagement, defaultThankYouMessage: event.target.value.slice(0, 280) } })}
+                          maxLength={280}
+                          rows={4}
+                        />
+                        <p>{settings.engagement.defaultThankYouMessage.length}/280 characters</p>
+                      </div>
+                    </div>
+                    <div className="dashboard-settings-list">
+                      <div className="dashboard-settings-list-row"><div><strong>Auto-suggest X thank-you copy</strong><span>Prefill a short X post when you choose to thank supporters.</span></div><Toggle checked={settings.engagement.autoSuggestXThankYou} onChange={(next) => updateSettings({ engagement: { ...settings.engagement, autoSuggestXThankYou: next } })} /></div>
+                      <div className="dashboard-settings-list-row"><div><strong>Repeat supporter reminders</strong><span>Surface repeat supporters in creator performance and engagement prompts.</span></div><Toggle checked={settings.engagement.repeatSupporterReminders} onChange={(next) => updateSettings({ engagement: { ...settings.engagement, repeatSupporterReminders: next } })} /></div>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {currentTab === "support" && (
                 <>
                   <div className="dashboard-settings-panel-head">
                     <div><h3>Support and policies</h3><p>Operational links stay separate from core product settings.</p></div>

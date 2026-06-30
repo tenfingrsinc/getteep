@@ -1,7 +1,15 @@
 const IS_PRODUCTION = import.meta.env.PROD;
 const trimTrailingSlash = (value: string) => value.replace(/\/+$/, "");
+const browserOrigin = typeof window !== "undefined" ? window.location.origin : "";
+const configuredApiUrl = import.meta.env.VITE_API_URL;
+const shouldUseSecureSameOriginApi =
+  typeof window !== "undefined" &&
+  window.location.protocol === "https:" &&
+  /^http:\/\//i.test(configuredApiUrl || "");
 
-export const API_BASE = import.meta.env.VITE_API_URL || (IS_PRODUCTION ? "" : "http://localhost:3001");
+export const API_BASE = shouldUseSecureSameOriginApi
+  ? ""
+  : configuredApiUrl ?? (IS_PRODUCTION ? "" : "http://localhost:3001");
 const RAW_CHROME_STORE_URL = import.meta.env.VITE_CHROME_STORE_URL || "";
 export const HAS_CHROME_STORE_LISTING = !!RAW_CHROME_STORE_URL && !/PLACEHOLDER|REPLACE_WITH_EXTENSION_ID/i.test(RAW_CHROME_STORE_URL);
 export const CHROME_STORE_URL = HAS_CHROME_STORE_LISTING ? RAW_CHROME_STORE_URL : "/support";
@@ -12,10 +20,25 @@ export const TWITTER_URL = import.meta.env.VITE_TWITTER_URL || "https://x.com/te
 export const DISCORD_URL = import.meta.env.VITE_DISCORD_URL || "#";
 
 /** Web app base URL (for redirects from extension) */
-export const WEB_APP_URL = trimTrailingSlash(import.meta.env.VITE_WEB_APP_URL || (typeof window !== "undefined" ? `${window.location.origin}` : "https://getteep.xyz"));
+const configuredWebAppUrl = import.meta.env.VITE_WEB_APP_URL || "";
+const configuredReceiptUrl = import.meta.env.VITE_RECEIPT_BASE_URL || "";
+const shouldUseBrowserOrigin = (configuredUrl: string) =>
+  !!browserOrigin &&
+  window.location.protocol === "https:" &&
+  /^http:\/\//i.test(configuredUrl);
+
+export const WEB_APP_URL = trimTrailingSlash(
+  shouldUseBrowserOrigin(configuredWebAppUrl)
+    ? browserOrigin
+    : configuredWebAppUrl || browserOrigin || "https://getteep.xyz",
+);
 
 /** Primary domain for receipt/tx links (e.g. when sharing tip on X). Use tipcoin.xyz in production. */
-export const RECEIPT_BASE_URL = trimTrailingSlash(import.meta.env.VITE_RECEIPT_BASE_URL || (typeof window !== "undefined" ? window.location.origin : "https://getteep.xyz"));
+export const RECEIPT_BASE_URL = trimTrailingSlash(
+  shouldUseBrowserOrigin(configuredReceiptUrl)
+    ? browserOrigin
+    : configuredReceiptUrl || browserOrigin || "https://getteep.xyz",
+);
 
 /** Privy - same app as extension for shared identity */
 export const PRIVY_APP_ID = import.meta.env.VITE_PRIVY_APP_ID || "cmoslas9401se0cjx2g6mk2a3";

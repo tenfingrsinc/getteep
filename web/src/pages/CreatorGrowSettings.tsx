@@ -15,6 +15,15 @@ export default function CreatorGrowSettings() {
         { title: "System rules stay system rules", body: "Do not turn required confirmations or post/direct distinctions into preferences.", icon: "rule" },
         { title: "Persisted settings only", body: "Every toggle or field must be backed by database or strategy logic.", icon: "database" },
       ]}
+      overlay={
+        <div className="creator-coming-soon-card">
+          <span className="material-symbols-outlined" aria-hidden>lock_clock</span>
+          <div>
+            <strong>Coming soon</strong>
+            <p>Grow settings open only after live strategy preferences are enforceable by the backend and provider routes.</p>
+          </div>
+        </div>
+      }
     />
   );
 }

@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { useCreateWallet, usePrivy, useWallets } from "@privy-io/react-auth";
 import { useSmartWallets } from "@privy-io/react-auth/smart-wallets";
-import { getAvatarUrls } from "@teep/shared";
 import { parseUnits } from "viem";
 import { arcTestnet } from "../chains";
 import { API_BASE, CHROME_STORE_URL, HAS_CHROME_STORE_LISTING, USDC_ADDRESS } from "../config";
@@ -11,12 +10,25 @@ import LoginModal from "../components/LoginModal";
 import ConfirmTipModal from "../components/ConfirmTipModal";
 import RechargePrompt from "../components/RechargePrompt";
 import Icon from "../components/Icon";
+import { avatarErrorFallback, localInitialsAvatar, xAvatarUrl } from "../lib/avatar";
 
 const PENDING_TIP_KEY = "teep_pending_tip";
+const STATIC_HERO_POST = {
+  handle: "pipsandbills",
+  tweetId: "1969711154847977844",
+  url: "https://x.com/pipsandbills/status/1969711154847977844",
+};
 
 interface Stats {
   totalTips: number;
   totalVolumeUsd: string;
+  distinctTippers: number;
+  verifiedCreators: number;
+}
+
+interface AnimatedStats {
+  totalTips: number;
+  totalVolumeUsd: number;
   distinctTippers: number;
   verifiedCreators: number;
 }
@@ -26,6 +38,14 @@ interface RecentTip {
   creatorUsername: string | null;
   postAuthorHandle?: string | null;
   fromAddress: string;
+  fromIdentity?: {
+    displayName?: string | null;
+    teepUsername?: string | null;
+    socialXHandle?: string | null;
+    creatorUsername?: string | null;
+    creatorDisplayName?: string | null;
+    profileImageUrl?: string | null;
+  } | null;
   timestamp: number;
   postUrl?: string | null;
 }
@@ -36,23 +56,6 @@ interface PendingTip {
   tweetId: string;
 }
 
-function parsePostUrl(url: string): { authorHandle: string; tweetId: string } | null {
-  const trimmed = url.trim();
-  const match = trimmed.match(
-    /(?:https?:\/\/)?(?:www\.)?(?:twitter\.com|x\.com|mobile\.twitter\.com)\/([^/]+)\/(?:status|article)\/(\d+)/i
-  );
-  if (!match) return null;
-  const authorHandle = match[1].replace(/^@/, "");
-  const tweetId = match[2];
-  if (authorHandle.toLowerCase() === "i" || !authorHandle || !tweetId) return null;
-  return { authorHandle, tweetId };
-}
-
-function truncateAddress(addr: string): string {
-  if (!addr || addr.length < 12) return addr;
-  return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
-}
-
 function XLogoIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="currentColor" width="18" height="18" aria-hidden>
@@ -61,183 +64,23 @@ function XLogoIcon({ className }: { className?: string }) {
   );
 }
 
-/* Animated dot-matrix decorations, echoing the reference hero: pixel
-   "clouds" that flicker in and dissolve, plus digital-rain streaks.
-   Deterministic PRNG so every render produces the same cluster. */
-function mulberry32(seed: number) {
-  let a = seed >>> 0;
-  return () => {
-    a += 0x6d2b79f5;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
+const GROW_TIPS_PREVIEW_YIELD = "$14.27+";
+
+function usernameFallback(email?: string | null) {
+  const local = email?.includes("@") ? email.split("@")[0] : "";
+  const cleaned = local
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 24);
+  return cleaned.length >= 3 ? cleaned : "";
 }
-
-const PX_COLORS = ["#5b2ee5", "#8f6cf0", "#b9aa8f", "#c7c0b0"];
-
-interface PxCell {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  color: string;
-  delay: number;
-  dur: number;
-}
-
-function PixelCloud({
-  className,
-  seed,
-  variant = "cloud",
-}: {
-  className: string;
-  seed: number;
-  variant?: "cloud" | "rain";
-}) {
-  const cells = useMemo<PxCell[]>(() => {
-    const rnd = mulberry32(seed);
-    const out: PxCell[] = [];
-    if (variant === "rain") {
-      for (let c = 0; c < 9; c++) {
-        const x = 3 + c * 9;
-        let y = rnd() * 18;
-        while (y < 112) {
-          const h = 6 + rnd() * 16;
-          if (rnd() < 0.7) {
-            out.push({
-              x,
-              y,
-              w: 2.5,
-              h,
-              color: PX_COLORS[Math.floor(rnd() * PX_COLORS.length)],
-              delay: rnd() * 4,
-              dur: 2 + rnd() * 3,
-            });
-          }
-          y += h + 4 + rnd() * 14;
-        }
-      }
-    } else {
-      const cols = 12;
-      const rows = 9;
-      for (let i = 0; i < cols; i++) {
-        for (let j = 0; j < rows; j++) {
-          const dx = (i - cols / 2) / (cols / 2);
-          const dy = (j - rows / 2) / (rows / 2);
-          const dist = Math.sqrt(dx * dx + dy * dy);
-          if (rnd() < 0.8 - dist * 0.6) {
-            out.push({
-              x: i * 7 + rnd() * 2,
-              y: j * 7 + rnd() * 2,
-              w: 3 + rnd() * 1.5,
-              h: 3.5 + rnd() * 2,
-              color: PX_COLORS[Math.floor(rnd() * PX_COLORS.length)],
-              delay: rnd() * 5,
-              dur: 2.5 + rnd() * 3.5,
-            });
-          }
-        }
-      }
-    }
-    return out;
-  }, [seed, variant]);
-
-  const viewBox = variant === "rain" ? "0 0 84 118" : "0 0 90 70";
-  const width = variant === "rain" ? 100 : 132;
-  return (
-    <svg className={`lp-px ${className}`} viewBox={viewBox} width={width} aria-hidden>
-      {cells.map((c, i) => (
-        <rect
-          key={i}
-          x={c.x}
-          y={c.y}
-          width={c.w}
-          height={c.h}
-          fill={c.color}
-          className="lp-px-cell"
-          style={{ animationDelay: `${c.delay}s`, animationDuration: `${c.dur}s` }}
-        />
-      ))}
-    </svg>
-  );
-}
-
-/* Thin line-art illustrations for the platform grid, echoing the reference cards */
-function PlatformArt({ kind }: { kind: "instant" | "waiting" | "custody" | "native" }) {
-  if (kind === "instant") {
-    return (
-      <svg className="lp-card-art" viewBox="0 0 220 120" aria-hidden>
-        <g fill="none" stroke="currentColor" strokeWidth="1.5">
-          <path d="M40 96a70 70 0 0 1 140 0" opacity="0.35" />
-          <path d="M58 96a52 52 0 0 1 104 0" opacity="0.6" />
-          <path d="M76 96a34 34 0 0 1 68 0" />
-          <circle cx="110" cy="96" r="10" />
-          <path d="M110 90v8M106 94h8" strokeWidth="1.2" />
-        </g>
-        <g fill="currentColor">
-          <rect x="30" y="30" width="3" height="3" />
-          <rect x="186" y="42" width="3" height="3" />
-          <rect x="170" y="22" width="3" height="3" />
-        </g>
-      </svg>
-    );
-  }
-  if (kind === "waiting") {
-    return (
-      <svg className="lp-card-art" viewBox="0 0 220 120" aria-hidden>
-        <g fill="none" stroke="currentColor" strokeWidth="1.5">
-          <rect x="70" y="56" width="80" height="44" rx="6" />
-          <path d="M70 70h80" opacity="0.5" />
-          <circle cx="110" cy="34" r="12" />
-          <path d="M106 34h8M110 30v8" strokeWidth="1.2" />
-          <path d="M110 46v10" strokeDasharray="3 4" />
-          <circle cx="134" cy="84" r="7" opacity="0.7" />
-        </g>
-        <g fill="currentColor">
-          <rect x="46" y="44" width="3" height="3" />
-          <rect x="172" y="50" width="3" height="3" />
-        </g>
-      </svg>
-    );
-  }
-  if (kind === "custody") {
-    return (
-      <svg className="lp-card-art" viewBox="0 0 220 120" aria-hidden>
-        <g fill="none" stroke="currentColor" strokeWidth="1.5">
-          <path d="M110 22 144 34v26c0 20-14 33-34 40-20-7-34-20-34-40V34Z" />
-          <path d="m98 60 9 9 16-18" />
-          <circle cx="62" cy="86" r="5" opacity="0.5" />
-          <circle cx="160" cy="78" r="5" opacity="0.5" />
-        </g>
-        <g fill="currentColor">
-          <rect x="48" y="36" width="3" height="3" />
-          <rect x="168" y="40" width="3" height="3" />
-        </g>
-      </svg>
-    );
-  }
-  return (
-    <svg className="lp-card-art" viewBox="0 0 220 120" aria-hidden>
-      <g fill="none" stroke="currentColor" strokeWidth="1.5">
-        <rect x="48" y="24" width="124" height="72" rx="8" />
-        <circle cx="68" cy="42" r="8" />
-        <path d="M84 38h52M84 48h36" opacity="0.5" />
-        <path d="M60 80h14M88 80h14" opacity="0.5" />
-        <rect x="124" y="72" width="40" height="16" rx="8" />
-        <path d="m136 80 3-4 1.5 4 3-4 1.5 4" strokeWidth="1.2" />
-      </g>
-    </svg>
-  );
-}
-
-const POWERED_BY = ["Arc", "USDC", "Circle", "Privy", "viem", "Chrome", "Hardhat", "X"];
 
 const FAQ_ITEMS: Array<{ q: string; a: ReactNode }> = [
   {
     q: "What is Teep?",
-    a: "Teep lets fans tip creators directly from supported posts. Creators can claim, withdraw, or grow tips from a simple creator dashboard.",
+    a: "Teep is a social finance platform where people support creators and communities, while creators receive, withdraw, or grow what they earn. It works through the web app, browser extension, and connected social prompts.",
   },
   {
     q: "Does Teep hold my funds?",
@@ -252,12 +95,16 @@ const FAQ_ITEMS: Array<{ q: string; a: ReactNode }> = [
     ),
   },
   {
-    q: "Can creators grow their tips?",
-    a: "Grow Tips is designed to let creators put idle tip balances to work while keeping the tipping experience simple. Availability depends on the beta rollout.",
+    q: "What does Grow Tips do?",
+    a: "Grow Tips gives creators optional ways to put idle tip balances to work. Strategy, risk, estimated return, and exit details remain available before any action.",
   },
   {
     q: "What happens if a creator has not set up Teep yet?",
     a: "They can still receive tips. Teep links tips to the creator's social account, and they can claim or manage their balance whenever they choose to connect.",
+  },
+  {
+    q: "Is Teep live?",
+    a: "Teep is currently available as a beta on Arc testnet. Beta access lets users explore the product while the wider production release is being prepared.",
   },
 ];
 
@@ -281,10 +128,10 @@ export default function Home() {
   ).toLowerCase();
 
   const [stats, setStats] = useState<Stats | null>(null);
+  const [animatedStats, setAnimatedStats] = useState<AnimatedStats | null>(null);
+  const [proofInView, setProofInView] = useState(false);
   const [recentTips, setRecentTips] = useState<RecentTip[]>([]);
-  const [contentUrl, setContentUrl] = useState("");
   const [tipAmount, setTipAmount] = useState("5.00");
-  const [resolvedCreator, setResolvedCreator] = useState<string | null>(null);
   const [loginModalOpen, setLoginModalOpen] = useState(false);
   const [confirmModalOpen, setConfirmModalOpen] = useState(false);
   const [rechargeModalOpen, setRechargeModalOpen] = useState(false);
@@ -299,7 +146,11 @@ export default function Home() {
   const [createWalletLoading, setCreateWalletLoading] = useState(false);
   const [createWalletError, setCreateWalletError] = useState<string | null>(null);
   const [tipperVideoReady, setTipperVideoReady] = useState(false);
-  const [tipModalOpen, setTipModalOpen] = useState(false);
+  const tipAmountInputRef = useRef<HTMLInputElement>(null);
+  const heroStageRef = useRef<HTMLDivElement>(null);
+  const heroStoryLabelRef = useRef<HTMLSpanElement>(null);
+  const proofRef = useRef<HTMLElement>(null);
+  const howTabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const { createWallet } = useCreateWallet({
     onSuccess: () => {
       setCreateWalletLoading(false);
@@ -310,19 +161,6 @@ export default function Home() {
       setCreateWalletError(typeof err === "string" ? err : "Failed to create wallet");
     },
   });
-
-  useEffect(() => {
-    if (!tipModalOpen) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setTipModalOpen(false);
-    };
-    document.addEventListener("keydown", onKey);
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = "";
-    };
-  }, [tipModalOpen]);
 
   useEffect(() => {
     if (!import.meta.env.DEV || !ready || !authenticated) return;
@@ -358,6 +196,15 @@ export default function Home() {
   ]);
 
   useEffect(() => {
+    if (!ready || !authenticated || !address) return;
+    const preferredUsername = usernameFallback(user?.email?.address);
+    if (!preferredUsername) return;
+    fetch(`${API_BASE}/api/v1/wallet/${address}/settings?preferredUsername=${encodeURIComponent(preferredUsername)}`, {
+      cache: "no-store",
+    }).catch(() => {});
+  }, [ready, authenticated, address, user?.email?.address]);
+
+  useEffect(() => {
     fetch(`${API_BASE}/stats`).then((r) => r.json()).then(setStats).catch(() => {});
     const fetchRecent = () =>
       fetch(`${API_BASE}/stats/recent-tips?limit=10`)
@@ -380,15 +227,179 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (!contentUrl.trim()) {
-      setResolvedCreator(null);
+    const proof = proofRef.current;
+    if (!proof) return;
+    if (!("IntersectionObserver" in window)) {
+      setProofInView(true);
       return;
     }
-    const parsed = parsePostUrl(contentUrl);
-    setResolvedCreator(parsed ? parsed.authorHandle : null);
-  }, [contentUrl]);
 
-  const parsed = useMemo(() => (contentUrl.trim() ? parsePostUrl(contentUrl) : null), [contentUrl]);
+    const observer = new IntersectionObserver(
+      ([entry]) => setProofInView(entry.intersectionRatio >= 0.25),
+      { threshold: 0.25 },
+    );
+    observer.observe(proof);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!stats || !proofInView) return;
+
+    const finalStats: AnimatedStats = {
+      totalTips: stats.totalTips,
+      totalVolumeUsd: Number.parseFloat(stats.totalVolumeUsd) || 0,
+      distinctTippers: stats.distinctTippers,
+      verifiedCreators: stats.verifiedCreators,
+    };
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      setAnimatedStats(finalStats);
+      return;
+    }
+
+    let frame = 0;
+    const duration = 1200;
+    const startedAt = performance.now();
+    setAnimatedStats({
+      totalTips: 0,
+      totalVolumeUsd: 0,
+      distinctTippers: 0,
+      verifiedCreators: 0,
+    });
+
+    const animate = (now: number) => {
+      const progress = Math.min(1, (now - startedAt) / duration);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      setAnimatedStats({
+        totalTips: Math.round(finalStats.totalTips * eased),
+        totalVolumeUsd: finalStats.totalVolumeUsd * eased,
+        distinctTippers: Math.round(finalStats.distinctTippers * eased),
+        verifiedCreators: Math.round(finalStats.verifiedCreators * eased),
+      });
+      if (progress < 1) frame = window.requestAnimationFrame(animate);
+    };
+
+    frame = window.requestAnimationFrame(animate);
+    return () => window.cancelAnimationFrame(frame);
+  }, [proofInView, stats]);
+
+  useEffect(() => {
+    const stage = heroStageRef.current;
+    if (!stage) return;
+
+    const runway = stage.closest<HTMLElement>(".lp-hero-shell");
+    const post = stage.querySelector<HTMLElement>(".lp-stage-post");
+    const tip = stage.querySelector<HTMLElement>(".lp-stage-tip");
+    if (!runway || !post || !tip) return;
+
+    document.documentElement.classList.add("lp-scroll-demo-active");
+
+    let frame = 0;
+    let scrollStart = 0;
+    let scrollDistance = 1;
+
+    const clamp = (value: number) => Math.max(0, Math.min(1, value));
+    const shouldAnimate = () =>
+      window.matchMedia("(max-width: 767px)").matches &&
+      !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    const setGroup = (selector: string, groupProgress: number) => {
+      stage.querySelectorAll<HTMLElement>(selector).forEach((element) => {
+        element.style.opacity = String(groupProgress);
+        element.style.transform = `translateY(${14 * (1 - groupProgress)}px)`;
+      });
+    };
+
+    const clearPresentation = () => {
+      stage.style.removeProperty("--lp-reveal-progress");
+      runway.style.removeProperty("--lp-focus-opacity");
+      post.style.removeProperty("transform");
+      post.style.removeProperty("opacity");
+      tip.style.removeProperty("transform");
+      stage.querySelectorAll<HTMLElement>(".lp-stage-tip > *").forEach((element) => {
+        element.style.removeProperty("opacity");
+        element.style.removeProperty("transform");
+      });
+    };
+
+    const measure = () => {
+      const stageDocumentTop = stage.getBoundingClientRect().top + window.scrollY;
+      const runwayDocumentTop = runway.getBoundingClientRect().top + window.scrollY;
+      scrollStart = stageDocumentTop - 82;
+      const scrollEnd = runwayDocumentTop + runway.offsetHeight - window.innerHeight;
+      scrollDistance = Math.max(1, scrollEnd - scrollStart);
+    };
+
+    const render = () => {
+      frame = 0;
+      if (!shouldAnimate()) {
+        clearPresentation();
+        return;
+      }
+
+      const progress = clamp((window.scrollY - scrollStart) / scrollDistance);
+      const drawerProgress = clamp((progress - 0.12) / 0.4);
+      const drawerEase = 1 - Math.pow(1 - drawerProgress, 3);
+      const postProgress = clamp((progress - 0.08) / 0.46);
+      const creatorProgress = clamp((progress - 0.24) / 0.14);
+      const amountProgress = clamp((progress - 0.42) / 0.14);
+      const reviewProgress = clamp((progress - 0.6) / 0.14);
+      const focusIn = clamp(progress / 0.06);
+      const focusOut = clamp((1 - progress) / 0.06);
+      const focusOpacity = Math.min(focusIn, focusOut) * 0.92;
+
+      stage.style.setProperty("--lp-reveal-progress", progress.toFixed(3));
+      runway.style.setProperty("--lp-focus-opacity", focusOpacity.toFixed(3));
+      post.style.transform = `translateY(${-88 * postProgress}px) scale(${1 - 0.08 * postProgress})`;
+      post.style.opacity = String(1 - 0.72 * postProgress);
+      tip.style.transform = `translateY(${tip.offsetHeight * (1 - drawerEase)}px)`;
+      setGroup(".lp-stage-label, .lp-stage-tip > h2, #lp-stage-tip-help, .lp-stage-recipient", creatorProgress);
+      setGroup(".lp-stage-field, .lp-amount-chips", amountProgress);
+      setGroup(".lp-stage-tip > .lp-btn--block, .lp-create-wallet, .lp-stage-note", reviewProgress);
+
+      if (heroStoryLabelRef.current) {
+        heroStoryLabelRef.current.textContent =
+          progress < 0.25
+            ? "01 - Post highlighted"
+            : progress < 0.5
+              ? "02 - Creator detected"
+              : progress < 0.75
+                ? "03 - Amount selected"
+                : "04 - Review tip";
+      }
+    };
+
+    const queueRender = () => {
+      if (!frame) frame = window.requestAnimationFrame(render);
+    };
+
+    const handleResize = () => {
+      measure();
+      queueRender();
+    };
+
+    const resizeObserver = typeof ResizeObserver !== "undefined"
+      ? new ResizeObserver(handleResize)
+      : null;
+    resizeObserver?.observe(runway);
+    resizeObserver?.observe(stage);
+
+    measure();
+    render();
+    window.addEventListener("scroll", queueRender, { passive: true });
+    window.addEventListener("resize", handleResize);
+    window.addEventListener("load", handleResize);
+
+    return () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      document.documentElement.classList.remove("lp-scroll-demo-active");
+      clearPresentation();
+      window.removeEventListener("scroll", queueRender);
+      window.removeEventListener("resize", handleResize);
+      window.removeEventListener("load", handleResize);
+      resizeObserver?.disconnect();
+    };
+  }, []);
+
   const amountNum = parseFloat(tipAmount) || 0;
   const amountUsd = amountNum > 0 ? amountNum.toFixed(2) : "0.00";
 
@@ -401,8 +412,8 @@ export default function Home() {
   }, [address]);
 
   const handleSendTip = useCallback(async () => {
-    if (!ready || !parsed || amountNum <= 0) return;
-    const tip: PendingTip = { amountUsd, handle: parsed.authorHandle, tweetId: parsed.tweetId };
+    if (!ready || amountNum <= 0) return;
+    const tip: PendingTip = { amountUsd, handle: STATIC_HERO_POST.handle, tweetId: STATIC_HERO_POST.tweetId };
     setPendingTip(tip);
     if (!authenticated) {
       sessionStorage.setItem(PENDING_TIP_KEY, JSON.stringify(tip));
@@ -421,7 +432,7 @@ export default function Home() {
 
     setConfirmTipData(tip);
     setConfirmModalOpen(true);
-  }, [ready, parsed, amountNum, amountUsd, authenticated, fetchBalance]);
+  }, [ready, amountNum, amountUsd, authenticated, fetchBalance]);
 
   useEffect(() => {
     const stored = sessionStorage.getItem(PENDING_TIP_KEY);
@@ -565,6 +576,7 @@ export default function Home() {
           authorHandle: confirmTipData.handle,
           tweetId: confirmTipData.tweetId,
           detail: `Tipped @${confirmTipData.handle}`,
+          sourceMethod: "web_landing",
         }),
       }).catch(() => {});
 
@@ -579,174 +591,404 @@ export default function Home() {
     }
   }, [confirmTipData, smartWalletClient, address]);
 
+  const handleHowTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>, index: number) => {
+    const keys = ["ArrowLeft", "ArrowRight", "Home", "End"];
+    if (!keys.includes(event.key)) return;
+    event.preventDefault();
+    const lastIndex = howTabRefs.current.length - 1;
+    const nextIndex =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? lastIndex
+          : event.key === "ArrowRight"
+            ? (index + 1) % (lastIndex + 1)
+            : (index - 1 + lastIndex + 1) % (lastIndex + 1);
+    const nextTab = nextIndex === 0 ? "tippers" : "creators";
+    setHowTab(nextTab);
+    howTabRefs.current[nextIndex]?.focus();
+  };
+
   return (
     <div className="lp">
-      {/* Hero — centered statement, two CTAs, scattered glyphs */}
-      <section className="lp-hero">
-        <PixelCloud className="lp-px--1" seed={7} variant="cloud" />
-        <PixelCloud className="lp-px--2" seed={23} variant="rain" />
-        <PixelCloud className="lp-px--3" seed={41} variant="cloud" />
-        <PixelCloud className="lp-px--4" seed={59} variant="rain" />
-        <PixelCloud className="lp-px--5" seed={97} variant="cloud" />
-        <div className="lp-hero-inner">
-          <h1 className="lp-hero-title">
-            The tipping layer
-            <br />
-            for creators.
-          </h1>
-          <p className="lp-hero-sub">
-            Built on Arc. Teep lets fans support creators right from the post — instant, non-custodial, and in stable dollars.
-          </p>
-          <div className="lp-hero-ctas">
-            <a href={CHROME_STORE_URL} target="_blank" rel="noopener noreferrer" className="lp-btn lp-btn--primary">
-              <Icon name="puzzle" />
-              {HAS_CHROME_STORE_LISTING ? "Get the Extension" : "Join the Beta"}
-            </a>
-            <button type="button" className="lp-btn lp-btn--secondary" onClick={() => setTipModalOpen(true)}>
-              <Icon name="send" />
-              Send a tip
-            </button>
+      <section className="lp-hero" id="top">
+        <div className="lp-hero-art" aria-hidden="true">
+          <span className="lp-hero-glyph lp-hero-glyph--1"><Icon name="shield" /></span>
+          <span className="lp-hero-glyph lp-hero-glyph--2"><Icon name="send" /></span>
+          <span className="lp-hero-glyph lp-hero-glyph--3"><Icon name="coin" /></span>
+          <span className="lp-hero-glyph lp-hero-glyph--4"><Icon name="wallet" /></span>
+          <span className="lp-hero-glyph lp-hero-glyph--5"><Icon name="bolt" /></span>
+        </div>
+        <div className="lp-hero-shell">
+          <div className="lp-hero-copy">
+            <p className="lp-eyebrow"><Icon name="coin" /> Social finance for creators and communities</p>
+            <h1>Tip creators anywhere on the internet.</h1>
+            <div className="lp-hero-actions">
+              <a href="/dashboard" target="_blank" rel="noopener noreferrer" className="lp-btn lp-btn--primary"><Icon name="wallet" /> Launch App</a>
+              <a href={CHROME_STORE_URL} target={HAS_CHROME_STORE_LISTING ? "_blank" : undefined} rel={HAS_CHROME_STORE_LISTING ? "noopener noreferrer" : undefined} className="lp-btn lp-btn--secondary">
+                <Icon name="puzzle" /> Add to Chrome
+              </a>
+            </div>
+          </div>
+
+          <div className="lp-scroll-focus-backdrop" aria-hidden="true" />
+          <div ref={heroStageRef} className="lp-product-stage" aria-label="Teep tipping experience">
+            <div className="lp-scroll-story-status" aria-live="polite">
+              <span ref={heroStoryLabelRef}>01 - Post highlighted</span>
+              <span className="lp-scroll-story-track" aria-hidden="true" />
+            </div>
+            <div className="lp-stage-toolbar" aria-hidden="true"><span /><span /><span /><small>Connected social post · Teep active</small></div>
+            <div className="lp-stage-post">
+              <article className="lp-social-post" aria-label="X post preview by @pipsandbills">
+                <div className="lp-post-preview-label"><XLogoIcon /> X post preview</div>
+                <div className="lp-post-author">
+                  <span className="lp-post-avatar">PB</span>
+                  <div><strong>Alter Ego</strong><small>@pipsandbills · Sep 21, 2025</small></div>
+                  <a
+                    className="lp-post-more"
+                    href={STATIC_HERO_POST.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label="Open original post on X"
+                  >
+                    <XLogoIcon />
+                  </a>
+                </div>
+                <p className="lp-post-copy">
+                  I had a discussion with @mztacat recently where I had told him Aztec CM called out "airdrop farmers" but he jokingly replied and said he is a project contributor. That made me think: what does it really mean to be a contributor? What separates those who get four figures from those who...
+                </p>
+                <a
+                  className="lp-post-read-more"
+                  href={STATIC_HERO_POST.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Read full post on X
+                </a>
+                <div className="lp-post-media" aria-label="Post theme preview">
+                  <div className="lp-post-media-copy">
+                    <span>Community contribution</span>
+                    <strong>What separates participation from real contribution?</strong>
+                  </div>
+                  <div className="lp-post-media-icon"><Icon name="coin" /></div>
+                </div>
+                <div className="lp-post-actions">
+                  <span aria-hidden>Reply</span><span aria-hidden>Repost</span>
+                  <button type="button" className="lp-post-action-icon" aria-label="Like preview"><Icon name="heart" /></button>
+                  <button type="button" onClick={() => tipAmountInputRef.current?.focus()}><Icon name="send" /> Tip</button>
+                  <a className="lp-post-action-icon" href={STATIC_HERO_POST.url} target="_blank" rel="noopener noreferrer" aria-label="Open original post on X"><Icon name="externalLink" /></a>
+                </div>
+              </article>
+            </div>
+
+            <form className="lp-stage-tip" aria-labelledby="lp-stage-tip-title" onSubmit={(event) => { event.preventDefault(); handleSendTip(); }}>
+              <p className="lp-stage-label"><Icon name="send" /> Teep tip</p>
+              <h2 id="lp-stage-tip-title">Support this post</h2>
+              <p id="lp-stage-tip-help">Choose an amount to support the highlighted post.</p>
+              <div className="lp-stage-recipient" aria-live="polite">
+                <span className="lp-post-avatar">PB</span>
+                <div><strong>@{STATIC_HERO_POST.handle}</strong><small>Author of the highlighted post</small></div>
+                <Icon name="checkCircle" />
+              </div>
+              <label className="lp-stage-field" htmlFor="lp-hero-tip-amount">
+                <span>Tip amount</span>
+                <div className="lp-stage-amount"><span aria-hidden>$</span><input ref={tipAmountInputRef} id="lp-hero-tip-amount" type="number" min="0.01" step="0.01" value={tipAmount} onChange={(event) => setTipAmount(event.target.value)} /><small>USD</small></div>
+              </label>
+              <div className="lp-amount-chips" aria-label="Suggested tip amounts">
+                {["1.00", "5.00", "10.00", "25.00"].map((amount) => (
+                  <button key={amount} type="button" className={tipAmount === amount ? "is-active" : ""} aria-pressed={tipAmount === amount} onClick={() => setTipAmount(amount)}>${Number(amount)}</button>
+                ))}
+              </div>
+              {authenticated && !address ? (
+                <div className="lp-create-wallet">
+                  <p>Create your Teep wallet once to send tips.</p>
+                  <button type="button" className="lp-btn lp-btn--primary lp-btn--block" disabled={createWalletLoading} onClick={async () => {
+                    setCreateWalletError(null);
+                    setCreateWalletLoading(true);
+                    try { await createWallet(); } catch (error) {
+                      setCreateWalletLoading(false);
+                      setCreateWalletError(error instanceof Error ? error.message : "Failed to create wallet");
+                    }
+                  }}>
+                    <Icon name="wallet" /> {createWalletLoading ? "Creating wallet..." : "Create Teep wallet"}
+                  </button>
+                  {createWalletError && <p className="lp-inline-error" role="alert">{createWalletError}</p>}
+                </div>
+              ) : (
+                <button type="submit" className="lp-btn lp-btn--primary lp-btn--block" disabled={amountNum <= 0}>Review ${amountUsd} tip <Icon name="arrowRight" /></button>
+              )}
+              <p className="lp-stage-note"><Icon name="shield" /> Creator-controlled and recorded for your receipt.</p>
+            </form>
           </div>
         </div>
-        <div className="lp-marquee" aria-label="Powered by">
-          <p className="lp-marquee-caption">Powered by open, onchain infrastructure</p>
-          <div className="lp-marquee-viewport">
-            <div className="lp-marquee-track">
-              {[...POWERED_BY, ...POWERED_BY].map((name, i) => (
-                <span className="lp-marquee-item" key={`${name}-${i}`} aria-hidden={i >= POWERED_BY.length}>
-                  {name}
-                </span>
-              ))}
+      </section>
+
+      <section ref={proofRef} className="lp-proof" id="stats" aria-labelledby="lp-proof-title">
+        <div className="lp-container">
+          <div className="lp-proof-head">
+            <h2 id="lp-proof-title">Teep in motion.</h2>
+            <p>A live snapshot of support moving through the beta, including what creators have earned by choosing to grow idle tips.</p>
+          </div>
+          <div className="lp-proof-grid">
+            <div className="lp-proof-primary">
+              <span>Support delivered</span>
+              <strong aria-label={stats ? `$${stats.totalVolumeUsd} plus` : "Loading support delivered"}>
+                {animatedStats ? `$${animatedStats.totalVolumeUsd.toFixed(2)}+` : "—"}
+              </strong>
+              <p>Stable-value tips sent directly to creators through the Teep beta.</p>
+            </div>
+            <div className="lp-proof-stats">
+              <div>
+                <strong aria-label={stats ? `${stats.totalTips.toLocaleString()} plus tips completed` : "Loading tips completed"}>
+                  {animatedStats ? `${animatedStats.totalTips.toLocaleString()}+` : "—"}
+                </strong>
+                <span>Tips completed</span>
+              </div>
+              <div>
+                <strong aria-label={stats ? `${stats.distinctTippers.toLocaleString()} plus active supporters` : "Loading active supporters"}>
+                  {animatedStats ? `${animatedStats.distinctTippers.toLocaleString()}+` : "—"}
+                </strong>
+                <span>Active supporters</span>
+              </div>
+              <div>
+                <strong aria-label={stats ? `${stats.verifiedCreators.toLocaleString()} plus verified creators` : "Loading verified creators"}>
+                  {animatedStats ? `${animatedStats.verifiedCreators.toLocaleString()}+` : "—"}
+                </strong>
+                <span>Verified creators</span>
+              </div>
+              <div className="is-growth">
+                <strong>{GROW_TIPS_PREVIEW_YIELD}</strong>
+                <span>Extra earned from Grow Tips</span>
+                <small>Grow Tips planning figure</small>
+              </div>
             </div>
           </div>
         </div>
       </section>
 
-      {/* Three pillars */}
-      <section className="lp-pillars">
-        <div className="lp-pillar">
-          <div className="lp-pillar-icon"><Icon name="bolt" /></div>
-          <h3>Tipping</h3>
-          <p>Send a tip from the post itself. The Teep button appears natively, right beside share and bookmark.</p>
-        </div>
-        <div className="lp-pillar">
-          <div className="lp-pillar-icon"><Icon name="wallet" /></div>
-          <h3>Claiming</h3>
-          <p>Creators receive tips before they ever sign up, and claim or withdraw them whenever they are ready.</p>
-        </div>
-        <div className="lp-pillar">
-          <div className="lp-pillar-icon"><Icon name="coin" /></div>
-          <h3>Growing</h3>
-          <p>Idle tip balances can be put to work with simple growth tools, straight from the creator dashboard.</p>
+      <section className="lp-section" id="product" aria-labelledby="lp-product-title">
+        <div className="lp-container">
+          <p className="lp-kicker">One support flow</p>
+          <h2 className="lp-section-title" id="lp-product-title">A tip does more than move money.</h2>
+          <p className="lp-section-intro">Support can begin from a post or the web, wait safely for a creator, and become available to withdraw or grow.</p>
+          <div className="lp-flow">
+            <article className="lp-flow-step">
+              <div className="lp-flow-head">
+                <span className="lp-flow-number">01</span>
+                <div className="lp-flow-icon"><Icon name="send" /></div>
+                <h3>Support where attention is</h3>
+              </div>
+              <p>Use the web app, extension, or a connected social prompt without sending people to a new feed.</p>
+              <button type="button" className="lp-flow-action" onClick={() => tipAmountInputRef.current?.focus()}>
+                Try the web tip flow <Icon name="arrowRight" />
+              </button>
+            </article>
+            <article className="lp-flow-step">
+              <div className="lp-flow-head">
+                <span className="lp-flow-number">02</span>
+                <div className="lp-flow-icon"><Icon name="wallet" /></div>
+                <h3>Receive and claim simply</h3>
+              </div>
+              <p>Support can wait for a creator who has not joined yet, then becomes available from one creator dashboard.</p>
+              <div className="lp-flow-balance"><small>Available tips</small><strong>$37.38</strong></div>
+            </article>
+            <article className="lp-flow-step">
+              <div className="lp-flow-head">
+                <span className="lp-flow-number">03</span>
+                <div className="lp-flow-icon"><Icon name="coin" /></div>
+                <h3>Withdraw or keep growing</h3>
+              </div>
+              <p>Creators decide what to take out and what to place into a clearly explained growth option.</p>
+              <div className="lp-flow-growth">
+                <span><small>Growing</small><strong>$540.25</strong></span>
+                <span><small>Extra earned</small><strong>+$12.45</strong></span>
+              </div>
+              <small className="lp-preview-label">Planning estimate</small>
+            </article>
+          </div>
         </div>
       </section>
 
-      {/* Stats */}
-      <section className="lp-stats" id="stats">
-        <h2 className="lp-section-title">Where fans support creators onchain.</h2>
-        <p className="lp-section-sub">Every tip is an indexed onchain event — balances, receipts, and stats anyone can verify.</p>
-        <div className="lp-stats-grid">
-          <div className="lp-stat">
-            <p className="lp-stat-value">{stats ? `$${stats.totalVolumeUsd}+` : "—"}</p>
-            <p className="lp-stat-label">Tipped to creators</p>
-          </div>
-          <div className="lp-stat">
-            <p className="lp-stat-value">{stats ? `${stats.totalTips.toLocaleString()}+` : "—"}</p>
-            <p className="lp-stat-label">Tips sent</p>
-          </div>
-          <div className="lp-stat">
-            <p className="lp-stat-value">{stats ? `${stats.distinctTippers.toLocaleString()}+` : "—"}</p>
-            <p className="lp-stat-label">Active tippers</p>
-          </div>
-          <div className="lp-stat">
-            <p className="lp-stat-value">{stats ? `${stats.verifiedCreators.toLocaleString()}+` : "—"}</p>
-            <p className="lp-stat-label">Verified creators</p>
-          </div>
-        </div>
-      </section>
+      <section className="lp-defi" id="grow" aria-labelledby="lp-defi-title">
+        <div className="lp-container">
+          <div className="lp-defi-head">
+            <div>
+              <p className="lp-kicker">The DeFi part, made understandable</p>
+              <h2 className="lp-section-title" id="lp-defi-title">Your tips can keep working. You stay in control.</h2>
+              <p className="lp-section-intro">
+                Grow Tips turns an optional onchain strategy into a simple choice: keep funds available, or put a chosen amount to work. Teep shows where it goes, what the risks are, and how exiting works before you confirm.
+              </p>
+            </div>
 
-      {/* Platform grid */}
-      <section className="lp-platform">
-        <div className="lp-platform-head">
-          <h2 className="lp-platform-title">
-            <span className="lp-platform-brand">Teep</span> is the platform for creator support at scale.
-          </h2>
-          <Link to="/leaderboard" className="lp-platform-link">
-            Explore activity <Icon name="arrowRight" />
-          </Link>
-        </div>
-        <div className="lp-platform-grid">
-          <div className="lp-card">
-            <PlatformArt kind="instant" />
-            <h3>Instant, low-cost, 24/7</h3>
-            <p>Tips settle onchain in seconds, in stable dollars, any hour of any day. No invoices, no payout windows.</p>
+            <div className="lp-defi-principles" aria-label="Grow Tips principles">
+              <article>
+                <Icon name="checkCircle" />
+                <strong>Always opt-in</strong>
+                <span>Nothing moves into a growth option automatically.</span>
+              </article>
+              <article>
+                <Icon name="link" />
+                <strong>Choose the amount</strong>
+                <span>Keep some available and grow only what you select.</span>
+              </article>
+              <article>
+                <Icon name="shield" />
+                <strong>See the route</strong>
+                <span>Strategy, risk, return estimate, and exit terms stay visible.</span>
+              </article>
+            </div>
           </div>
-          <div className="lp-card">
-            <PlatformArt kind="waiting" />
-            <h3>Tips wait for you</h3>
-            <p>Fans can tip creators who have not joined yet. Funds sit in a deterministic claim wallet only the creator can unlock.</p>
-          </div>
-          <div className="lp-card">
-            <PlatformArt kind="custody" />
-            <h3>Secure &amp; non-custodial</h3>
-            <p>Teep coordinates the experience but never holds funds. Your money. You control it. Always.</p>
-          </div>
-          <div className="lp-card">
-            <PlatformArt kind="native" />
-            <h3>Native, not an island</h3>
-            <p>No new feed to grow. Teep lives where creator attention already lives — inside the post itself.</p>
+
+          <div className="lp-defi-map" aria-label="Example showing how creator tips move through Grow Tips">
+            <svg className="lp-defi-lines" viewBox="0 0 1000 360" preserveAspectRatio="none" aria-hidden="true">
+              <path d="M235 73 C340 73 350 158 455 158" />
+              <path d="M235 73 C340 73 350 270 455 270" />
+              <path d="M560 158 C675 158 665 73 770 73" />
+              <path d="M560 270 C675 270 665 222 770 222" />
+            </svg>
+
+            <div className="lp-defi-map-grid">
+              <div className="lp-defi-column">
+                <h3>Your tip balance</h3>
+                <div className="lp-defi-node-stack">
+                  <div className="lp-defi-node is-primary">
+                    <span className="lp-defi-node-icon"><Icon name="wallet" /></span>
+                    <span className="lp-defi-node-copy">
+                      <small>Creator-controlled balance</small>
+                      <strong>$100.00 in tips</strong>
+                      <span>Stable-value support received from your audience.</span>
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="lp-defi-column">
+                <h3>You decide</h3>
+                <div className="lp-defi-node-stack">
+                  <div className="lp-defi-node">
+                    <span className="lp-defi-node-icon"><Icon name="wallet" /></span>
+                    <span className="lp-defi-node-copy">
+                      <small>Available balance</small>
+                      <strong>Keep $40 ready</strong>
+                      <span>Available for withdrawal or tipping.</span>
+                    </span>
+                  </div>
+                  <div className="lp-defi-node">
+                    <span className="lp-defi-node-icon"><Icon name="coin" /></span>
+                    <span className="lp-defi-node-copy">
+                      <small>Optional allocation</small>
+                      <strong>Grow $60</strong>
+                      <span>You review the strategy before signing.</span>
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="lp-defi-column">
+                <h3>What happens next</h3>
+                <div className="lp-defi-node-stack">
+                  <div className="lp-defi-node">
+                    <span className="lp-defi-node-icon"><Icon name="checkCircle" /></span>
+                    <span className="lp-defi-node-copy">
+                      <small>Ready when needed</small>
+                      <strong>$40 stays available</strong>
+                      <span>No growth strategy is applied to this amount.</span>
+                    </span>
+                  </div>
+                  <div className="lp-defi-node is-growth">
+                    <span className="lp-defi-node-icon"><Icon name="bolt" /></span>
+                    <span className="lp-defi-node-copy">
+                      <small>Onchain growth route</small>
+                      <strong>$60 + variable earnings</strong>
+                      <span>Track value, activity, and exit terms from Teep.</span>
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <p className="lp-defi-note">
+              <Icon name="shield" />
+              Example flow only. Returns are variable and growth strategies carry risk.
+            </p>
           </div>
         </div>
       </section>
 
       {/* How it works */}
-      <section className="lp-how" id="how-it-works">
-        <div className="lp-how-head">
-          <h2 className="lp-section-title">How it works</h2>
-          <p className="lp-section-sub">Native to the platforms you already use. Start in minutes.</p>
-          <div className="lp-tabs" role="tablist">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={howTab === "tippers"}
-              className={`lp-tab ${howTab === "tippers" ? "lp-tab--active" : ""}`}
-              onClick={() => setHowTab("tippers")}
+      <section className="lp-how" id="how-it-works" aria-labelledby="lp-how-title">
+        <div className="lp-container lp-how-layout">
+          <div className="lp-how-copy">
+            <p className="lp-kicker">How it works</p>
+            <h2 className="lp-section-title" id="lp-how-title">Simple for fans. Useful for creators.</h2>
+            <p className="lp-section-intro">The interface changes with the person using it. The underlying mechanics do not need to lead the experience.</p>
+            <div className="lp-tabs" role="tablist" aria-label="How Teep works">
+              {(["tippers", "creators"] as const).map((tab, index) => (
+                <button
+                  key={tab}
+                  ref={(element) => { howTabRefs.current[index] = element; }}
+                  id={`lp-how-tab-${tab}`}
+                  type="button"
+                  role="tab"
+                  aria-selected={howTab === tab}
+                  aria-controls="lp-how-panel"
+                  tabIndex={howTab === tab ? 0 : -1}
+                  className={`lp-tab ${howTab === tab ? "lp-tab--active" : ""}`}
+                  onClick={() => setHowTab(tab)}
+                  onKeyDown={(event) => handleHowTabKeyDown(event, index)}
+                >
+                  For {tab === "tippers" ? "Tippers" : "Creators"}
+                </button>
+              ))}
+            </div>
+            <div
+              className="lp-how-steps"
+              id="lp-how-panel"
+              role="tabpanel"
+              aria-labelledby={`lp-how-tab-${howTab}`}
+              tabIndex={0}
             >
-              For Tippers
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={howTab === "creators"}
-              className={`lp-tab ${howTab === "creators" ? "lp-tab--active" : ""}`}
-              onClick={() => setHowTab("creators")}
-            >
-              For Creators
-            </button>
-          </div>
-        </div>
-        <div className="lp-how-grid">
-          <div className="lp-how-steps">
-            {(howTab === "tippers"
-              ? [
-                  { title: "Install Extension", desc: "Add Teep to Chrome or Brave. Securely connect in seconds." },
-                  { title: "Browse Normally", desc: "The Tip button appears natively beside the share and bookmark actions." },
-                  { title: "Confirm & Send", desc: "Enter the amount and confirm. The creator receives the tip instantly." },
-                ]
-              : [
-                  { title: "Connect Your Account", desc: "Link your creator identity in seconds and make your posts ready to receive tips." },
-                  { title: "Claim Your Page", desc: "Get a dedicated tipping link for your bio and a custom profile page." },
-                  { title: "Receive Tips", desc: "Claim, withdraw, or grow tips from your creator dashboard." },
-                ]
-            ).map((step, i) => (
-              <div className="lp-step" key={step.title}>
-                <div className="lp-step-num">{i + 1}</div>
-                <div>
-                  <h4 className="lp-step-title">{step.title}</h4>
-                  <p className="lp-step-desc">{step.desc}</p>
+              {(howTab === "tippers"
+                ? [
+                    { label: "1a", title: "Use the web app", desc: "Tip from creator pages, discovery, or a direct Teep link.", ctaHref: "/creator/pipsandbills", ctaText: "Try it now" },
+                    { label: "1b", title: "Add the extension", desc: "Use the Teep action beside familiar social post controls.", ctaHref: CHROME_STORE_URL, ctaText: "Try it now", ctaExternal: HAS_CHROME_STORE_LISTING },
+                    { label: "1c", title: "Tag the X bot", desc: "Reply with a tip command and Teep returns the next step.", ctaHref: "https://twitter.com/intent/tweet?text=%40teepagent%20tip%20%40pipsandbills%20%241", ctaText: "Try it now", ctaExternal: true },
+                    { label: "02", title: "Choose an amount", desc: "Pick a stable-value amount and review who receives it." },
+                    { label: "03", title: "Confirm and get a receipt", desc: "Send once, then track the receipt from the same account." },
+                  ]
+                : [
+                    { label: "01", title: "Connect your creator account", desc: "Verify the social identity your audience already knows." },
+                    { label: "02", title: "Receive support", desc: "Tips appear in one clear creator balance and activity history." },
+                    { label: "03", title: "Withdraw or grow", desc: "Choose what to take out and what to keep working over time." },
+                  ]
+              ).map((step) => (
+                <div className="lp-step" key={step.title}>
+                  <div className="lp-step-num">{step.label}</div>
+                  <div>
+                    <h3 className="lp-step-title">{step.title}</h3>
+                    <p className="lp-step-desc">{step.desc}</p>
+                    {"ctaHref" in step && step.ctaHref ? (
+                      step.ctaExternal ? (
+                        <a
+                          className="lp-step-action"
+                          href={step.ctaHref}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          {step.ctaText}
+                          <Icon name="arrowRight" />
+                        </a>
+                      ) : (
+                        <Link className="lp-step-action" to={step.ctaHref}>
+                          {step.ctaText}
+                          <Icon name="arrowRight" />
+                        </Link>
+                      )
+                    ) : null}
+                  </div>
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
           <div className="lp-how-preview">
             {howTab === "tippers" ? (
@@ -781,19 +1023,28 @@ export default function Home() {
                 />
               </div>
             ) : (
-              <div className="lp-how-mockup">
-                <div className="lp-how-mockup-row">
-                  <div className="lp-how-mockup-avatar" />
-                  <div className="lp-how-mockup-line" />
+              <div className="lp-creator-preview" aria-label="Creator dashboard preview">
+                <div className="lp-creator-preview-head">
+                  <strong>Creator overview</strong>
+                  <span>Connected</span>
                 </div>
-                <div className="lp-how-mockup-block" />
-                <div className="lp-how-mockup-footer">
-                  <div className="lp-how-mockup-btn">Claim your page</div>
-                  <div className="lp-how-mockup-dots">
-                    <span />
-                    <span />
+                <div className="lp-creator-preview-balance">
+                  <div>
+                    <small>Tips earned</small>
+                    <h3>$37.38</h3>
+                    <div className="lp-creator-preview-actions">
+                      <span>Withdraw</span>
+                      <span>Grow tips</span>
+                    </div>
+                  </div>
+                  <div className="lp-creator-preview-chart" aria-hidden="true">
                     <span />
                   </div>
+                </div>
+                <div className="lp-creator-preview-list">
+                  <div><span>@alterego supported your post</span><strong>+$6.00</strong></div>
+                  <div><span>@junio supported your post</span><strong>+$2.50</strong></div>
+                  <div><span>Tips available to withdraw</span><strong>$37.38</strong></div>
                 </div>
               </div>
             )}
@@ -802,15 +1053,12 @@ export default function Home() {
       </section>
 
       {/* Live activity */}
-      <section className="lp-live">
+      <section className="lp-live" id="activity" aria-labelledby="lp-live-title">
         <div className="lp-live-head">
-          <h2 className="lp-section-title">
+          <h2 className="lp-section-title" id="lp-live-title">
             <span className="lp-live-dot" aria-hidden />
             Live on Teep
           </h2>
-          <Link to="/leaderboard" className="lp-platform-link">
-            View all activity <Icon name="arrowRight" />
-          </Link>
         </div>
         <div className="lp-live-grid">
           {recentTips.length === 0 ? (
@@ -819,21 +1067,21 @@ export default function Home() {
             recentTips.slice(0, 8).map((tip, index) => {
               const creator = tip.creatorUsername ?? tip.postAuthorHandle ?? null;
               const creatorLabel = creator ? `@${creator}` : "Unknown creator";
-              const tipperAvatar = getAvatarUrls(tip.fromAddress);
-              const creatorAvatar = getAvatarUrls(creator ?? "");
+              const tipperName = tip.fromIdentity?.displayName?.trim() || "Teep supporter";
+              const tipperAvatar = localInitialsAvatar(tipperName);
+              const creatorAvatar = xAvatarUrl(creator) || localInitialsAvatar(creator ?? "creator");
               return (
                 <div className="lp-live-card" key={`${tip.fromAddress}-${tip.timestamp}-${index}`}>
                   <div className="lp-live-row">
                     <img
-                      src={tipperAvatar.primary}
+                      src={tipperAvatar}
                       alt=""
                       className="lp-live-avatar"
                       onError={(e) => {
-                        e.currentTarget.src = tipperAvatar.fallback;
-                        e.currentTarget.onerror = null;
+                        avatarErrorFallback(e, tipperName);
                       }}
                     />
-                    <span className="lp-live-name">{truncateAddress(tip.fromAddress)}</span>
+                    <span className="lp-live-name">{tipperName}</span>
                     <span className="lp-live-amount">${tip.amountUsd}</span>
                   </div>
                   <div className="lp-live-connector" aria-hidden>
@@ -841,12 +1089,11 @@ export default function Home() {
                   </div>
                   <div className="lp-live-row">
                     <img
-                      src={creatorAvatar.primary}
+                      src={creatorAvatar}
                       alt=""
                       className="lp-live-avatar"
                       onError={(e) => {
-                        e.currentTarget.src = creatorAvatar.fallback;
-                        e.currentTarget.onerror = null;
+                        avatarErrorFallback(e, creator);
                       }}
                     />
                     <span className="lp-live-name">{creatorLabel}</span>
@@ -867,16 +1114,61 @@ export default function Home() {
         </div>
       </section>
 
+      <section className="lp-trust" aria-labelledby="lp-trust-title">
+        <div className="lp-container lp-trust-grid">
+          <div>
+            <p className="lp-kicker">Trust, without the homework</p>
+            <h2 className="lp-section-title" id="lp-trust-title">The infrastructure stays out of the way.</h2>
+            <p className="lp-section-intro">Teep abstracts the crypto workflow while keeping controls and verifiable records available when people need them.</p>
+            <div className="lp-infra" aria-label="Teep infrastructure">
+              <span>Arc testnet</span>
+              <span>USDC</span>
+              <span>Circle</span>
+              <span>Privy</span>
+            </div>
+          </div>
+          <div className="lp-trust-list">
+            <article>
+              <Icon name="shield" />
+              <strong>Creator-controlled</strong>
+              <span>Teep coordinates the experience without becoming the destination for user funds.</span>
+            </article>
+            <article>
+              <Icon name="coin" />
+              <strong>Stable-value support</strong>
+              <span>Amounts remain understandable for supporters and creators instead of moving with token prices.</span>
+            </article>
+            <article>
+              <Icon name="link" />
+              <strong>Meaningful receipts</strong>
+              <span>Each tip stays connected to the creator or post it supported.</span>
+            </article>
+            <article>
+              <Icon name="checkCircle" />
+              <strong>Details on demand</strong>
+              <span>Transaction and strategy details are available without dominating the main workflow.</span>
+            </article>
+          </div>
+        </div>
+      </section>
+
       {/* FAQ */}
-      <section className="lp-faq" id="faq">
-        <h2 className="lp-section-title">Frequently asked questions</h2>
+      <section className="lp-faq" id="faq" aria-labelledby="lp-faq-title">
+        <div className="lp-faq-intro">
+          <p className="lp-kicker">Questions</p>
+          <h2 className="lp-section-title" id="lp-faq-title">Clear before you connect.</h2>
+          <p>Straight answers about support, control, and Grow Tips.</p>
+        </div>
         <div className="lp-faq-list">
           {FAQ_ITEMS.map((item, idx) => (
-            <details className="lp-faq-item" open={faqOpenSet.has(idx)} key={item.q}>
-              <summary
+            <div className="lp-faq-item" key={item.q}>
+              <button
+                type="button"
                 className="lp-faq-q"
-                onClick={(e) => {
-                  e.preventDefault();
+                id={`lp-faq-button-${idx}`}
+                aria-expanded={faqOpenSet.has(idx)}
+                aria-controls={`lp-faq-panel-${idx}`}
+                onClick={() => {
                   setFaqOpenSet((current) => {
                     const next = new Set(current);
                     if (next.has(idx)) next.delete(idx);
@@ -887,9 +1179,17 @@ export default function Home() {
               >
                 {item.q}
                 <span className="lp-faq-toggle" aria-hidden>{faqOpenSet.has(idx) ? "−" : "+"}</span>
-              </summary>
-              <div className="lp-faq-a">{item.a}</div>
-            </details>
+              </button>
+              <div
+                className="lp-faq-a"
+                id={`lp-faq-panel-${idx}`}
+                role="region"
+                aria-labelledby={`lp-faq-button-${idx}`}
+                hidden={!faqOpenSet.has(idx)}
+              >
+                {item.a}
+              </div>
+            </div>
           ))}
         </div>
       </section>
@@ -902,134 +1202,20 @@ export default function Home() {
           ))}
         </div>
         <div className="lp-cta-inner">
-          <h2 className="lp-cta-title">Start earning on Teep.</h2>
-          <p className="lp-cta-sub">Support from your fans, in your control. Fast, stable, and always on.</p>
+          <p className="lp-kicker">Social finance for creators and communities</p>
+          <h2 className="lp-cta-title">Support and grow with Teep.</h2>
+          <p className="lp-cta-sub">One place for supporters to send and creators to receive, withdraw, or grow what they earn.</p>
           <div className="lp-cta-btns">
-            <a href={CHROME_STORE_URL} target="_blank" rel="noopener noreferrer" className="lp-btn lp-btn--inverse">
+            <a href={CHROME_STORE_URL} target={HAS_CHROME_STORE_LISTING ? "_blank" : undefined} rel={HAS_CHROME_STORE_LISTING ? "noopener noreferrer" : undefined} className="lp-btn lp-btn--inverse lp-btn--large">
               <Icon name="puzzle" />
-              {HAS_CHROME_STORE_LISTING ? "Get the Extension" : "Join the Beta"}
+              {HAS_CHROME_STORE_LISTING ? "Add to Chrome" : "Get Teep"}
             </a>
-            <Link to="/dashboard" className="lp-btn lp-btn--ghost">
-              Open Dashboard
-            </Link>
+            <a href="/dashboard" target="_blank" rel="noopener noreferrer" className="lp-btn lp-btn--ghost lp-btn--large">
+              Open web app
+            </a>
           </div>
         </div>
       </section>
-
-      {tipModalOpen && (
-        <div className="lp-modal-overlay" role="dialog" aria-modal="true" aria-label="Send a tip" onClick={() => setTipModalOpen(false)}>
-          <div className="lp-modal" onClick={(e) => e.stopPropagation()}>
-            <button type="button" className="lp-modal-close" onClick={() => setTipModalOpen(false)} aria-label="Close">
-              ×
-            </button>
-            <h3 className="lp-modal-title">
-              <Icon name="send" />
-              Send a tip
-            </h3>
-            <p className="lp-modal-sub">Paste a link to a supported post, choose an amount, done. The creator gets the rest.</p>
-            <div className="lp-tip-field">
-              <label className="lp-tip-label" htmlFor="lp-tip-url">Content link</label>
-              <div className="lp-tip-input-wrap">
-                <Icon name="link" className="lp-tip-input-icon" />
-                <input
-                  id="lp-tip-url"
-                  type="url"
-                  className="lp-tip-input lp-tip-input--icon"
-                  placeholder="Paste post URL"
-                  value={contentUrl}
-                  onChange={(e) => setContentUrl(e.target.value)}
-                  autoFocus
-                />
-              </div>
-            </div>
-            <div className="lp-tip-field">
-              <label className="lp-tip-label" htmlFor="lp-tip-amount">Tip amount (USD)</label>
-              <input
-                id="lp-tip-amount"
-                type="number"
-                min="0"
-                step="0.01"
-                className="lp-tip-input"
-                placeholder="5.00"
-                value={tipAmount}
-                onChange={(e) => setTipAmount(e.target.value)}
-              />
-            </div>
-            <div className="lp-tip-field">
-              <span className="lp-tip-label">Creator</span>
-              <div className="lp-tip-creator">
-                {resolvedCreator ? (
-                  <>
-                    <img
-                      src={getAvatarUrls(resolvedCreator).primary}
-                      alt=""
-                      className="lp-tip-creator-avatar"
-                      onError={(e) => {
-                        e.currentTarget.src = getAvatarUrls(resolvedCreator).fallback;
-                        e.currentTarget.onerror = null;
-                      }}
-                    />
-                    <span className="lp-tip-creator-name">@{resolvedCreator}</span>
-                    <Icon name="checkCircle" className="lp-tip-creator-check" />
-                  </>
-                ) : (
-                  <span className="lp-tip-creator-placeholder">Detected from the link</span>
-                )}
-              </div>
-            </div>
-            {authenticated && !address ? (
-              <div className="lp-tip-create-wallet">
-                <p>Create your Teep wallet to send tips. This is a one-time step.</p>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    setCreateWalletError(null);
-                    setCreateWalletLoading(true);
-                    try {
-                      await createWallet();
-                    } catch (err) {
-                      setCreateWalletLoading(false);
-                      setCreateWalletError(err instanceof Error ? err.message : "Failed to create wallet");
-                    }
-                  }}
-                  disabled={createWalletLoading}
-                  className="lp-btn lp-btn--primary lp-btn--block"
-                >
-                  {createWalletLoading ? (
-                    "Creating wallet..."
-                  ) : (
-                    <>
-                      <Icon name="wallet" />
-                      Create Teep wallet
-                    </>
-                  )}
-                </button>
-                {createWalletError && (
-                  <p className="lp-tip-error" role="alert">{createWalletError}</p>
-                )}
-              </div>
-            ) : (
-              <button
-                type="button"
-                onClick={() => {
-                  setTipModalOpen(false);
-                  handleSendTip();
-                }}
-                disabled={!parsed || amountNum <= 0}
-                className="lp-btn lp-btn--primary lp-btn--block"
-              >
-                <Icon name="bolt" />
-                Send tip
-              </button>
-            )}
-            <ul className="lp-tip-points lp-tip-points--modal">
-              <li><Icon name="shield" /> Non-custodial</li>
-              <li><Icon name="coin" /> Stable dollars</li>
-              <li><Icon name="clock" /> Claim anytime</li>
-            </ul>
-          </div>
-        </div>
-      )}
 
       <LoginModal
         open={loginModalOpen}

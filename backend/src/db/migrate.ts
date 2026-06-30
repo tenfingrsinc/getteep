@@ -3,6 +3,13 @@ dotenv.config();
 
 import { initDb } from "./database";
 
-console.log("Running database migration...");
-initDb();
-console.log("Migration complete.");
+async function main() {
+  console.log("Running database migration...");
+  await initDb();
+  console.log("Migration complete.");
+}
+
+main().catch((error) => {
+  console.error("Migration failed:", error);
+  process.exit(1);
+});

@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { usePrivy } from "@privy-io/react-auth";
 import { useSmartWallets } from "@privy-io/react-auth/smart-wallets";
@@ -8,11 +8,26 @@ import { arcTestnet } from "../chains";
 import { API_BASE, ENABLE_FIAT_OFFRAMP, ENABLE_FIAT_ONRAMP, FAUCET_URL, FUNDING_ENV, OFFRAMP_URL, ONRAMP_URL, REFERRAL_REGISTRY_ADDRESS, USDC_ADDRESS } from "../config";
 import { encodeWithdrawCall, encodeWithdrawWithAuthorizationCall, encodeWithdrawWithFeeCall, encodeTransferCall } from "../lib/contracts";
 import DashboardShell from "../components/DashboardShell";
+import { DashboardConnectPage, DashboardPreparingPage } from "../components/DashboardAuthState";
 
 function formatUsd(raw: string): string {
   const n = Number(raw);
   if (n === 0) return "0.00";
   return (n / 1e6).toFixed(2);
+}
+
+async function readApiPayload(response: Response): Promise<Record<string, any>> {
+  const text = await response.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    return {
+      error: response.status === 429
+        ? "Too many withdrawal attempts. Wait a moment and try again."
+        : text.slice(0, 240),
+    };
+  }
 }
 
 function shortAddress(value: string | null | undefined): string {
@@ -24,9 +39,19 @@ const primary = "var(--accent)";
 const success = "var(--metric-positive)";
 const danger = "var(--danger)";
 
+type WithdrawalConfirmationDialog = {
+  requestId: string;
+  sourceLabel: string;
+  amountLabel: string;
+  destinationLabel: string;
+  emailLabel: string;
+  code: string;
+  error?: string;
+};
+
 export default function DashboardWithdraw() {
-  const { pathname } = useLocation();
-  const { ready, authenticated, login, user } = usePrivy();
+  const { pathname, search } = useLocation();
+  const { ready, authenticated, user } = usePrivy();
   const { client: smartWalletClient } = useSmartWallets();
   const liveAddress = (ready && authenticated ? smartWalletClient?.account?.address || "" : "").toLowerCase();
   const [stableAddress, setStableAddress] = useState("");
@@ -39,9 +64,7 @@ export default function DashboardWithdraw() {
   const [walletStatus, setWalletStatus] = useState<{
     deployed: boolean;
     claimWalletAddress: string | null;
-    legacyClaimWalletAddresses?: string[];
   } | null>(null);
-  const [claimWalletBalances, setClaimWalletBalances] = useState<Array<{ address: string; balanceRaw: string }>>([]);
   const [tipBalance, setTipBalance] = useState<string>("0");
   const [tipsEarnedBalance, setTipsEarnedBalance] = useState<string>("0");
   const [withdrawalSource, setWithdrawalSource] = useState<"tipBalance" | "tipsEarned">("tipBalance");
@@ -51,6 +74,8 @@ export default function DashboardWithdraw() {
   const [submitting, setSubmitting] = useState(false);
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
   const [breakdown, setBreakdown] = useState<{ protocolFeeUsd: string; netUsd: string } | null>(null);
+  const [confirmationDialog, setConfirmationDialog] = useState<WithdrawalConfirmationDialog | null>(null);
+  const confirmationResolverRef = useRef<((code: string | null) => void) | null>(null);
   const fundingPolicy = buildFundingPolicy({
     environment: FUNDING_ENV,
     faucetUrl: FAUCET_URL,
@@ -62,8 +87,7 @@ export default function DashboardWithdraw() {
 
   const hasClaim = claimStatus?.verified && claimStatus?.claims?.[0]?.username;
   const isDeployed = walletStatus?.deployed;
-  const claimAddr = walletStatus?.claimWalletAddress || walletStatus?.legacyClaimWalletAddresses?.[0] || null;
-  const canUseTipsEarned = hasClaim && isDeployed && claimAddr;
+  const claimAddr = walletStatus?.claimWalletAddress || null;
 
   useEffect(() => {
     if (liveAddress) setStableAddress(liveAddress);
@@ -75,6 +99,13 @@ export default function DashboardWithdraw() {
     setBreakdown(null);
     setMsg(null);
   }, []);
+
+  useEffect(() => {
+    const requestedSource = new URLSearchParams(search).get("source");
+    if (requestedSource === "tipsEarned" || requestedSource === "tipBalance") {
+      selectWithdrawalSource(requestedSource);
+    }
+  }, [search, selectWithdrawalSource]);
 
   const createWalletProof = useCallback(async (purpose: string) => {
     if (!address || !smartWalletClient) {
@@ -96,6 +127,55 @@ export default function DashboardWithdraw() {
     return { message: challenge.message, signature };
   }, [address, smartWalletClient]);
 
+  const resolveConfirmationDialog = useCallback((code: string | null) => {
+    confirmationResolverRef.current?.(code);
+    confirmationResolverRef.current = null;
+    setConfirmationDialog(null);
+  }, []);
+
+  const requestConfirmationCode = useCallback((
+    confirmation: { requestId: string; devCode?: string | number | null },
+    rawAmount: bigint,
+    destination: `0x${string}`,
+  ) => {
+    const devCode = confirmation.devCode == null ? "" : String(confirmation.devCode).trim();
+    if (devCode) return Promise.resolve(devCode);
+
+    confirmationResolverRef.current?.(null);
+    return new Promise<string | null>((resolve) => {
+      confirmationResolverRef.current = resolve;
+      setConfirmationDialog({
+        requestId: confirmation.requestId,
+        sourceLabel: withdrawalSource === "tipsEarned" ? "Tips Earned claim wallet" : "Tip Balance wallet",
+        amountLabel: `$${formatUsd(rawAmount.toString())}`,
+        destinationLabel: shortAddress(destination),
+        emailLabel: user?.email?.address || "your email",
+        code: "",
+      });
+    });
+  }, [user?.email?.address, withdrawalSource]);
+
+  const updateConfirmationCode = useCallback((code: string) => {
+    setConfirmationDialog((current) => current ? { ...current, code, error: undefined } : current);
+  }, []);
+
+  const submitConfirmationDialog = useCallback(() => {
+    const code = confirmationDialog?.code.trim();
+    if (!confirmationDialog) return;
+    if (!code) {
+      setConfirmationDialog({ ...confirmationDialog, error: "Enter the confirmation code to continue." });
+      return;
+    }
+    resolveConfirmationDialog(code);
+  }, [confirmationDialog, resolveConfirmationDialog]);
+
+  useEffect(() => {
+    return () => {
+      confirmationResolverRef.current?.(null);
+      confirmationResolverRef.current = null;
+    };
+  }, []);
+
   const loadData = useCallback(async () => {
     if (!address) return;
     setLoading(true);
@@ -109,34 +189,24 @@ export default function DashboardWithdraw() {
       setWalletStatus({
         deployed: walletRes.deployed,
         claimWalletAddress: walletRes.claimWalletAddress || null,
-        legacyClaimWalletAddresses: Array.isArray(walletRes.legacyClaimWalletAddresses) ? walletRes.legacyClaimWalletAddresses : [],
       });
       setTipBalance(tipBalanceRes.balanceRaw || "0");
 
-      const tipsEarnedRes = await fetch(`${API_BASE}/api/v1/wallet/${address}/balance`).catch(() => null);
+      const tipsEarnedSourceAddress = walletRes.claimWalletAddress || null;
+      const tipsEarnedRes = tipsEarnedSourceAddress
+        ? await fetch(`${API_BASE}/api/v1/wallet/${tipsEarnedSourceAddress}/usdc-balance`).catch(() => null)
+        : null;
       if (tipsEarnedRes?.ok) {
-        const data = await tipsEarnedRes.json();
+        const data = await readApiPayload(tipsEarnedRes);
         setTipsEarnedBalance(data.balanceRaw || "0");
-        setClaimWalletBalances(
-          Array.isArray(data.claimWalletBalances)
-            ? data.claimWalletBalances
-                .map((wallet: { address?: string; balanceRaw?: string }) => ({
-                  address: String(wallet.address || "").toLowerCase(),
-                  balanceRaw: String(wallet.balanceRaw || "0"),
-                }))
-                .filter((wallet: { address: string; balanceRaw: string }) => /^0x[a-f0-9]{40}$/.test(wallet.address) && /^[0-9]+$/.test(wallet.balanceRaw))
-            : []
-        );
       } else {
         setTipsEarnedBalance("0");
-        setClaimWalletBalances([]);
       }
     } catch {
       setClaimStatus(null);
       setWalletStatus(null);
       setTipBalance("0");
       setTipsEarnedBalance("0");
-      setClaimWalletBalances([]);
     } finally {
       setLoading(false);
     }
@@ -146,7 +216,26 @@ export default function DashboardWithdraw() {
     if (address) loadData();
   }, [address, loadData]);
 
-  const activeBalance = withdrawalSource === "tipBalance" ? tipBalance : tipsEarnedBalance;
+  useEffect(() => {
+    if (!address || withdrawTo.trim()) return;
+    let cancelled = false;
+    fetch(`${API_BASE}/api/v1/wallet/${address}/settings`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((payload) => {
+        if (cancelled || withdrawTo.trim()) return;
+        const destination = String(payload?.payout?.defaultDestination || "").trim();
+        if (/^0x[a-fA-F0-9]{40}$/.test(destination)) setWithdrawTo(destination);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [address, withdrawTo]);
+
+  const selectedClaimWalletAddress = claimAddr?.toLowerCase() || null;
+  const selectedClaimWalletBalance = tipsEarnedBalance;
+  const canUseTipsEarned = Boolean(hasClaim && isDeployed && selectedClaimWalletAddress);
+  const activeBalance = withdrawalSource === "tipBalance" ? tipBalance : selectedClaimWalletBalance;
   const activeBalanceUsd = formatUsd(activeBalance);
   const parsedWithdrawAmount = (() => {
     if (!withdrawAmount.trim()) return null;
@@ -157,14 +246,6 @@ export default function DashboardWithdraw() {
     }
   })();
   const amountExceedsActiveBalance = parsedWithdrawAmount !== null && parsedWithdrawAmount > BigInt(activeBalance || "0");
-  const selectedClaimWalletForAmount =
-    withdrawalSource === "tipsEarned" && parsedWithdrawAmount !== null
-      ? claimWalletBalances.find((wallet) => BigInt(wallet.balanceRaw) >= parsedWithdrawAmount)?.address || claimAddr
-      : claimAddr;
-  const selectedClaimWalletBalance = selectedClaimWalletForAmount
-    ? claimWalletBalances.find((wallet) => wallet.address === selectedClaimWalletForAmount.toLowerCase())?.balanceRaw || tipsEarnedBalance
-    : "0";
-
   useEffect(() => {
     if (!address || withdrawalSource !== "tipsEarned" || !withdrawAmount.trim()) {
       setBreakdown(null);
@@ -182,7 +263,7 @@ export default function DashboardWithdraw() {
         const res = await fetch(
           `${API_BASE}/withdrawal/breakdown?ownerAddress=${encodeURIComponent(address)}&amountRaw=${rawAmount.toString()}&source=tipsEarned`
         );
-        const data = await res.json();
+        const data = await readApiPayload(res);
         if (cancelled || !res.ok) return;
         setBreakdown({
           protocolFeeUsd: formatUsd(data.feeAmount || "0"),
@@ -219,7 +300,9 @@ export default function DashboardWithdraw() {
     const dest = withdrawTo.trim() as `0x${string}`;
     if (rawAmount > BigInt(activeBalance || "0")) {
       setMsg({
-        text: withdrawalSource === "tipsEarned" ? "Amount exceeds your tips earned balance" : "Amount exceeds your tip balance",
+        text: withdrawalSource === "tipsEarned"
+          ? "Amount exceeds your Tips Earned balance"
+          : "Amount exceeds your tip balance",
         ok: false,
       });
       return;
@@ -246,13 +329,17 @@ export default function DashboardWithdraw() {
           walletProof: confirmationProof,
         }),
       });
-      const confirmation = await confirmationRes.json();
+      const confirmation = await readApiPayload(confirmationRes);
       if (!confirmationRes.ok || !confirmation.requestId) {
         setMsg({ text: confirmation.error || "Could not prepare withdrawal confirmation", ok: false });
         setSubmitting(false);
         return;
       }
-      const confirmationCode = confirmation.devCode || window.prompt("Enter the withdrawal confirmation code sent to your email.");
+      const confirmationCode = await requestConfirmationCode(
+        { requestId: String(confirmation.requestId), devCode: confirmation.devCode },
+        rawAmount,
+        dest
+      );
       if (!confirmationCode) {
         setMsg({ text: "Withdrawal confirmation cancelled", ok: false });
         setSubmitting(false);
@@ -263,33 +350,29 @@ export default function DashboardWithdraw() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ requestId: confirmation.requestId, code: confirmationCode, claimWalletAddress: claimAddr }),
       });
-      const confirmData = await confirmRes.json();
+      const confirmData = await readApiPayload(confirmRes);
       if (!confirmRes.ok || !confirmData.confirmed) {
         setMsg({ text: confirmData.error || "Could not confirm withdrawal", ok: false });
         setSubmitting(false);
         return;
       }
 
-      await smartWalletClient.sendTransaction({
+      const txHash = await smartWalletClient.sendTransaction({
         to: USDC_ADDRESS,
         data: encodeTransferCall(dest, rawAmount),
         chain: arcTestnet,
         account: smartWalletClient.account,
-      } as any).then(async (txHash: string) => {
-        try {
-          const recordProof = await createWalletProof("withdrawal");
-          await fetch(`${API_BASE}/withdrawal/record`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              requestId: confirmation.requestId,
-              ownerAddress: address,
-              txHash,
-              walletProof: recordProof,
-            }),
-          });
-        } catch {}
-      });
+      } as any);
+      await fetch(`${API_BASE}/withdrawal/record`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          requestId: confirmation.requestId,
+          ownerAddress: address,
+          txHash,
+          recordToken: confirmData.recordToken,
+        }),
+      }).catch(() => null);
       setMsg({ text: "Withdrawal successful!", ok: true });
         setWithdrawTo("");
         setWithdrawAmount("");
@@ -304,7 +387,7 @@ export default function DashboardWithdraw() {
     }
 
     if (withdrawalSource === "tipsEarned") {
-      if (!address || !smartWalletClient || !claimAddr) {
+      if (!address || !smartWalletClient || !selectedClaimWalletAddress) {
         setMsg({ text: "Verify your account to withdraw tips earned", ok: false });
         return;
       }
@@ -316,7 +399,7 @@ export default function DashboardWithdraw() {
       const breakdownRes = await fetch(
         `${API_BASE}/withdrawal/breakdown?ownerAddress=${encodeURIComponent(address)}&amountRaw=${rawAmount.toString()}&source=tipsEarned`
       );
-      const breakdownData = await breakdownRes.json();
+      const breakdownData = await readApiPayload(breakdownRes);
       if (!breakdownRes.ok) {
         setMsg({ text: breakdownData.error || "Could not calculate fees", ok: false });
         setSubmitting(false);
@@ -337,24 +420,26 @@ export default function DashboardWithdraw() {
           walletProof: confirmationProof,
         }),
       });
-      const confirmation = await confirmationRes.json();
+      const confirmation = await readApiPayload(confirmationRes);
       if (!confirmationRes.ok || !confirmation.requestId) {
         setMsg({ text: confirmation.error || "Could not prepare withdrawal confirmation", ok: false });
         setSubmitting(false);
         return;
       }
-      const confirmationCode = confirmation.devCode || window.prompt("Enter the withdrawal confirmation code sent to your email.");
+      const confirmationCode = await requestConfirmationCode(
+        { requestId: String(confirmation.requestId), devCode: confirmation.devCode },
+        rawAmount,
+        dest
+      );
       if (!confirmationCode) {
         setMsg({ text: "Withdrawal confirmation cancelled", ok: false });
         setSubmitting(false);
         return;
       }
-      const withdrawalClaimAddr =
-        claimWalletBalances.find((wallet) => BigInt(wallet.balanceRaw) >= rawAmount)?.address ||
-        (claimAddr && BigInt(claimWalletBalances.find((wallet) => wallet.address === claimAddr.toLowerCase())?.balanceRaw || tipsEarnedBalance || "0") >= rawAmount ? claimAddr.toLowerCase() : null);
-      if (!withdrawalClaimAddr) {
+      const withdrawalClaimAddr = selectedClaimWalletAddress;
+      if (!withdrawalClaimAddr || rawAmount > BigInt(selectedClaimWalletBalance)) {
         setMsg({
-          text: "That amount is split across claim wallets. Withdraw a smaller amount, then withdraw the rest.",
+          text: "Amount exceeds your Tips Earned balance.",
           ok: false,
         });
         setSubmitting(false);
@@ -365,7 +450,7 @@ export default function DashboardWithdraw() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ requestId: confirmation.requestId, code: confirmationCode, claimWalletAddress: withdrawalClaimAddr }),
       });
-      const confirmData = await confirmRes.json();
+      const confirmData = await readApiPayload(confirmRes);
       if (!confirmRes.ok || !confirmData.confirmed) {
         setMsg({ text: confirmData.error || "Could not confirm withdrawal", ok: false });
         setSubmitting(false);
@@ -416,19 +501,16 @@ export default function DashboardWithdraw() {
         } as any);
       }
 
-      try {
-        const recordProof = await createWalletProof("withdrawal");
-        await fetch(`${API_BASE}/withdrawal/record`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            requestId: confirmation.requestId,
-            ownerAddress: address,
-            txHash,
-            walletProof: recordProof,
-          }),
-        });
-      } catch {}
+      await fetch(`${API_BASE}/withdrawal/record`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          requestId: confirmation.requestId,
+          ownerAddress: address,
+          txHash,
+          recordToken: confirmData.recordToken,
+        }),
+      }).catch(() => null);
       setMsg({ text: "Withdrawal successful!", ok: true });
       setWithdrawTo("");
       setWithdrawAmount("");
@@ -443,6 +525,7 @@ export default function DashboardWithdraw() {
           amount: rawAmount.toString(),
           txHash,
           detail: `Cash out to ${withdrawTo.slice(0, 6)}...${withdrawTo.slice(-4)}`,
+          sourceMethod: "web_dashboard",
         }),
       }).catch(() => {});
       if (!useWithdrawWithFee && breakdownData.referrerAddress && breakdownData.referrerAmount && breakdownData.referrerAddress !== "0x0000000000000000000000000000000000000000") {
@@ -456,6 +539,7 @@ export default function DashboardWithdraw() {
             amount: breakdownData.referrerAmount,
             txHash,
             detail: "Referral fee from withdrawal",
+            sourceMethod: "web_dashboard",
           }),
         }).catch(() => {});
       }
@@ -468,53 +552,30 @@ export default function DashboardWithdraw() {
   };
 
   const setMaxAmount = () => {
-    setWithdrawAmount(withdrawalSource === "tipBalance" ? formatUsd(tipBalance) : formatUsd(tipsEarnedBalance));
+    setWithdrawAmount(withdrawalSource === "tipBalance" ? formatUsd(tipBalance) : formatUsd(selectedClaimWalletBalance));
     setMsg(null);
   };
 
   const accountHydrating = authenticated && !address;
-  const backTo = pathname.startsWith("/creator") ? "/creator/dashboard" : "/dashboard";
   const growTipsPath = pathname.startsWith("/creator") ? "/creator/grow/earn" : "/dashboard/grow-tips";
 
   if (!ready) {
-    return (
-      <div className="page-section" style={{ paddingTop: "var(--space-4)", maxWidth: 1000, margin: "0 auto" }}>
-        <Link to={backTo} style={{ fontSize: "var(--text-small)", color: "var(--text-muted)", marginBottom: "var(--space-4)", display: "inline-block" }}>
-          Back to dashboard
-        </Link>
-        <h1 className="withdraw-title" style={{ fontSize: "clamp(1.75rem, 4vw, 2.5rem)", fontWeight: 900, marginBottom: "var(--space-2)", letterSpacing: "-0.02em", color: "var(--text-primary)" }}>
-          Withdraw Funds
-        </h1>
-        <p className="withdraw-subtitle" style={{ color: "var(--text-secondary)", marginBottom: "var(--space-8)", fontSize: "var(--text-body)", lineHeight: 1.5, maxWidth: "42rem" }}>
-          Transfer your accumulated earnings securely to your self-custodial wallet. Funds are routed through the Teep smart protocol.
-        </p>
-        <span className="dashboard-skeleton-card dashboard-skeleton-card--wide" />
-      </div>
-    );
+    return <DashboardPreparingPage title="Withdraw" />;
+  }
+
+  if (!authenticated) {
+    return <DashboardConnectPage title="Withdraw" />;
   }
 
   return (
     <DashboardShell address={address} title="Withdraw">
-      <main className="dashboard-body-inner" style={{ maxWidth: 1000 }}>
-      <Link to={backTo} style={{ fontSize: "var(--text-small)", color: "var(--text-muted)", marginBottom: "var(--space-4)", display: "inline-block" }}>
-        ← Back to dashboard
-      </Link>
-
+      <main className="dashboard-body-inner">
       <h1 className="withdraw-title" style={{ fontSize: "clamp(1.75rem, 4vw, 2.5rem)", fontWeight: 900, marginBottom: "var(--space-2)", letterSpacing: "-0.02em", color: "var(--text-primary)" }}>
         Withdraw Funds
       </h1>
       <p className="withdraw-subtitle" style={{ color: "var(--text-secondary)", marginBottom: "var(--space-8)", fontSize: "var(--text-body)", lineHeight: 1.5, maxWidth: "42rem" }}>
         Transfer your accumulated earnings securely to your self-custodial wallet. Funds are routed through the Teep smart protocol.
       </p>
-
-      {!authenticated && (
-        <div className="withdraw-card card" style={{ marginTop: "var(--space-4)", padding: "var(--space-6)", border: "1px solid var(--border)", borderRadius: "var(--radius-md)", background: "var(--bg-card)" }}>
-          <p style={{ margin: 0, color: "var(--text-secondary)", marginBottom: "var(--space-4)" }}>Connect your account to view balances and withdraw.</p>
-          <button type="button" onClick={login} className="btn-primary">
-            Connect
-          </button>
-        </div>
-      )}
 
       {(accountHydrating || (authenticated && loading)) && (
         <div className="withdraw-grid">
@@ -721,7 +782,7 @@ export default function DashboardWithdraw() {
                   <>
                     <div style={{ display: "flex", justifyContent: "space-between", gap: "var(--space-3)", fontSize: "var(--text-small)" }}>
                       <span style={{ color: "var(--text-muted)" }}>Funds come from</span>
-                      <strong style={{ color: "var(--text-primary)", fontFamily: "var(--font-mono)" }}>{shortAddress(selectedClaimWalletForAmount)}</strong>
+                      <strong style={{ color: "var(--text-primary)", fontFamily: "var(--font-mono)" }}>{shortAddress(selectedClaimWalletAddress)}</strong>
                     </div>
                     <div style={{ display: "flex", justifyContent: "space-between", gap: "var(--space-3)", fontSize: "var(--text-small)" }}>
                       <span style={{ color: "var(--text-muted)" }}>Source balance</span>
@@ -790,8 +851,8 @@ export default function DashboardWithdraw() {
 
           {/* Right column — match code.html lg:col-span-5 */}
           <div className="withdraw-sidebar" style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: "var(--space-6)" }}>
-            <div style={{ borderRadius: "var(--radius-md)", background: "rgba(99,36,235,0.05)", border: "1px solid rgba(99,36,235,0.2)", padding: "var(--space-6)", display: "flex", flexDirection: "column", gap: "var(--space-4)" }}>
-              <div style={{ width: 40, height: 40, borderRadius: "50%", background: "rgba(99,36,235,0.2)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <div style={{ borderRadius: "var(--radius-md)", background: "linear-gradient(180deg, rgba(31,28,39,0.98), rgba(16,12,24,0.98))", border: "1px solid rgba(167,139,250,0.32)", boxShadow: "0 18px 48px rgba(0,0,0,0.36)", padding: "var(--space-6)", display: "flex", flexDirection: "column", gap: "var(--space-4)" }}>
+              <div style={{ width: 40, height: 40, borderRadius: "50%", background: "rgba(99,36,235,0.28)", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "inset 0 0 0 1px rgba(167,139,250,0.18)" }}>
                 <span className="material-symbols-outlined" style={{ color: primary }}>fact_check</span>
               </div>
               <h4 style={{ fontSize: "var(--text-heading)", fontWeight: 700, margin: 0, color: "var(--text-primary)" }}>Before You Confirm</h4>
@@ -820,7 +881,7 @@ export default function DashboardWithdraw() {
                     body: "Double-check the address. Teep cannot recover funds sent to the wrong wallet.",
                   },
                 ].map((item) => (
-                  <div key={item.title} style={{ display: "grid", gridTemplateColumns: "32px minmax(0, 1fr)", gap: "var(--space-3)", alignItems: "start", padding: "var(--space-3)", borderRadius: "var(--radius-md)", background: "rgba(255,255,255,0.035)", border: "1px solid rgba(255,255,255,0.06)" }}>
+                  <div key={item.title} style={{ display: "grid", gridTemplateColumns: "32px minmax(0, 1fr)", gap: "var(--space-3)", alignItems: "start", padding: "var(--space-3)", borderRadius: "var(--radius-md)", background: "rgba(45,40,57,0.72)", border: "1px solid rgba(255,255,255,0.1)" }}>
                     <span className="material-symbols-outlined" style={{ width: 32, height: 32, borderRadius: "var(--radius-sm)", display: "grid", placeItems: "center", background: "rgba(99,36,235,0.16)", color: primary, fontSize: 18 }}>{item.icon}</span>
                     <span>
                       <strong style={{ display: "block", color: "var(--text-primary)", fontSize: "var(--text-small)", marginBottom: 3 }}>{item.title}</strong>
@@ -831,7 +892,7 @@ export default function DashboardWithdraw() {
               </div>
             </div>
 
-            <div style={{ borderRadius: "var(--radius-md)", border: "1px solid var(--border)", padding: "var(--space-6)", background: "var(--bg-card)" }}>
+            <div style={{ borderRadius: "var(--radius-md)", border: "1px solid rgba(255,255,255,0.12)", padding: "var(--space-6)", background: "linear-gradient(180deg, rgba(31,28,39,0.98), rgba(24,20,32,0.98))", boxShadow: "0 14px 36px rgba(0,0,0,0.28)" }}>
               <h4 style={{ fontSize: "var(--text-small)", fontWeight: 700, margin: "0 0 var(--space-3) 0", color: "var(--text-primary)", textTransform: "uppercase", letterSpacing: "0.05em" }}>Frequently Asked</h4>
               <details style={{ marginBottom: "var(--space-3)" }}>
                 <summary style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", listStyle: "none", fontSize: "var(--text-small)", fontWeight: 500, color: "var(--text-secondary)" }}>
@@ -850,7 +911,7 @@ export default function DashboardWithdraw() {
             </div>
 
             {/* Grow Tips — CTA, no crypto terms */}
-            <div style={{ background: "linear-gradient(135deg, var(--metric-positive-muted) 0%, transparent 100%)", border: "1px solid var(--metric-positive-border)", padding: "var(--space-6)", borderRadius: "var(--radius-md)" }}>
+            <div style={{ background: "linear-gradient(135deg, rgba(16,185,129,0.13) 0%, rgba(31,28,39,0.96) 58%, rgba(10,10,10,0.98) 100%)", border: "1px solid rgba(16,185,129,0.34)", boxShadow: "0 14px 36px rgba(0,0,0,0.28)", padding: "var(--space-6)", borderRadius: "var(--radius-md)" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
                 <span className="material-symbols-outlined" style={{ color: success }}>trending_up</span>
                 <span style={{ fontSize: "var(--text-small)", fontWeight: 700, color: "var(--text-primary)" }}>Grow Tips</span>
@@ -867,6 +928,56 @@ export default function DashboardWithdraw() {
         </div>
       )}
       </main>
+      {confirmationDialog && (
+        <div
+          className="withdraw-confirmation-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) resolveConfirmationDialog(null);
+          }}
+        >
+          <form
+            className="withdraw-confirmation-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="withdraw-confirmation-title"
+            onSubmit={(event) => {
+              event.preventDefault();
+              submitConfirmationDialog();
+            }}
+          >
+            <header>
+              <span className="material-symbols-outlined" aria-hidden>mark_email_read</span>
+              <button type="button" aria-label="Cancel withdrawal confirmation" onClick={() => resolveConfirmationDialog(null)}>
+                <span className="material-symbols-outlined" aria-hidden>close</span>
+              </button>
+            </header>
+            <h3 id="withdraw-confirmation-title">Confirm withdrawal</h3>
+            <p>Enter the code sent to {confirmationDialog.emailLabel} before Teep prepares the wallet transaction.</p>
+            <div className="withdraw-confirmation-summary">
+              <div><span>Source</span><strong>{confirmationDialog.sourceLabel}</strong></div>
+              <div><span>Amount</span><strong>{confirmationDialog.amountLabel}</strong></div>
+              <div><span>Destination</span><strong>{confirmationDialog.destinationLabel}</strong></div>
+            </div>
+            <label className="withdraw-confirmation-code">
+              <span>Confirmation code</span>
+              <input
+                autoFocus
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                value={confirmationDialog.code}
+                onChange={(event) => updateConfirmationCode(event.target.value)}
+                placeholder="Enter code"
+              />
+            </label>
+            {confirmationDialog.error && <div className="withdraw-confirmation-error">{confirmationDialog.error}</div>}
+            <div className="withdraw-confirmation-actions">
+              <button type="button" className="btn-secondary" onClick={() => resolveConfirmationDialog(null)}>Cancel</button>
+              <button type="submit" className="btn-primary">Continue</button>
+            </div>
+          </form>
+        </div>
+      )}
     </DashboardShell>
   );
 }

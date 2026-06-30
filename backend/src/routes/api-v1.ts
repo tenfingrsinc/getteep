@@ -6,18 +6,23 @@ import { ARC_TESTNET_USDC, getRpcUrl } from "../config/chain";
 import { getUnifiedTipperStats } from "../services/tipperStats";
 import { createBackendPublicClient } from "../services/rpcClient";
 import { isAddress } from "../utils/security";
-import { getUserSettings, settingsRowToResponse } from "../services/userSettings";
+import { getUserSettings, publicIdentity, settingsRowToResponse } from "../services/userSettings";
 import { createLowBalanceNotification, createThankYouMessageNotification } from "../services/notifications";
 import { syncInboundUsdcFunding } from "../services/fundingSync";
 import { verifyWalletProof } from "../services/walletAuth";
 import { getCreatorPerformance } from "../services/creatorPerformance";
+import { resolveAddressIdentities } from "../services/identity";
+import { XOAuthService } from "../services/oauth";
 
 const router = Router();
 
 const RPC_URL = getRpcUrl();
 const USDC_ADDRESS = (process.env.MOCK_USDC_ADDRESS || process.env.USDC_ADDRESS || ARC_TESTNET_USDC) as `0x${string}`;
 const ALLOW_INSECURE_OEMBED_TLS = process.env.ALLOW_INSECURE_OEMBED_TLS === "true" && process.env.NODE_ENV !== "production";
+const ALLOW_INSECURE_AVATAR_TLS = process.env.ALLOW_INSECURE_AVATAR_TLS === "true" && process.env.NODE_ENV !== "production";
 let warnedInsecureOembedTls = false;
+let warnedInsecureAvatarTls = false;
+const xOAuthService = new XOAuthService();
 
 const ERC20_ABI = [
   {
@@ -35,8 +40,8 @@ function contentIdFromPost(handle: string, tweetId: string): string {
 }
 
 /** On-chain authorId is X's stable numeric user ID. Legacy DBs may still contain hash-derived IDs. */
-function resolveAuthorId(db: ReturnType<typeof getDb>, ownerAddress: string): string | null {
-  const claim = db
+async function resolveAuthorId(db: ReturnType<typeof getDb>, ownerAddress: string): Promise<string | null> {
+  const claim = await db
     .prepare("SELECT author_id, username FROM verified_claims WHERE owner_address = ? ORDER BY verified_at DESC LIMIT 1")
     .get(ownerAddress) as { author_id: string; username: string } | undefined;
   if (!claim) return null;
@@ -70,6 +75,143 @@ function normalizeSocialXHandle(value: unknown): string | null {
   return normalized;
 }
 
+function fallbackAvatarSvg(seed: string): string {
+  const clean = seed.replace(/[^a-z0-9_]/gi, "").slice(0, 2).toUpperCase() || "T";
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" viewBox="0 0 160 160" role="img" aria-label="Teep avatar"><rect width="160" height="160" rx="80" fill="#21143a"/><circle cx="80" cy="80" r="74" fill="none" stroke="#6d28d9" stroke-width="8"/><text x="50%" y="55%" dominant-baseline="middle" text-anchor="middle" fill="#f6f0ff" font-family="Inter, Arial, sans-serif" font-size="52" font-weight="800">${clean}</text></svg>`;
+}
+
+async function fetchAvatarBuffer(handle: string) {
+  const db = getDb();
+  const cached = await db
+    .prepare("SELECT profile_image_url FROM verified_claims WHERE LOWER(username) = LOWER(?) AND profile_image_url IS NOT NULL ORDER BY verified_at DESC LIMIT 1")
+    .get(handle) as { profile_image_url?: string | null } | undefined;
+  const urls = [
+    cached?.profile_image_url || "",
+    `https://unavatar.io/twitter/${encodeURIComponent(handle)}`,
+  ].filter(Boolean);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3500);
+  try {
+    if (!cached?.profile_image_url) {
+      try {
+        const profile = await xOAuthService.getUserByUsername(handle);
+        if (profile.profile_image_url) {
+          try {
+            await db.prepare(
+              `UPDATE verified_claims
+               SET author_id = ?, username = ?, display_name = ?, profile_image_url = ?
+               WHERE LOWER(username) = LOWER(?)`
+            ).run(profile.id, profile.username, profile.name, profile.profile_image_url, handle);
+          } catch {
+            /* best-effort avatar cache refresh */
+          }
+          const avatar = await fetchAvatarUrl(profile.profile_image_url, controller.signal, false);
+          if (avatar) return avatar;
+        }
+      } catch {
+        /* fall through to public avatar fallback */
+      }
+    }
+    for (const url of urls) {
+      const avatar = await fetchAvatarUrl(url, controller.signal, true);
+      if (avatar) return avatar;
+    }
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function fetchAvatarUrl(url: string, signal: AbortSignal, allowUnavatar = false) {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:") return null;
+  const allowedHosts = allowUnavatar
+    ? ["pbs.twimg.com", "abs.twimg.com", "unavatar.io"]
+    : ["pbs.twimg.com", "abs.twimg.com"];
+  if (!allowedHosts.includes(parsed.hostname.toLowerCase())) return null;
+
+  try {
+    const response = await fetch(parsed.toString(), {
+      redirect: "follow",
+      signal,
+      headers: { "User-Agent": "TeepAvatarProxy/1.0" },
+    });
+    const contentType = response.headers.get("content-type") || "";
+    if (!response.ok || !contentType.startsWith("image/")) return null;
+    const body = Buffer.from(await response.arrayBuffer());
+    if (body.length > 1_500_000) return null;
+    return { body, contentType };
+  } catch (error: any) {
+    const code = error?.cause?.code || error?.code;
+    if (!ALLOW_INSECURE_AVATAR_TLS || code !== "UNABLE_TO_VERIFY_LEAF_SIGNATURE") throw error;
+    return fetchAvatarUrlInsecureDevOnly(parsed.toString(), allowUnavatar);
+  }
+}
+
+function fetchAvatarUrlInsecureDevOnly(url: string, allowUnavatar: boolean, redirectCount = 0): Promise<{ body: Buffer; contentType: string } | null> {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return Promise.resolve(null);
+  }
+  const allowedHosts = allowUnavatar
+    ? ["pbs.twimg.com", "abs.twimg.com", "unavatar.io"]
+    : ["pbs.twimg.com", "abs.twimg.com"];
+  if (parsed.protocol !== "https:" || !allowedHosts.includes(parsed.hostname.toLowerCase())) return Promise.resolve(null);
+
+  if (!warnedInsecureAvatarTls) {
+    warnedInsecureAvatarTls = true;
+    console.warn("[API v1] ALLOW_INSECURE_AVATAR_TLS=true is enabled. Avatar TLS verification is disabled for local development only.");
+  }
+
+  return new Promise((resolve, reject) => {
+    const request = https.get(
+      parsed.toString(),
+      {
+        headers: { "User-Agent": "TeepAvatarProxy/1.0" },
+        agent: new https.Agent({ rejectUnauthorized: false }),
+        timeout: 5000,
+      },
+      (response) => {
+        const status = response.statusCode || 500;
+        const location = response.headers.location;
+        if ([301, 302, 303, 307, 308].includes(status) && location && redirectCount < 3) {
+          const nextUrl = new URL(location, parsed).toString();
+          response.resume();
+          fetchAvatarUrlInsecureDevOnly(nextUrl, allowUnavatar, redirectCount + 1).then(resolve).catch(reject);
+          return;
+        }
+        const contentType = String(response.headers["content-type"] || "");
+        if (status < 200 || status >= 300 || !contentType.startsWith("image/")) {
+          response.resume();
+          resolve(null);
+          return;
+        }
+        const chunks: Buffer[] = [];
+        let size = 0;
+        response.on("data", (chunk: Buffer) => {
+          size += chunk.length;
+          if (size > 1_500_000) {
+            request.destroy(new Error("Avatar image is too large"));
+            return;
+          }
+          chunks.push(chunk);
+        });
+        response.on("end", () => resolve({ body: Buffer.concat(chunks), contentType }));
+      }
+    );
+    request.on("timeout", () => request.destroy(new Error("Avatar request timed out")));
+    request.on("error", reject);
+  });
+}
+
 function normalizeTipAmount(value: unknown): string | null {
   const raw = typeof value === "number" ? String(value) : typeof value === "string" ? value.trim().replace(/^\$/, "") : "";
   if (!raw) return null;
@@ -78,10 +220,36 @@ function normalizeTipAmount(value: unknown): string | null {
   return amount.toFixed(2);
 }
 
-function boolInt(value: unknown, fallback = true): number {
-  if (typeof value === "boolean") return value ? 1 : 0;
-  if (value === 0 || value === 1) return value;
-  return fallback ? 1 : 0;
+function boolInt(value: unknown, fallback = true): boolean {
+  if (typeof value === "boolean") return value;
+  if (value === 0 || value === 1) return value === 1;
+  return fallback;
+}
+
+function normalizeOptionalAddress(value: unknown): string | null | undefined {
+  if (value == null || value === "") return null;
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  return isAddress(normalized) ? normalized : undefined;
+}
+
+function normalizeChoice<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
+  return allowed.includes(value as T) ? value as T : fallback;
+}
+
+function normalizeOptionalToken(value: unknown, maxLength = 80): string | null {
+  if (value == null || value === "") return null;
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  if (!normalized || normalized.length > maxLength) return null;
+  if (!/^[a-zA-Z0-9:_-]+$/.test(normalized)) return null;
+  return normalized;
+}
+
+function normalizeShortText(value: unknown, fallback: string, maxLength = 280): string {
+  if (typeof value !== "string") return fallback;
+  const normalized = value.trim().replace(/\s+/g, " ");
+  return normalized ? normalized.slice(0, maxLength) : fallback;
 }
 
 function safeJson(value: string | null | undefined) {
@@ -187,20 +355,16 @@ async function deletePrivyUser(userId: string) {
   };
 }
 
-router.get("/wallet/:address/settings", (req: Request, res: Response) => {
+router.get("/wallet/:address/settings", async (req: Request, res: Response) => {
   const address = String(req.params.address || "").toLowerCase();
   if (!isAddress(address)) {
     err(res, 400, "Invalid account address");
     return;
   }
 
-  const db = getDb();
-  const settings = db
-    .prepare("SELECT *, updated_at as updatedAt FROM user_settings WHERE address = ? LIMIT 1")
-    .get(address) as any | undefined;
-
   res.set("Cache-Control", "private, no-store");
-  res.json(settingsRowToResponse(address, settings));
+  const preferredUsername = typeof req.query.preferredUsername === "string" ? req.query.preferredUsername : null;
+  res.json(await getUserSettings(address, preferredUsername));
 });
 
 router.post("/wallet/:address/settings", async (req: Request, res: Response) => {
@@ -225,9 +389,25 @@ router.post("/wallet/:address/settings", async (req: Request, res: Response) => 
     err(res, 400, "X handle must be 1-15 characters using letters, numbers, or underscores");
     return;
   }
+  const payoutDefaultDestination = normalizeOptionalAddress(req.body?.payout?.defaultDestination);
+  if (payoutDefaultDestination === undefined) {
+    err(res, 400, "Default withdrawal destination must be a valid wallet address");
+    return;
+  }
+  const payoutConfirmationPreference = normalizeChoice(req.body?.payout?.confirmationPreference, ["email", "wallet", "both"] as const, "email");
+  const growDefaultStrategyId = normalizeOptionalToken(req.body?.growTips?.defaultStrategyId);
+  if (req.body?.growTips?.defaultStrategyId && !growDefaultStrategyId) {
+    err(res, 400, "Default Grow Tips strategy is invalid");
+    return;
+  }
+  const growRiskVisibilityLevel = normalizeChoice(req.body?.growTips?.riskVisibilityLevel, ["minimal", "standard", "detailed"] as const, "standard");
+  const defaultThankYouMessage = normalizeShortText(
+    req.body?.engagement?.defaultThankYouMessage,
+    "Thank you for supporting my work on Teep."
+  );
 
   const db = getDb();
-  const existing = db
+  const existing = await db
     .prepare("SELECT address FROM user_settings WHERE username = ? AND address <> ? LIMIT 1")
     .get(username, address) as { address: string } | undefined;
   if (existing) {
@@ -235,14 +415,19 @@ router.post("/wallet/:address/settings", async (req: Request, res: Response) => 
     return;
   }
 
-  db.prepare(
+  await db.prepare(
     `INSERT INTO user_settings (
       address, username, social_x_handle, default_tip_amount,
       receipt_share_links_enabled, receipt_share_amount_enabled, receipt_post_aware_copy_enabled,
       notify_creator_claimed, notify_low_balance, notify_receipt_ready,
+      notify_new_tip, notify_repeat_supporter, notify_claim_wallet_activity, notify_withdrawal_completed, notify_grow_tips_status,
       privacy_hide_address, privacy_private_activity, privacy_require_verification,
+      privacy_hide_supporter_names_publicly, privacy_hide_growth_activity,
+      payout_default_destination, payout_confirmation_preference, payout_notifications,
+      grow_default_strategy_id, grow_risk_visibility_level, grow_maturity_exit_reminders,
+      engagement_default_thank_you_message, engagement_auto_suggest_x_thank_you, engagement_repeat_supporter_reminders,
       updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now())
     ON CONFLICT(address) DO UPDATE SET
       username = excluded.username,
       social_x_handle = excluded.social_x_handle,
@@ -253,10 +438,26 @@ router.post("/wallet/:address/settings", async (req: Request, res: Response) => 
       notify_creator_claimed = excluded.notify_creator_claimed,
       notify_low_balance = excluded.notify_low_balance,
       notify_receipt_ready = excluded.notify_receipt_ready,
+      notify_new_tip = excluded.notify_new_tip,
+      notify_repeat_supporter = excluded.notify_repeat_supporter,
+      notify_claim_wallet_activity = excluded.notify_claim_wallet_activity,
+      notify_withdrawal_completed = excluded.notify_withdrawal_completed,
+      notify_grow_tips_status = excluded.notify_grow_tips_status,
       privacy_hide_address = excluded.privacy_hide_address,
       privacy_private_activity = excluded.privacy_private_activity,
       privacy_require_verification = excluded.privacy_require_verification,
-      updated_at = datetime('now')`
+      privacy_hide_supporter_names_publicly = excluded.privacy_hide_supporter_names_publicly,
+      privacy_hide_growth_activity = excluded.privacy_hide_growth_activity,
+      payout_default_destination = excluded.payout_default_destination,
+      payout_confirmation_preference = excluded.payout_confirmation_preference,
+      payout_notifications = excluded.payout_notifications,
+      grow_default_strategy_id = excluded.grow_default_strategy_id,
+      grow_risk_visibility_level = excluded.grow_risk_visibility_level,
+      grow_maturity_exit_reminders = excluded.grow_maturity_exit_reminders,
+      engagement_default_thank_you_message = excluded.engagement_default_thank_you_message,
+      engagement_auto_suggest_x_thank_you = excluded.engagement_auto_suggest_x_thank_you,
+      engagement_repeat_supporter_reminders = excluded.engagement_repeat_supporter_reminders,
+      updated_at = now()`
   ).run(
     address,
     username,
@@ -268,12 +469,28 @@ router.post("/wallet/:address/settings", async (req: Request, res: Response) => 
     boolInt(req.body?.notifications?.creatorClaimed, true),
     boolInt(req.body?.notifications?.lowBalance, true),
     boolInt(req.body?.notifications?.receiptReady, false),
+    boolInt(req.body?.notifications?.newTip, true),
+    boolInt(req.body?.notifications?.repeatSupporter, true),
+    boolInt(req.body?.notifications?.claimWalletActivity, true),
+    boolInt(req.body?.notifications?.withdrawalCompleted, true),
+    boolInt(req.body?.notifications?.growTipsStatus, true),
     boolInt(req.body?.privacy?.hideAddress, true),
     boolInt(req.body?.privacy?.privateActivity, true),
-    boolInt(req.body?.privacy?.requireVerification, true)
+    boolInt(req.body?.privacy?.requireVerification, true),
+    boolInt(req.body?.privacy?.hideSupporterNamesPublicly, false),
+    boolInt(req.body?.privacy?.hideGrowthActivity, false),
+    payoutDefaultDestination,
+    payoutConfirmationPreference,
+    boolInt(req.body?.payout?.notifications, true),
+    growDefaultStrategyId,
+    growRiskVisibilityLevel,
+    boolInt(req.body?.growTips?.maturityExitReminders, true),
+    defaultThankYouMessage,
+    boolInt(req.body?.engagement?.autoSuggestXThankYou, true),
+    boolInt(req.body?.engagement?.repeatSupporterReminders, true)
   );
 
-  const saved = db
+  const saved = await db
     .prepare("SELECT *, updated_at as updatedAt FROM user_settings WHERE address = ? LIMIT 1")
     .get(address);
 
@@ -301,15 +518,15 @@ router.post("/wallet/:address/social-profile", async (req: Request, res: Respons
   }
 
   const db = getDb();
-  db.prepare(
+  await db.prepare(
     `INSERT INTO user_settings (address, social_x_handle, updated_at)
-     VALUES (?, ?, datetime('now'))
+     VALUES (?, ?, now())
      ON CONFLICT(address) DO UPDATE SET
        social_x_handle = excluded.social_x_handle,
-       updated_at = datetime('now')`
+       updated_at = now()`
   ).run(address, socialXHandle);
 
-  const saved = db
+  const saved = await db
     .prepare("SELECT *, updated_at as updatedAt FROM user_settings WHERE address = ? LIMIT 1")
     .get(address);
 
@@ -317,20 +534,21 @@ router.post("/wallet/:address/social-profile", async (req: Request, res: Respons
   res.json(settingsRowToResponse(address, saved));
 });
 
-router.get("/wallet/:address/tipper-settings-public", (req: Request, res: Response) => {
+router.get("/wallet/:address/tipper-settings-public", async (req: Request, res: Response) => {
   const address = String(req.params.address || "").toLowerCase();
   if (!isAddress(address)) {
     err(res, 400, "Invalid account address");
     return;
   }
-  const settings = getUserSettings(address);
+  const settings = await getUserSettings(address);
+  const identity = await publicIdentity(address);
   res.set("Cache-Control", "private, max-age=60");
   res.json({
     address,
     publicIdentity: {
-      label: settings.username ? `@${settings.username}` : settings.privacy.hideAddress ? `${address.slice(0, 6)}...${address.slice(-4)}` : address,
-      socialXHandle: settings.socialXHandle,
-      address: settings.privacy.hideAddress ? null : address,
+      label: identity.label,
+      socialXHandle: identity.socialXHandle,
+      address: identity.address,
     },
     defaultTipAmount: settings.defaultTipAmount,
     receipts: settings.receipts,
@@ -370,20 +588,20 @@ router.get("/wallet/:address/funding-history", async (req: Request, res: Respons
     };
   }
   const whereSql = where.join(" AND ");
-  const total = db.prepare(`SELECT COUNT(*) as count FROM funding_provider_sessions WHERE ${whereSql}`).get(...params) as { count: number };
-  const rows = db
+  const total = await db.prepare(`SELECT COUNT(*) as count FROM funding_provider_sessions WHERE ${whereSql}`).get(...params) as { count: number | string };
+  const rows = (await db
     .prepare(`SELECT id, provider, kind, status, provider_session_id as providerSessionId, metadata_json as metadataJson, created_at as createdAt, updated_at as updatedAt FROM funding_provider_sessions WHERE ${whereSql} ORDER BY created_at DESC LIMIT ? OFFSET ?`)
-    .all(...params, limit, (page - 1) * limit)
+    .all(...params, limit, (page - 1) * limit))
     .map((row: any) => ({
       ...row,
       metadata: row.metadataJson ? JSON.parse(row.metadataJson) : null,
       metadataJson: undefined,
     }));
   res.set("Cache-Control", "private, no-store");
-  res.json({ page, limit, total: total.count, records: rows, sync: syncState });
+  res.json({ page, limit, total: Number(total.count), records: rows, sync: syncState });
 });
 
-router.get("/wallet/:address/withdrawal-history", (req: Request, res: Response) => {
+router.get("/wallet/:address/withdrawal-history", async (req: Request, res: Response) => {
   const address = String(req.params.address || "").toLowerCase();
   if (!isAddress(address)) {
     err(res, 400, "Invalid account address");
@@ -393,21 +611,63 @@ router.get("/wallet/:address/withdrawal-history", (req: Request, res: Response) 
   const limit = Math.min(7, Math.max(1, Number(req.query.limit || 7) || 7));
   const day = typeof req.query.day === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.query.day) ? req.query.day : "";
   const db = getDb();
-  const where = ["owner_address = ?"];
-  const params: any[] = [address];
+  const recordWhere = ["LOWER(owner_address) = ?"];
+  const recordParams: any[] = [address];
+  const activityWhere = ["LOWER(from_address) = ?", "type IN ('withdraw', 'withdraw_balance')"];
+  const activityParams: any[] = [address];
   if (day) {
     const start = new Date(`${day}T00:00:00.000Z`).getTime();
     const end = start + 24 * 60 * 60 * 1000;
-    where.push("created_at >= ? AND created_at < ?");
-    params.push(start, end);
+    recordWhere.push("created_at >= ? AND created_at < ?");
+    recordParams.push(start, end);
+    activityWhere.push("timestamp >= ? AND timestamp < ?");
+    activityParams.push(Math.floor(start / 1000), Math.floor(end / 1000));
   }
-  const whereSql = where.join(" AND ");
-  const total = db.prepare(`SELECT COUNT(*) as count FROM withdrawal_records WHERE ${whereSql}`).get(...params) as { count: number };
-  const rows = db
-    .prepare(`SELECT destination_address as destinationAddress, source, amount_raw as amountRaw, tx_hash as txHash, created_at as createdAt FROM withdrawal_records WHERE ${whereSql} ORDER BY created_at DESC LIMIT ? OFFSET ?`)
-    .all(...params, limit, (page - 1) * limit);
+  const recordRows = await db
+    .prepare(
+      `SELECT destination_address as destinationAddress, source, amount_raw as amountRaw,
+              tx_hash as txHash, created_at as createdAt, 'withdrawal_records' as origin
+       FROM withdrawal_records
+       WHERE ${recordWhere.join(" AND ")}`
+    )
+    .all(...recordParams) as Array<{ destinationAddress: string; source: string; amountRaw: string; txHash: string; createdAt: number; origin: string }>;
+  const activityRows = await db
+    .prepare(
+      `SELECT COALESCE(to_address, '') as destinationAddress,
+              CASE WHEN type = 'withdraw_balance' THEN 'tipBalance' ELSE 'tipsEarned' END as source,
+              amount as amountRaw, tx_hash as txHash, timestamp * 1000 as createdAt,
+              'user_activity' as origin
+       FROM user_activity
+       WHERE ${activityWhere.join(" AND ")}`
+    )
+    .all(...activityParams) as Array<{ destinationAddress: string; source: string; amountRaw: string; txHash: string | null; createdAt: number; origin: string }>;
+
+  const deduped = new Map<string, { destinationAddress: string; source: string; amountRaw: string; txHash: string; createdAt: number; origin: string }>();
+  for (const row of [...recordRows, ...activityRows]) {
+    const txHash = row.txHash || "";
+    const key = txHash ? `tx:${txHash.toLowerCase()}` : `${row.origin}:${row.source}:${row.createdAt}:${row.amountRaw}:${row.destinationAddress}`;
+    if (!deduped.has(key)) {
+      deduped.set(key, {
+        ...row,
+        destinationAddress: row.destinationAddress || address,
+        txHash,
+      });
+    }
+  }
+
+  const sorted = Array.from(deduped.values()).sort((a, b) => b.createdAt - a.createdAt);
+  const rows = sorted.slice((page - 1) * limit, page * limit);
+  const identities = await resolveAddressIdentities(rows.map((row) => row.destinationAddress).filter((value) => isAddress(value)));
   res.set("Cache-Control", "private, no-store");
-  res.json({ page, limit, total: total.count, records: rows });
+  res.json({
+    page,
+    limit,
+    total: sorted.length,
+    records: rows.map((row) => ({
+      ...row,
+      destinationIdentity: identities.get(row.destinationAddress.toLowerCase()) ?? null,
+    })),
+  });
 });
 
 // ─── GET /posts/:handle/:tweetId ─────────────────────────────────────────
@@ -430,8 +690,9 @@ router.post("/wallet/:address/export", async (req: Request, res: Response) => {
     console.warn("[Account Export] Could not sync funding before export:", error instanceof Error ? error.message : error);
   }
 
-  const settings = getUserSettings(address);
-  const tipsSent = db
+  const settings = await getUserSettings(address);
+  const identity = await publicIdentity(address);
+  const tipsSent = await db
     .prepare(
       `SELECT t.content_id as contentId, t.author_id as authorId, t.to_address as toAddress, t.amount, t.tx_hash as txHash,
               t.timestamp, m.author_handle as authorHandle, m.tweet_id as tweetId, m.kind
@@ -441,7 +702,7 @@ router.post("/wallet/:address/export", async (req: Request, res: Response) => {
        ORDER BY t.timestamp DESC`
     )
     .all(address);
-  const activity = db
+  const activity = await db
     .prepare(
       `SELECT type, from_address as fromAddress, to_address as toAddress, amount, tx_hash as txHash, detail,
               author_handle as authorHandle, tweet_id as tweetId, timestamp
@@ -450,7 +711,7 @@ router.post("/wallet/:address/export", async (req: Request, res: Response) => {
        ORDER BY timestamp DESC`
     )
     .all(address, address);
-  const funding = db
+  const funding = (await db
     .prepare(
       `SELECT id, provider, provider_session_id as providerSessionId, kind, status, metadata_json as metadataJson,
               created_at as createdAt, updated_at as updatedAt
@@ -458,9 +719,9 @@ router.post("/wallet/:address/export", async (req: Request, res: Response) => {
        WHERE LOWER(user_address) = ?
        ORDER BY created_at DESC`
     )
-    .all(address)
+    .all(address))
     .map((row: any) => ({ ...row, metadata: safeJson(row.metadataJson), metadataJson: undefined }));
-  const withdrawals = db
+  const withdrawals = await db
     .prepare(
       `SELECT destination_address as destinationAddress, source, amount_raw as amountRaw, tx_hash as txHash,
               confirmation_id as confirmationId, created_at as createdAt
@@ -469,7 +730,7 @@ router.post("/wallet/:address/export", async (req: Request, res: Response) => {
        ORDER BY created_at DESC`
     )
     .all(address);
-  const withdrawalRequests = db
+  const withdrawalRequests = await db
     .prepare(
       `SELECT id, destination_address as destinationAddress, source, amount_raw as amountRaw, email, status,
               tx_hash as txHash, created_at as createdAt, expires_at as expiresAt, confirmed_at as confirmedAt, used_at as usedAt
@@ -478,22 +739,22 @@ router.post("/wallet/:address/export", async (req: Request, res: Response) => {
        ORDER BY created_at DESC`
     )
     .all(address);
-  const referralCode = db
+  const referralCode = await db
     .prepare("SELECT code, created_at as createdAt FROM referral_codes WHERE LOWER(referrer_address) = ? LIMIT 1")
     .get(address);
-  const referralAttribution = db
+  const referralAttribution = await db
     .prepare("SELECT referrer_address as referrerAddress, referral_code as referralCode, referred_at as referredAt FROM user_referrals WHERE LOWER(user_address) = ? LIMIT 1")
     .get(address);
-  const notifications = db
+  const notifications = (await db
     .prepare(
       `SELECT id, type, title, body, status, metadata_json as metadataJson, created_at as createdAt
        FROM user_notifications
        WHERE LOWER(user_address) = ?
        ORDER BY created_at DESC`
     )
-    .all(address)
+    .all(address))
     .map((row: any) => ({ ...row, metadata: safeJson(row.metadataJson), metadataJson: undefined }));
-  const creatorClaims = db
+  const creatorClaims = await db
     .prepare(
       `SELECT author_id as authorId, username, display_name as displayName, profile_image_url as profileImageUrl, verified_at as verifiedAt
        FROM verified_claims
@@ -509,10 +770,7 @@ router.post("/wallet/:address/export", async (req: Request, res: Response) => {
     account: {
       address,
       username: settings.username,
-      publicIdentity: {
-        label: settings.username ? `@${settings.username}` : settings.privacy.hideAddress ? `${address.slice(0, 6)}...${address.slice(-4)}` : address,
-        address: settings.privacy.hideAddress ? null : address,
-      },
+      publicIdentity: identity,
     },
     settings,
     creatorClaims,
@@ -579,14 +837,13 @@ router.post("/wallet/:address/delete-local-data", async (req: Request, res: Resp
     }
 
     const db = getDb();
-    const tx = db.transaction(() => {
-      db.prepare("DELETE FROM user_notifications WHERE LOWER(user_address) = ?").run(address);
-      db.prepare("DELETE FROM funding_sync_state WHERE LOWER(user_address) = ?").run(address);
-      db.prepare("DELETE FROM referral_codes WHERE LOWER(referrer_address) = ?").run(address);
-      db.prepare("DELETE FROM user_referrals WHERE LOWER(user_address) = ?").run(address);
-      db.prepare("DELETE FROM user_settings WHERE LOWER(address) = ?").run(address);
-    });
-    tx();
+    await db.transaction(async (txDb) => {
+      await txDb.prepare("DELETE FROM user_notifications WHERE LOWER(user_address) = ?").run(address);
+      await txDb.prepare("DELETE FROM funding_sync_state WHERE LOWER(user_address) = ?").run(address);
+      await txDb.prepare("DELETE FROM referral_codes WHERE LOWER(referrer_address) = ?").run(address);
+      await txDb.prepare("DELETE FROM user_referrals WHERE LOWER(user_address) = ?").run(address);
+      await txDb.prepare("DELETE FROM user_settings WHERE LOWER(address) = ?").run(address);
+    })();
 
     res.set("Cache-Control", "private, no-store");
     res.json({ success: true });
@@ -596,7 +853,7 @@ router.post("/wallet/:address/delete-local-data", async (req: Request, res: Resp
   }
 });
 
-router.get("/wallet/:address/notifications", (req: Request, res: Response) => {
+router.get("/wallet/:address/notifications", async (req: Request, res: Response) => {
   const address = String(req.params.address || "").toLowerCase();
   if (!isAddress(address)) {
     err(res, 400, "Invalid account address");
@@ -605,9 +862,9 @@ router.get("/wallet/:address/notifications", (req: Request, res: Response) => {
   const page = Math.max(1, Number(req.query.page || 1) || 1);
   const limit = Math.min(20, Math.max(1, Number(req.query.limit || 7) || 7));
   const db = getDb();
-  const total = db.prepare("SELECT COUNT(*) as count FROM user_notifications WHERE user_address = ?").get(address) as { count: number };
-  const unread = db.prepare("SELECT COUNT(*) as count FROM user_notifications WHERE user_address = ? AND status = 'unread'").get(address) as { count: number };
-  const records = db
+  const total = await db.prepare("SELECT COUNT(*) as count FROM user_notifications WHERE user_address = ?").get(address) as { count: number | string };
+  const unread = await db.prepare("SELECT COUNT(*) as count FROM user_notifications WHERE user_address = ? AND status = 'unread'").get(address) as { count: number | string };
+  const records = (await db
     .prepare(
       `SELECT id, type, title, body, status, metadata_json as metadataJson, created_at as createdAt
        FROM user_notifications
@@ -615,17 +872,17 @@ router.get("/wallet/:address/notifications", (req: Request, res: Response) => {
        ORDER BY created_at DESC
        LIMIT ? OFFSET ?`
     )
-    .all(address, limit, (page - 1) * limit)
+    .all(address, limit, (page - 1) * limit))
     .map((row: any) => ({
       ...row,
       metadata: row.metadataJson ? JSON.parse(row.metadataJson) : null,
       metadataJson: undefined,
     }));
   res.set("Cache-Control", "private, no-store");
-  res.json({ page, limit, total: total.count, unread: unread.count, records });
+  res.json({ page, limit, total: Number(total.count), unread: Number(unread.count), records });
 });
 
-router.post("/wallet/:address/notifications/:id/read", (req: Request, res: Response) => {
+router.post("/wallet/:address/notifications/:id/read", async (req: Request, res: Response) => {
   const address = String(req.params.address || "").toLowerCase();
   const id = Number(req.params.id || 0);
   if (!isAddress(address) || !Number.isInteger(id) || id <= 0) {
@@ -633,22 +890,22 @@ router.post("/wallet/:address/notifications/:id/read", (req: Request, res: Respo
     return;
   }
   const db = getDb();
-  db.prepare("UPDATE user_notifications SET status = 'read' WHERE user_address = ? AND id = ?").run(address, id);
+  await db.prepare("UPDATE user_notifications SET status = 'read' WHERE user_address = ? AND id = ?").run(address, id);
   res.json({ success: true });
 });
 
-router.post("/wallet/:address/notifications/read-all", (req: Request, res: Response) => {
+router.post("/wallet/:address/notifications/read-all", async (req: Request, res: Response) => {
   const address = String(req.params.address || "").toLowerCase();
   if (!isAddress(address)) {
     err(res, 400, "Invalid account address");
     return;
   }
   const db = getDb();
-  db.prepare("UPDATE user_notifications SET status = 'read' WHERE user_address = ?").run(address);
+  await db.prepare("UPDATE user_notifications SET status = 'read' WHERE user_address = ?").run(address);
   res.json({ success: true });
 });
 
-router.get("/posts/:handle/:tweetId", (req: Request, res: Response) => {
+router.get("/posts/:handle/:tweetId", async (req: Request, res: Response) => {
   const handle = String(req.params.handle || "").replace(/^@/, "");
   const tweetId = String(req.params.tweetId || "");
   if (!handle || !tweetId) {
@@ -658,13 +915,13 @@ router.get("/posts/:handle/:tweetId", (req: Request, res: Response) => {
   const contentId = contentIdFromPost(handle, tweetId);
   const db = getDb();
 
-  const total = db
+  const total = await db
     .prepare(
-      "SELECT COALESCE(SUM(CAST(amount AS REAL)), 0) as total, COUNT(*) as count FROM tips WHERE content_id = ?"
+      "SELECT COALESCE(SUM(CAST(amount AS NUMERIC)), 0) as total, COUNT(*) as count FROM tips WHERE content_id = ?"
     )
     .get(contentId) as { total: number; count: number } | undefined;
 
-  const recentTips = db
+  const recentTips = await db
     .prepare(
       "SELECT from_address, amount, tx_hash, timestamp FROM tips WHERE content_id = ? ORDER BY block_number DESC LIMIT 20"
     )
@@ -675,8 +932,8 @@ router.get("/posts/:handle/:tweetId", (req: Request, res: Response) => {
     contentId,
     handle,
     tweetId,
-    totalAmountUsd: ((total?.total ?? 0) / 1e6).toFixed(2),
-    tipCount: total?.count ?? 0,
+    totalAmountUsd: (Number(total?.total ?? 0) / 1e6).toFixed(2),
+    tipCount: Number(total?.count ?? 0),
     recentTips: recentTips.map((t) => ({
       fromAddress: t.from_address,
       amountUsd: (Number(t.amount) / 1e6).toFixed(2),
@@ -687,11 +944,11 @@ router.get("/posts/:handle/:tweetId", (req: Request, res: Response) => {
 });
 
 // ─── GET /creators/:username ─────────────────────────────────────────────
-router.get("/creators/:username", (req: Request, res: Response) => {
+router.get("/creators/:username", async (req: Request, res: Response) => {
   const username = (req.params.username as string).replace(/^@/, "").toLowerCase();
   const db = getDb();
 
-  const claim = db
+  const claim = await db
     .prepare("SELECT author_id, username, display_name, profile_image_url FROM verified_claims WHERE LOWER(username) = ?")
     .get(username) as { author_id: string; username: string; display_name: string | null; profile_image_url: string | null } | undefined;
 
@@ -700,47 +957,51 @@ router.get("/creators/:username", (req: Request, res: Response) => {
     return;
   }
 
-  const total = db
+  const total = await db
     .prepare(
-      `SELECT COALESCE(SUM(CAST(t.amount AS REAL)), 0) as total, COUNT(*) as count
+      `SELECT COALESCE(SUM(CAST(t.amount AS NUMERIC)), 0) as total, COUNT(*) as count
        FROM tips t LEFT JOIN tip_metadata m ON t.content_id = m.content_id
        WHERE ${creatorTipPredicate("t")}`
     )
-    .get(claim.author_id, claim.username) as { total: number; count: number } | undefined;
+    .get(claim.author_id, claim.username) as { total: string; count: string } | undefined;
 
-  const topPosts = db
+  const topPosts = await db
     .prepare(
-      `SELECT t.content_id, SUM(CAST(t.amount AS REAL)) as total, COUNT(*) as count, m.tweet_id, m.author_handle
+      `SELECT t.content_id, SUM(CAST(t.amount AS NUMERIC)) as total, COUNT(*) as count, m.tweet_id, m.author_handle
        FROM tips t LEFT JOIN tip_metadata m ON t.content_id = m.content_id
        WHERE ${creatorTipPredicate("t")} GROUP BY t.content_id ORDER BY total DESC LIMIT 10`
     )
     .all(claim.author_id, claim.username) as Array<{
       content_id: string;
-      total: number;
-      count: number;
+      total: string;
+      count: string;
       tweet_id: string | null;
       author_handle: string | null;
     }>;
 
-  const topSupporters = db
+  const topSupporters = await db
     .prepare(
-      `SELECT t.from_address, SUM(CAST(t.amount AS REAL)) as total
+      `SELECT t.from_address, SUM(CAST(t.amount AS NUMERIC)) as total
        FROM tips t LEFT JOIN tip_metadata m ON t.content_id = m.content_id
        WHERE ${creatorTipPredicate("t")}
        GROUP BY t.from_address ORDER BY total DESC LIMIT 10`
     )
-    .all(claim.author_id, claim.username) as Array<{ from_address: string; total: number }>;
+    .all(claim.author_id, claim.username) as Array<{ from_address: string; total: string }>;
 
-  const recentTips = db
+  const recentTips = await db
     .prepare(
       `SELECT 'tip_received' as type, t.amount, t.tx_hash, t.timestamp,
               t.from_address as from_addr, m.author_handle, m.tweet_id
        FROM tips t LEFT JOIN tip_metadata m ON t.content_id = m.content_id
        WHERE ${creatorTipPredicate("t")}
        ORDER BY t.timestamp DESC
-       LIMIT 7`
+       LIMIT 100`
     )
     .all(claim.author_id, claim.username);
+  const supporterIdentities = await resolveAddressIdentities([
+    ...topSupporters.map((supporter) => supporter.from_address),
+    ...(recentTips as Array<{ from_addr?: string | null }>).map((tip) => tip.from_addr || "").filter(Boolean),
+  ]);
 
   res.set("Cache-Control", "public, max-age=60");
   res.json({
@@ -748,30 +1009,34 @@ router.get("/creators/:username", (req: Request, res: Response) => {
     displayName: claim.display_name,
     profileImageUrl: claim.profile_image_url,
     authorId: claim.author_id,
-    totalReceivedUsd: ((total?.total ?? 0) / 1e6).toFixed(2),
-    tipCount: total?.count ?? 0,
+    totalReceivedUsd: (Number(total?.total ?? 0) / 1e6).toFixed(2),
+    tipCount: Number(total?.count ?? 0),
     topPosts: topPosts.map((p) => ({
       contentId: p.content_id,
-      totalUsd: (p.total / 1e6).toFixed(2),
-      count: p.count,
+      totalUsd: (Number(p.total) / 1e6).toFixed(2),
+      count: Number(p.count),
       tweetId: p.tweet_id,
       authorHandle: p.author_handle,
     })),
     topSupporters: topSupporters.map((s) => ({
       address: s.from_address,
-      totalUsd: (s.total / 1e6).toFixed(2),
+      ...(supporterIdentities.get(s.from_address.toLowerCase()) ?? {}),
+      totalUsd: (Number(s.total) / 1e6).toFixed(2),
     })),
-    recentTips,
+    recentTips: (recentTips as Array<Record<string, any>>).map((tip) => ({
+      ...tip,
+      fromIdentity: tip.from_addr ? supporterIdentities.get(String(tip.from_addr).toLowerCase()) ?? null : null,
+    })),
   });
 });
 
 // ─── GET /creators/:username/earnings-over-time ───────────────────────────
-router.get("/creators/:username/earnings-over-time", (req: Request, res: Response) => {
+router.get("/creators/:username/earnings-over-time", async (req: Request, res: Response) => {
   const username = (req.params.username as string).replace(/^@/, "").toLowerCase();
   const days = Math.min(parseInt(req.query.days as string) || 30, 90);
   const db = getDb();
 
-  const claim = db
+  const claim = await db
     .prepare("SELECT author_id, username FROM verified_claims WHERE LOWER(username) = ? ORDER BY verified_at DESC LIMIT 1")
     .get(username) as { author_id: string; username: string } | undefined;
 
@@ -781,15 +1046,15 @@ router.get("/creators/:username/earnings-over-time", (req: Request, res: Respons
   }
 
   const since = Math.floor(Date.now() / 1000) - days * 24 * 60 * 60;
-  const rows = db
+  const rows = await db
     .prepare(
-      `SELECT date(timestamp, 'unixepoch') as day, SUM(CAST(amount AS REAL)) as total
+      `SELECT to_char(to_timestamp(timestamp), 'YYYY-MM-DD') as day, SUM(CAST(amount AS NUMERIC)) as total
        FROM tips t LEFT JOIN tip_metadata m ON t.content_id = m.content_id
        WHERE ${creatorTipPredicate("t")} AND t.timestamp >= ?
        GROUP BY day ORDER BY day ASC`
     )
-    .all(claim.author_id, claim.username, since) as Array<{ day: string; total: number }>;
-  const totalsByDay = new Map(rows.map((r) => [r.day, r.total]));
+    .all(claim.author_id, claim.username, since) as Array<{ day: string; total: string }>;
+  const totalsByDay = new Map(rows.map((r) => [r.day, Number(r.total)]));
   const today = new Date();
   const daily = Array.from({ length: days }, (_, index) => {
     const day = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
@@ -813,10 +1078,12 @@ router.get("/creators/:username/earnings-over-time", (req: Request, res: Respons
 // GET /creators/:username/performance
 // Source-of-truth service for creator performance figures. Every number is
 // derived from indexed DB rows and returned with raw values plus display values.
-router.get("/creators/:username/performance", (req: Request, res: Response) => {
-  const result = getCreatorPerformance(req.params.username as string, {
+router.get("/creators/:username/performance", async (req: Request, res: Response) => {
+  const result = await getCreatorPerformance(req.params.username as string, {
     period: req.query.period,
     endDate: req.query.endDate,
+    recentPage: req.query.recentPage,
+    recentLimit: req.query.recentLimit,
   });
 
   if (!result) {
@@ -845,7 +1112,7 @@ router.post("/creators/:username/supporters/:supporterAddress/thank", async (req
 
   const db = getDb();
   const username = creatorIdentifier.replace(/^@/, "").toLowerCase();
-  const claim = db
+  const claim = await db
     .prepare(
       `SELECT author_id, username, display_name, owner_address
        FROM verified_claims
@@ -862,9 +1129,9 @@ router.post("/creators/:username/supporters/:supporterAddress/thank", async (req
     return;
   }
 
-  const supporter = db
+  const supporter = await db
     .prepare(
-      `SELECT LOWER(t.from_address) as address, COUNT(*) as tipCount, COALESCE(SUM(CAST(t.amount AS REAL)), 0) as totalRaw
+      `SELECT LOWER(t.from_address) as address, COUNT(*) as tipCount, COALESCE(SUM(CAST(t.amount AS NUMERIC)), 0) as totalRaw
        FROM tips t
        LEFT JOIN tip_metadata m ON t.content_id = m.content_id
        WHERE LOWER(t.from_address) = ?
@@ -873,7 +1140,7 @@ router.post("/creators/:username/supporters/:supporterAddress/thank", async (req
        LIMIT 1`
     )
     .get(supporterAddress, claim.author_id, claim.username) as
-    | { address: string; tipCount: number; totalRaw: number }
+    | { address: string; tipCount: string; totalRaw: string }
     | undefined;
 
   if (!supporter) {
@@ -882,14 +1149,40 @@ router.post("/creators/:username/supporters/:supporterAddress/thank", async (req
   }
 
   const totalRaw = String(Math.trunc(Number(supporter.totalRaw || 0)));
-  const notificationId = createThankYouMessageNotification({
+  const creatorSettings = await getUserSettings(ownerAddress);
+  const notificationId = await createThankYouMessageNotification({
     userAddress: supporterAddress,
     creatorUsername: claim.username,
     creatorDisplayName: claim.display_name,
     creatorOwnerAddress: ownerAddress,
     totalRaw,
-    tipCount: supporter.tipCount,
+    tipCount: Number(supporter.tipCount),
+    message: creatorSettings.engagement.defaultThankYouMessage,
   });
+
+  await db.prepare(
+    `INSERT INTO supporter_thank_yous (
+      supporter_address,
+      creator_owner_address,
+      creator_author_id,
+      creator_username,
+      tip_count,
+      total_raw,
+      message,
+      notification_id,
+      created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    supporterAddress,
+    ownerAddress,
+    claim.author_id,
+    claim.username,
+    Number(supporter.tipCount),
+    totalRaw,
+    creatorSettings.engagement.defaultThankYouMessage,
+    notificationId,
+    Date.now()
+  );
 
   res.set("Cache-Control", "private, no-store");
   res.json({
@@ -900,14 +1193,14 @@ router.post("/creators/:username/supporters/:supporterAddress/thank", async (req
       truncatedAddress: `${supporterAddress.slice(0, 6)}...${supporterAddress.slice(-4)}`,
       totalRaw,
       totalUsd: rawToUsd(totalRaw),
-      tipCount: supporter.tipCount,
+      tipCount: Number(supporter.tipCount),
     },
   });
 });
 
-router.get("/tippers/:address", (req: Request, res: Response) => {
+router.get("/tippers/:address", async (req: Request, res: Response) => {
   const address = (req.params.address as string).toLowerCase();
-  const stats = getUnifiedTipperStats(address);
+  const stats = await getUnifiedTipperStats(address);
 
   res.set("Cache-Control", "public, max-age=60");
   res.json({
@@ -915,6 +1208,8 @@ router.get("/tippers/:address", (req: Request, res: Response) => {
     totalSentUsd: (Number(stats.totalSent) / 1e6).toFixed(2),
     totalSent: stats.totalSent,
     tipCount: stats.tipCount,
+    thankYouReceivedCount: stats.thankYouReceivedCount,
+    recentTips: stats.recentTips,
     creatorsSupported: stats.creatorsSupported.map((c) => ({
       authorId: c.authorId,
       username: c.username,
@@ -930,24 +1225,24 @@ router.get("/tippers/:address", (req: Request, res: Response) => {
 });
 
 // ─── GET /stats ──────────────────────────────────────────────────────────
-router.get("/stats", (req: Request, res: Response) => {
+router.get("/stats", async (req: Request, res: Response) => {
   const db = getDb();
-  const tipsAgg = db.prepare(
-    `SELECT COUNT(*) as total_tips, COALESCE(SUM(CAST(amount AS REAL)), 0) as total_volume, COUNT(DISTINCT from_address) as distinct_tippers FROM tips`
-  ).get() as { total_tips: number; total_volume: number; distinct_tippers: number };
-  const creatorsCount = db.prepare("SELECT COUNT(DISTINCT author_id) as count FROM verified_claims").get() as { count: number };
+  const tipsAgg = await db.prepare(
+    `SELECT COUNT(*) as total_tips, COALESCE(SUM(CAST(amount AS NUMERIC)), 0) as total_volume, COUNT(DISTINCT from_address) as distinct_tippers FROM tips`
+  ).get() as { total_tips: string; total_volume: string; distinct_tippers: string };
+  const creatorsCount = await db.prepare("SELECT COUNT(DISTINCT author_id) as count FROM verified_claims").get() as { count: string };
 
   res.set("Cache-Control", "public, max-age=60");
   res.json({
-    totalTips: tipsAgg.total_tips,
-    totalVolumeUsd: (tipsAgg.total_volume / 1e6).toFixed(2),
-    distinctTippers: tipsAgg.distinct_tippers,
-    verifiedCreators: creatorsCount.count,
+    totalTips: Number(tipsAgg.total_tips),
+    totalVolumeUsd: (Number(tipsAgg.total_volume) / 1e6).toFixed(2),
+    distinctTippers: Number(tipsAgg.distinct_tippers),
+    verifiedCreators: Number(creatorsCount.count),
   });
 });
 
 // ─── GET /discover ────────────────────────────────────────────────────────
-router.get("/discover", (req: Request, res: Response) => {
+router.get("/discover", async (req: Request, res: Response) => {
   const addressParam = typeof req.query.address === "string" ? req.query.address.toLowerCase() : "";
   const address = addressParam && isAddress(addressParam) ? addressParam : "";
   const db = getDb();
@@ -961,12 +1256,12 @@ router.get("/discover", (req: Request, res: Response) => {
     0, 0, 0, 0
   ) / 1000);
 
-  const trendingRows = db
+  const trendingRows = await db
     .prepare(
       `SELECT
          t.content_id,
          t.author_id,
-         COALESCE(SUM(CAST(t.amount AS REAL)), 0) as total,
+         COALESCE(SUM(CAST(t.amount AS NUMERIC)), 0) as total,
          COUNT(*) as tip_count,
          COUNT(DISTINCT t.from_address) as unique_tippers,
          MAX(t.timestamp) as last_tip_at,
@@ -1001,11 +1296,11 @@ router.get("/discover", (req: Request, res: Response) => {
     .all(todayStart) as Array<{
       content_id: string;
       author_id: string;
-      total: number;
-      tip_count: number;
-      unique_tippers: number;
+      total: string;
+      tip_count: string;
+      unique_tippers: string;
       last_tip_at: number;
-      tips_today: number;
+      tips_today: string;
       author_handle: string | null;
       tweet_id: string | null;
       username: string | null;
@@ -1013,17 +1308,17 @@ router.get("/discover", (req: Request, res: Response) => {
       profile_image_url: string | null;
     }>;
 
-  const creatorRows = db
+  const creatorRows = await db
     .prepare(
       `SELECT
          t.author_id,
-         COALESCE(SUM(CAST(t.amount AS REAL)), 0) as total,
+         COALESCE(SUM(CAST(t.amount AS NUMERIC)), 0) as total,
          COUNT(*) as tip_count,
          COUNT(DISTINCT t.from_address) as unique_supporters,
          COUNT(DISTINCT t.content_id) as tipped_posts,
          MAX(t.timestamp) as last_tip_at,
          SUM(CASE WHEN t.timestamp >= ? THEN 1 ELSE 0 END) as recent_tip_count,
-         SUM(CASE WHEN t.timestamp >= ? THEN CAST(t.amount AS REAL) ELSE 0 END) as total_this_week,
+         SUM(CASE WHEN t.timestamp >= ? THEN CAST(t.amount AS NUMERIC) ELSE 0 END) as total_this_week,
          (
            SELECT username FROM verified_claims
            WHERE author_id = t.author_id
@@ -1081,13 +1376,13 @@ router.get("/discover", (req: Request, res: Response) => {
     )
     .all(sevenDaysAgo, weekStart) as Array<{
       author_id: string;
-      total: number;
-      tip_count: number;
-      unique_supporters: number;
-      tipped_posts: number;
+      total: string;
+      tip_count: string;
+      unique_supporters: string;
+      tipped_posts: string;
       last_tip_at: number;
-      recent_tip_count: number;
-      total_this_week: number;
+      recent_tip_count: string;
+      total_this_week: string;
       username: string | null;
       display_name: string | null;
       profile_image_url: string | null;
@@ -1096,38 +1391,38 @@ router.get("/discover", (req: Request, res: Response) => {
 
   const tippedBeforeAuthors = address
     ? new Set(
-        (db
+        (await db
           .prepare("SELECT DISTINCT author_id FROM tips WHERE LOWER(from_address) = ?")
           .all(address) as Array<{ author_id: string }>)
           .map((row) => row.author_id)
       )
     : new Set<string>();
   const tippedBeforeArgs = Array.from(tippedBeforeAuthors);
-  const sharedSupporterStmt = tippedBeforeArgs.length
-    ? db.prepare(
-        `SELECT COUNT(DISTINCT from_address) as count
-         FROM tips
-         WHERE author_id = ?
-           AND LOWER(from_address) IN (
-             SELECT DISTINCT LOWER(from_address)
-             FROM tips
-             WHERE author_id IN (${tippedBeforeArgs.map(() => "?").join(",")})
-           )`
-      )
+  const sharedSupporterSql = tippedBeforeArgs.length
+    ? `SELECT COUNT(DISTINCT from_address) as count
+       FROM tips
+       WHERE author_id = ?
+         AND LOWER(from_address) IN (
+           SELECT DISTINCT LOWER(from_address)
+           FROM tips
+           WHERE author_id IN (${tippedBeforeArgs.map(() => "?").join(",")})
+         )`
     : null;
 
-  const recommendations = creatorRows.map((row) => {
+  const recommendations = await Promise.all(creatorRows.map(async (row) => {
     const isVerified = Boolean(row.username);
     const handle = (row.username || row.latest_handle || "").replace(/^@/, "");
     const isTippedBefore = tippedBeforeAuthors.has(row.author_id);
+    const recentTipCount = Number(row.recent_tip_count || 0);
+    const uniqueSupporters = Number(row.unique_supporters || 0);
     const repeatTips = Math.max(0, Number(row.tip_count || 0) - Number(row.unique_supporters || 0));
-    const sharedSupporters = sharedSupporterStmt
-      ? ((sharedSupporterStmt.get(row.author_id, ...tippedBeforeArgs) as { count: number } | undefined)?.count || 0)
+    const sharedSupporters = sharedSupporterSql
+      ? Number(((await db.prepare(sharedSupporterSql).get(row.author_id, ...tippedBeforeArgs) as { count: string } | undefined)?.count || 0))
       : 0;
     const unclaimedSignal = !isVerified && Number(row.total || 0) > 0 ? 1 : 0;
     const score =
-      Number(row.recent_tip_count || 0) * 4 +
-      Number(row.unique_supporters || 0) * 3 +
+      recentTipCount * 4 +
+      uniqueSupporters * 3 +
       unclaimedSignal * 6 +
       repeatTips * 2 +
       sharedSupporters * 3 +
@@ -1135,7 +1430,7 @@ router.get("/discover", (req: Request, res: Response) => {
 
     let reason = "Receiving support across Teep";
     let reasonType: "recent_unique" | "unclaimed_recent" | "retip" | "similar" | "tipped_before" | "general" = "general";
-    if (!isVerified && row.recent_tip_count > 0) {
+    if (!isVerified && recentTipCount > 0) {
       reason = "Has tips waiting to be claimed";
       reasonType = "unclaimed_recent";
     } else if (isTippedBefore) {
@@ -1147,7 +1442,7 @@ router.get("/discover", (req: Request, res: Response) => {
     } else if (repeatTips > 0) {
       reason = "Supporters keep tipping this creator";
       reasonType = "retip";
-    } else if (row.recent_tip_count > 0 && row.unique_supporters > 1) {
+    } else if (recentTipCount > 0 && uniqueSupporters > 1) {
       reason = "Recently received support from multiple tippers";
       reasonType = "recent_unique";
     }
@@ -1159,19 +1454,19 @@ router.get("/discover", (req: Request, res: Response) => {
       profileImageUrl: row.profile_image_url,
       totalReceivedUsd: rawToUsd(row.total),
       totalThisWeekUsd: rawToUsd(row.total_this_week),
-      tipCount: row.tip_count,
-      uniqueSupporters: row.unique_supporters,
-      tippedPosts: row.tipped_posts,
+      tipCount: Number(row.tip_count),
+      uniqueSupporters,
+      tippedPosts: Number(row.tipped_posts),
       lastTipAt: row.last_tip_at,
       lastTipAgo: timeAgoFromUnix(row.last_tip_at),
-      recentTipCount: row.recent_tip_count,
+      recentTipCount,
       isVerified,
       claimStatus: isVerified ? "verified" : "unclaimed",
       reason,
       reasonType,
       score,
     };
-  });
+  }));
 
   const recommendedCreators = recommendations
     .slice()
@@ -1193,7 +1488,7 @@ router.get("/discover", (req: Request, res: Response) => {
     .filter((creator) => creator.claimStatus === "unclaimed")
     .sort((a, b) => b.score - a.score)
     .slice(0, 3);
-  const tipperStats = address ? getUnifiedTipperStats(address) : null;
+  const tipperStats = address ? await getUnifiedTipperStats(address) : null;
   const allUserSupportedCreators = tipperStats?.creatorsSupported || [];
   const tippedBefore = address
     ? allUserSupportedCreators.slice(0, 4).map((creator) => ({
@@ -1217,10 +1512,13 @@ router.get("/discover", (req: Request, res: Response) => {
 
   const trendingPosts = trendingRows.map((row) => {
     const handle = (row.username || row.author_handle || "").replace(/^@/, "");
-    const reason = row.tips_today > 1
+    const tipsToday = Number(row.tips_today);
+    const uniqueTippers = Number(row.unique_tippers);
+    const tipCount = Number(row.tip_count);
+    const reason = tipsToday > 1
       ? `${row.tips_today} tips in the last 24h`
-      : row.unique_tippers > 1
-        ? `${row.unique_tippers} people tipped this post`
+      : uniqueTippers > 1
+        ? `${uniqueTippers} people tipped this post`
         : "Recently tipped";
     return {
       contentId: row.content_id,
@@ -1230,9 +1528,9 @@ router.get("/discover", (req: Request, res: Response) => {
       profileImageUrl: row.profile_image_url,
       tweetId: row.tweet_id,
       totalTippedUsd: rawToUsd(row.total),
-      tipCount: row.tip_count,
-      uniqueTippers: row.unique_tippers,
-      tipsToday: row.tips_today,
+      tipCount,
+      uniqueTippers,
+      tipsToday,
       lastTipAt: row.last_tip_at,
       lastTipAgo: timeAgoFromUnix(row.last_tip_at),
       postPreview: row.tweet_id ? "Tipped post on X" : "Tipped creator content",
@@ -1272,7 +1570,7 @@ router.get("/discover", (req: Request, res: Response) => {
 
 // ─── GET /leaderboard/creators ────────────────────────────────────────────
 // ─── GET /discover/search ─────────────────────────────────────────────────────
-router.get("/discover/search", (req: Request, res: Response) => {
+router.get("/discover/search", async (req: Request, res: Response) => {
   const rawQuery = typeof req.query.q === "string" ? req.query.q.trim().replace(/^@/, "").toLowerCase() : "";
   const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 8, 1), 20);
   if (rawQuery.length < 2) {
@@ -1283,12 +1581,12 @@ router.get("/discover/search", (req: Request, res: Response) => {
   const db = getDb();
   const sevenDaysAgo = Math.floor(Date.now() / 1000) - 7 * 24 * 60 * 60;
   const like = `%${rawQuery}%`;
-  const rows = db
+  const rows = await db
     .prepare(
       `WITH creator_activity AS (
          SELECT
            t.author_id,
-           COALESCE(SUM(CAST(t.amount AS REAL)), 0) as total,
+           COALESCE(SUM(CAST(t.amount AS NUMERIC)), 0) as total,
            COUNT(*) as tip_count,
            COUNT(DISTINCT t.from_address) as unique_supporters,
            COUNT(DISTINCT t.content_id) as tipped_posts,
@@ -1357,12 +1655,12 @@ router.get("/discover/search", (req: Request, res: Response) => {
     )
     .all(sevenDaysAgo, like, like, like, limit) as Array<{
       author_id: string;
-      total: number;
-      tip_count: number;
-      unique_supporters: number;
-      tipped_posts: number;
+      total: string;
+      tip_count: string;
+      unique_supporters: string;
+      tipped_posts: string;
       last_tip_at: number;
-      recent_tip_count: number;
+      recent_tip_count: string;
       username: string | null;
       display_name: string | null;
       profile_image_url: string | null;
@@ -1380,12 +1678,12 @@ router.get("/discover/search", (req: Request, res: Response) => {
         displayName: row.display_name,
         profileImageUrl: row.profile_image_url,
         totalReceivedUsd: rawToUsd(row.total),
-        tipCount: row.tip_count,
-        uniqueSupporters: row.unique_supporters,
-        tippedPosts: row.tipped_posts,
+        tipCount: Number(row.tip_count),
+        uniqueSupporters: Number(row.unique_supporters),
+        tippedPosts: Number(row.tipped_posts),
         lastTipAt: row.last_tip_at,
         lastTipAgo: timeAgoFromUnix(row.last_tip_at),
-        recentTipCount: row.recent_tip_count,
+        recentTipCount: Number(row.recent_tip_count),
         isVerified,
         claimStatus: isVerified ? "verified" : "unclaimed",
         reason: "Recorded in Teep tip activity",
@@ -1395,7 +1693,7 @@ router.get("/discover/search", (req: Request, res: Response) => {
   });
 });
 
-router.get("/leaderboard/creators", (req: Request, res: Response) => {
+router.get("/leaderboard/creators", async (req: Request, res: Response) => {
   const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
   const period = req.query.period as string;
   const since = period === "30d" ? Math.floor(Date.now() / 1000) - 30 * 24 * 60 * 60 : null;
@@ -1407,16 +1705,16 @@ router.get("/leaderboard/creators", (req: Request, res: Response) => {
       : "WHERE t.author_id IN (SELECT author_id FROM verified_claims)";
   const args = since != null ? [since, limit] : [limit];
 
-  const rows = db
+  const rows = await db
     .prepare(
-      `SELECT t.author_id, SUM(CAST(t.amount AS REAL)) as total FROM tips t ${whereClause} GROUP BY t.author_id ORDER BY total DESC LIMIT ?`
+      `SELECT t.author_id, SUM(CAST(t.amount AS NUMERIC)) as total FROM tips t ${whereClause} GROUP BY t.author_id ORDER BY total DESC LIMIT ?`
     )
-    .all(...args) as Array<{ author_id: string; total: number }>;
+    .all(...args) as Array<{ author_id: string; total: string }>;
 
   const authorIds = rows.map((r) => r.author_id);
   const claims =
     authorIds.length > 0
-      ? (db
+      ? (await db
           .prepare("SELECT author_id, username, display_name FROM verified_claims WHERE author_id IN (" + authorIds.map(() => "?").join(",") + ")")
           .all(...authorIds) as Array<{ author_id: string; username: string; display_name: string | null }>)
       : [];
@@ -1427,7 +1725,7 @@ router.get("/leaderboard/creators", (req: Request, res: Response) => {
     authorId: r.author_id,
     username: byAuthor[r.author_id]?.username ?? null,
     displayName: byAuthor[r.author_id]?.displayName ?? null,
-    totalReceivedUsd: (r.total / 1e6).toFixed(2),
+    totalReceivedUsd: (Number(r.total) / 1e6).toFixed(2),
   }));
 
   res.set("Cache-Control", "public, max-age=60");
@@ -1435,7 +1733,7 @@ router.get("/leaderboard/creators", (req: Request, res: Response) => {
 });
 
 // ─── GET /leaderboard/tippers ─────────────────────────────────────────────
-router.get("/leaderboard/tippers", (req: Request, res: Response) => {
+router.get("/leaderboard/tippers", async (req: Request, res: Response) => {
   const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
   const period = req.query.period as string;
   const since = period === "30d" ? Math.floor(Date.now() / 1000) - 30 * 24 * 60 * 60 : null;
@@ -1444,16 +1742,16 @@ router.get("/leaderboard/tippers", (req: Request, res: Response) => {
   const whereClause = since != null ? "WHERE timestamp >= ?" : "";
   const args = since != null ? [since, limit] : [limit];
 
-  const rows = db
+  const rows = await db
     .prepare(
-      `SELECT from_address, SUM(CAST(amount AS REAL)) as total FROM tips ${whereClause} GROUP BY from_address ORDER BY total DESC LIMIT ?`
+      `SELECT from_address, SUM(CAST(amount AS NUMERIC)) as total FROM tips ${whereClause} GROUP BY from_address ORDER BY total DESC LIMIT ?`
     )
-    .all(...args) as Array<{ from_address: string; total: number }>;
+    .all(...args) as Array<{ from_address: string; total: string }>;
 
   const tippers = rows.map((r, i) => ({
     rank: i + 1,
     address: r.from_address,
-    totalSentUsd: (r.total / 1e6).toFixed(2),
+    totalSentUsd: (Number(r.total) / 1e6).toFixed(2),
   }));
 
   res.set("Cache-Control", "public, max-age=60");
@@ -1465,7 +1763,7 @@ router.get("/wallet/:address/eligibility", async (req: Request, res: Response) =
   const address = (req.params.address as string).toLowerCase();
   const db = getDb();
 
-  const authorId = resolveAuthorId(db, address);
+  const authorId = await resolveAuthorId(db, address);
   if (!authorId) {
     res.set("Cache-Control", "public, max-age=60");
     return res.json({
@@ -1476,7 +1774,7 @@ router.get("/wallet/:address/eligibility", async (req: Request, res: Response) =
     });
   }
 
-  let row = db
+  let row = await db
     .prepare("SELECT wallet_address FROM claim_wallets WHERE author_id = ?")
     .get(authorId) as { wallet_address: string } | undefined;
 
@@ -1540,10 +1838,10 @@ router.get("/wallet/:address/usdc-balance", async (req: Request, res: Response) 
     });
     const rawStr = balanceRaw.toString();
     const usd = (Number(balanceRaw) / 1e6).toFixed(2);
-    const settings = getUserSettings(address);
+    const settings = await getUserSettings(address);
     const thresholdRaw = BigInt(Math.round(Number(settings.defaultTipAmount) * 1e6));
     if (settings.notifications.lowBalance && thresholdRaw > 0n && balanceRaw < thresholdRaw) {
-      createLowBalanceNotification({ userAddress: address, balanceRaw: rawStr, thresholdUsd: settings.defaultTipAmount });
+      await createLowBalanceNotification({ userAddress: address, balanceRaw: rawStr, thresholdUsd: settings.defaultTipAmount });
     }
     res.set("Cache-Control", "public, max-age=15");
     res.json({ address, balanceRaw: rawStr, balanceUsd: usd });
@@ -1559,65 +1857,38 @@ router.get("/wallet/:address/balance", async (req: Request, res: Response) => {
   const address = (req.params.address as string).toLowerCase();
   const db = getDb();
 
-  const authorId = resolveAuthorId(db, address);
+  const authorId = await resolveAuthorId(db, address);
   if (!authorId) {
     err(res, 404, "No claim wallet for this address", "NOT_FOUND");
     return;
   }
 
-  let claimWalletAddresses = (
-    db
-      .prepare("SELECT DISTINCT wallet_address FROM claim_wallets WHERE LOWER(owner_address) = ?")
-      .all(address) as Array<{ wallet_address: string }>
-  ).map((row) => row.wallet_address.toLowerCase());
-
-  const legacyWalletAddresses = (
-    db
-      .prepare(
-        `SELECT DISTINCT l.wallet_address
-         FROM claim_wallet_legacy l
-         JOIN verified_claims v ON v.author_id = l.author_id
-         WHERE LOWER(v.owner_address) = ?`
-      )
-      .all(address) as Array<{ wallet_address: string }>
-  ).map((row) => row.wallet_address.toLowerCase());
-
-  claimWalletAddresses = [...claimWalletAddresses, ...legacyWalletAddresses]
-    .filter((wallet, index, all) => /^0x[a-f0-9]{40}$/.test(wallet) && all.indexOf(wallet) === index);
-
-  if (claimWalletAddresses.length > 0) {
-    // Include every claim wallet owned by this creator so legacy hash-id wallets and
-    // new numeric X-id wallets do not mask each other on the dashboard.
-  } else {
-    // Indexer may not have it; try chain
-    const factoryAddress = process.env.FACTORY_ADDRESS as `0x${string}` | undefined;
-    if (!factoryAddress || !RPC_URL) {
-      err(res, 404, "Claim wallet not found", "NOT_FOUND");
-      return;
-    }
+  const factoryAddress = process.env.FACTORY_ADDRESS as `0x${string}` | undefined;
+  let claimWalletAddress: string | null = null;
+  if (factoryAddress && RPC_URL) {
     try {
       const client = createBackendPublicClient({ url: RPC_URL });
-      const isDeployed = await client.readContract({
-        address: factoryAddress,
-        abi: [{ name: "isDeployed", type: "function", stateMutability: "view", inputs: [{ name: "_authorId", type: "uint256" }], outputs: [{ type: "bool" }] }],
-        functionName: "isDeployed",
-        args: [BigInt(authorId)],
-      });
-      if (!isDeployed) {
-        err(res, 404, "Claim wallet not deployed", "NOT_FOUND");
-        return;
-      }
       const walletAddr = await client.readContract({
         address: factoryAddress,
         abi: [{ name: "computeClaimWallet", type: "function", stateMutability: "view", inputs: [{ name: "_authorId", type: "uint256" }], outputs: [{ type: "address" }] }],
         functionName: "computeClaimWallet",
         args: [BigInt(authorId)],
       });
-      claimWalletAddresses = [(walletAddr as string).toLowerCase()];
+      claimWalletAddress = (walletAddr as string).toLowerCase();
     } catch {
-      err(res, 404, "Claim wallet not found", "NOT_FOUND");
-      return;
+      claimWalletAddress = null;
     }
+  }
+
+  if (!claimWalletAddress) {
+    const currentWallet = await db
+      .prepare("SELECT wallet_address FROM claim_wallets WHERE author_id = ? AND LOWER(owner_address) = ? LIMIT 1")
+      .get(authorId, address) as { wallet_address: string } | undefined;
+    claimWalletAddress = currentWallet?.wallet_address?.toLowerCase() || null;
+  }
+  if (!claimWalletAddress || !/^0x[a-f0-9]{40}$/.test(claimWalletAddress)) {
+    err(res, 404, "Current claim wallet not found", "NOT_FOUND");
+    return;
   }
 
   if (!USDC_ADDRESS || !RPC_URL) {
@@ -1627,31 +1898,19 @@ router.get("/wallet/:address/balance", async (req: Request, res: Response) => {
 
   try {
     const client = createBackendPublicClient({ url: RPC_URL });
-    let balanceRaw = 0n;
-    const walletBalances: Array<{ address: string; balanceRaw: string; balanceUsd: string }> = [];
-    for (const claimWalletAddress of claimWalletAddresses) {
-      const walletBalanceRaw = await client.readContract({
-        address: USDC_ADDRESS,
-        abi: ERC20_ABI,
-        functionName: "balanceOf",
-        args: [claimWalletAddress as `0x${string}`],
-      });
-      balanceRaw += walletBalanceRaw;
-      walletBalances.push({
-        address: claimWalletAddress,
-        balanceRaw: walletBalanceRaw.toString(),
-        balanceUsd: (Number(walletBalanceRaw) / 1e6).toFixed(2),
-      });
-    }
+    const balanceRaw = await client.readContract({
+      address: USDC_ADDRESS,
+      abi: ERC20_ABI,
+      functionName: "balanceOf",
+      args: [claimWalletAddress as `0x${string}`],
+    });
     const rawStr = balanceRaw.toString();
     const usd = (Number(balanceRaw) / 1e6).toFixed(2);
 
     res.set("Cache-Control", "public, max-age=30");
     res.json({
       address,
-      claimWalletAddress: claimWalletAddresses[0],
-      claimWalletAddresses,
-      claimWalletBalances: walletBalances,
+      claimWalletAddress,
       balanceRaw: rawStr,
       balanceUsd: usd,
     });
@@ -1670,11 +1929,13 @@ function decodeHtmlEntities(text: string): string {
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
+    .replace(/&mdash;/g, "-")
     .replace(/&nbsp;/g, " ");
 }
 
 function stripHtmlExcerpt(html: string, maxLen: number = 200): string {
-  const text = decodeHtmlEntities(html
+  const paragraph = html.match(/<p\b[^>]*>([\s\S]*?)<\/p>/i)?.[1] ?? html;
+  const text = decodeHtmlEntities(paragraph
     .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "")
     .replace(/<[^>]+>/g, " ")
     .replace(/\s+/g, " ")
@@ -1700,9 +1961,9 @@ function oembedFallback(res: Response, url: string, reason: string) {
   });
 }
 
-function fetchJsonInsecureDevOnly(url: string): Promise<{ ok: boolean; status: number; json: unknown }> {
+function fetchJsonInsecureDevOnly(url: string, redirectCount = 0): Promise<{ ok: boolean; status: number; json: unknown }> {
   if (!ALLOW_INSECURE_OEMBED_TLS) {
-    return fetch(url, { headers: { Accept: "application/json" } }).then(async (response) => ({
+    return fetch(url, { headers: { Accept: "application/json", "User-Agent": "Teep/1.0 (+https://teep.app)" } }).then(async (response) => ({
       ok: response.ok,
       status: response.status,
       json: response.ok ? await response.json() : null,
@@ -1718,7 +1979,7 @@ function fetchJsonInsecureDevOnly(url: string): Promise<{ ok: boolean; status: n
     const request = https.get(
       url,
       {
-        headers: { Accept: "application/json" },
+        headers: { Accept: "application/json", "User-Agent": "Teep/1.0 (+https://teep.app)" },
         agent: new https.Agent({ rejectUnauthorized: false }),
         timeout: 8000,
       },
@@ -1730,6 +1991,12 @@ function fetchJsonInsecureDevOnly(url: string): Promise<{ ok: boolean; status: n
         });
         response.on("end", () => {
           const status = response.statusCode || 500;
+          const location = response.headers.location;
+          if ([301, 302, 303, 307, 308].includes(status) && location && redirectCount < 3) {
+            const nextUrl = new URL(location, url).toString();
+            fetchJsonInsecureDevOnly(nextUrl, redirectCount + 1).then(resolve).catch(reject);
+            return;
+          }
           try {
             resolve({ ok: status >= 200 && status < 300, status, json: body ? JSON.parse(body) : null });
           } catch (error) {
@@ -1763,7 +2030,7 @@ router.get("/oembed", async (req: Request, res: Response) => {
     return;
   }
   try {
-    const oembedUrl = `https://publish.twitter.com/oembed?url=${encodeURIComponent(url)}`;
+    const oembedUrl = `https://publish.x.com/oembed?url=${encodeURIComponent(url)}`;
     const response = await fetchJsonInsecureDevOnly(oembedUrl);
     if (!response.ok) {
       if (response.status === 404) {
@@ -1794,6 +2061,53 @@ router.get("/oembed", async (req: Request, res: Response) => {
     const message = e instanceof Error ? e.message : String(e);
     console.warn("[API v1] oEmbed unavailable:", message);
     oembedFallback(res, url, "embed_fetch_failed");
+  }
+});
+
+router.get("/avatar", async (req: Request, res: Response) => {
+  const source = typeof req.query.src === "string" ? req.query.src : "";
+  const seed = typeof req.query.seed === "string" ? req.query.seed : "teep";
+  if (!source) {
+    err(res, 400, "Avatar source is required");
+    return;
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3500);
+  try {
+    const avatar = await fetchAvatarUrl(source, controller.signal, false);
+    res.set("Cache-Control", avatar ? "public, max-age=86400, stale-while-revalidate=604800" : "public, max-age=3600");
+    res.set("X-Content-Type-Options", "nosniff");
+    if (!avatar) {
+      res.type("image/svg+xml").send(fallbackAvatarSvg(seed));
+      return;
+    }
+    res.type(avatar.contentType).send(avatar.body);
+  } catch {
+    res.set("Cache-Control", "public, max-age=3600");
+    res.type("image/svg+xml").send(fallbackAvatarSvg(seed));
+  } finally {
+    clearTimeout(timeout);
+  }
+});
+
+router.get("/avatar/x/:handle", async (req: Request, res: Response) => {
+  const handle = normalizeSocialXHandle(req.params.handle);
+  if (!handle) {
+    err(res, 400, "Invalid X handle");
+    return;
+  }
+  try {
+    const avatar = await fetchAvatarBuffer(handle);
+    res.set("Cache-Control", avatar ? "public, max-age=86400, stale-while-revalidate=604800" : "public, max-age=3600");
+    res.set("X-Content-Type-Options", "nosniff");
+    if (!avatar) {
+      res.type("image/svg+xml").send(fallbackAvatarSvg(handle));
+      return;
+    }
+    res.type(avatar.contentType).send(avatar.body);
+  } catch (error) {
+    res.set("Cache-Control", "public, max-age=3600");
+    res.type("image/svg+xml").send(fallbackAvatarSvg(handle));
   }
 });
 

@@ -111,6 +111,7 @@ if (container) {
             loginMethods: ["email", "google"],
             embeddedWallets: {
               ethereum: { createOnLogin: "users-without-wallets" },
+              showWalletUIs: false,
             },
             defaultChain: CONFIG.CHAIN,
             supportedChains: [CONFIG.CHAIN],

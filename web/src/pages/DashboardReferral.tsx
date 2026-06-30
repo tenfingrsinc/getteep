@@ -1,106 +1,17 @@
-import { useCallback, useEffect, useState } from "react";
 import { usePrivy } from "@privy-io/react-auth";
-import { useSmartWallets } from "@privy-io/react-auth/smart-wallets";
-import { API_BASE, WEB_APP_URL } from "../config";
 import DashboardShell from "../components/DashboardShell";
+import { DashboardConnectPage, DashboardPreparingPage } from "../components/DashboardAuthState";
+import { useReferral } from "../context/ReferralContext";
 
 export default function DashboardReferral() {
-  const { ready, authenticated, login } = usePrivy();
-  const { client: smartWalletClient } = useSmartWallets();
-  const address = (ready && authenticated ? smartWalletClient?.account?.address || "" : "").toLowerCase();
-
-  const [code, setCode] = useState<string | null>(null);
-  const [referredCount, setReferredCount] = useState(0);
-  const [status, setStatus] = useState("");
-  const [loading, setLoading] = useState(false);
-  const referralUrl = code ? `${WEB_APP_URL || window.location.origin}/?ref=${encodeURIComponent(code)}` : "";
-
-  const requestWalletProof = useCallback(async () => {
-    if (!address || !smartWalletClient?.account) throw new Error("Connect your account first.");
-    const challengeRes = await fetch(`${API_BASE}/auth/wallet/challenge`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ address, purpose: "referral-code" }),
-    });
-    const challenge = await challengeRes.json();
-    if (!challengeRes.ok || !challenge.message) throw new Error(challenge.error || "Could not verify account.");
-    const signature = await smartWalletClient.signMessage({
-      account: smartWalletClient.account,
-      message: challenge.message,
-    } as Parameters<typeof smartWalletClient.signMessage>[0]);
-    return { message: challenge.message, signature };
-  }, [address, smartWalletClient]);
-
-  const loadReferral = useCallback(async () => {
-    if (!address) return;
-    const [codeRes, statsRes] = await Promise.all([
-      fetch(`${API_BASE}/referral/code/${address}`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
-      fetch(`${API_BASE}/referral/stats/${address}`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
-    ]);
-    setCode(codeRes?.code || null);
-    setReferredCount(Number(statsRes?.referredCount || 0));
-  }, [address]);
-
-  useEffect(() => {
-    if (address) loadReferral();
-  }, [address, loadReferral]);
-
-  const createCode = useCallback(async (): Promise<string | null> => {
-    setLoading(true);
-    setStatus("");
-    try {
-      const walletProof = await requestWalletProof();
-      const response = await fetch(`${API_BASE}/referral/code`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ address, walletProof }),
-      });
-      const data = await response.json();
-      if (!response.ok || !data.code) throw new Error(data.error || "Could not create referral link.");
-      setCode(data.code);
-      setStatus("Referral link ready.");
-      return String(data.code);
-    } catch (err: unknown) {
-      setStatus(err instanceof Error ? err.message : "Could not create referral link.");
-      return null;
-    } finally {
-      setLoading(false);
-    }
-  }, [address, requestWalletProof]);
-
-  const copyLink = useCallback(async () => {
-    try {
-      const usableCode = code || await createCode();
-      const link = usableCode ? `${WEB_APP_URL || window.location.origin}/?ref=${encodeURIComponent(usableCode)}` : referralUrl;
-      if (!link) return;
-      await navigator.clipboard.writeText(link);
-      setStatus("Referral link copied.");
-    } catch {
-      setStatus("Could not copy referral link.");
-    }
-  }, [code, createCode, referralUrl]);
+  const { ready, authenticated } = usePrivy();
+  const { address, code, referredCount, status, loading, referralUrl, createCode, copyLink } = useReferral();
 
   if (!ready) {
-    return (
-      <DashboardShell title="Referrals">
-        <main className="dashboard-body-inner">
-          <div className="dashboard-empty-auth"><h1>Referrals</h1><p>Preparing your dashboard.</p></div>
-        </main>
-      </DashboardShell>
-    );
+    return <DashboardPreparingPage title="Referrals" />;
   }
   if (!authenticated) {
-    return (
-      <DashboardShell title="Referrals">
-        <main className="dashboard-body-inner">
-          <div className="dashboard-empty-auth">
-            <h1>Connect your account</h1>
-            <p>Sign in to manage your Teep referral link.</p>
-            <button type="button" className="btn-primary" onClick={login}>Connect</button>
-          </div>
-        </main>
-      </DashboardShell>
-    );
+    return <DashboardConnectPage title="Referrals" />;
   }
 
   return (

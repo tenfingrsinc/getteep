@@ -23,7 +23,7 @@ function parsePeriod(period: string | undefined): { since?: number } | null {
  * GET /leaderboard/creators
  * Top creators by total received. Query: limit (default 20), period (all | 7d | 30d).
  */
-router.get("/creators", (req: Request, res: Response) => {
+router.get("/creators", async (req: Request, res: Response) => {
   const limit = Math.min(
     parseInt(req.query.limit as string) || DEFAULT_LIMIT,
     MAX_LIMIT
@@ -41,8 +41,8 @@ router.get("/creators", (req: Request, res: Response) => {
     : "WHERE t.author_id IN (SELECT author_id FROM verified_claims)";
   const args = period.since != null ? [period.since, limit] : [limit];
 
-  const rows = db.prepare(
-    `SELECT t.author_id, SUM(CAST(t.amount AS REAL)) as total, COUNT(*) as tip_count
+  const rows = await db.prepare(
+    `SELECT t.author_id, SUM(CAST(t.amount AS NUMERIC)) as total, COUNT(*) as tip_count
      FROM tips t
      ${whereClause}
      GROUP BY t.author_id
@@ -61,7 +61,7 @@ router.get("/creators", (req: Request, res: Response) => {
   }
 
   const authorIds = rows.map((r) => r.author_id);
-  const claims = db.prepare(
+  const claims = await db.prepare(
     "SELECT author_id, username, display_name, profile_image_url FROM verified_claims WHERE author_id IN (" +
     authorIds.map(() => "?").join(",") +
     ")"
@@ -89,7 +89,7 @@ router.get("/creators", (req: Request, res: Response) => {
  * GET /leaderboard/tippers
  * Top tippers by total sent. Query: limit (default 20), period (all | 30d).
  */
-router.get("/tippers", (req: Request, res: Response) => {
+router.get("/tippers", async (req: Request, res: Response) => {
   const limit = Math.min(
     parseInt(req.query.limit as string) || DEFAULT_LIMIT,
     MAX_LIMIT
@@ -105,8 +105,8 @@ router.get("/tippers", (req: Request, res: Response) => {
   const whereClause = period.since != null ? "WHERE timestamp >= ?" : "";
   const args = period.since != null ? [period.since, limit] : [limit];
 
-  const rows = db.prepare(
-    `SELECT from_address, SUM(CAST(amount AS REAL)) as total
+  const rows = await db.prepare(
+    `SELECT from_address, SUM(CAST(amount AS NUMERIC)) as total
      FROM tips
      ${whereClause}
      GROUP BY from_address

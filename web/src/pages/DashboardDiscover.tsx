@@ -1,12 +1,14 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import { useSmartWallets } from "@privy-io/react-auth/smart-wallets";
 import { parseUnits } from "viem";
 import { arcTestnet } from "../chains";
 import DashboardShell from "../components/DashboardShell";
+import { DashboardConnectCard } from "../components/DashboardAuthState";
 import TeepTipModal from "../components/TeepTipModal";
 import { API_BASE, USDC_ADDRESS } from "../config";
 import { computeContentId, computeDirectCreatorContentId, encodeApproveCall, encodeTipCall, TIP_CONTRACT_ADDRESS } from "../lib/contracts";
+import { avatarErrorFallback, creatorAvatarUrl } from "../lib/avatar";
 
 type DiscoverFilter = "trending" | "recent" | "top" | "unclaimed" | "tipped";
 
@@ -46,6 +48,12 @@ type DiscoverPost = {
   claimStatus: "verified" | "unclaimed";
 };
 
+function activateOnKey(event: ReactKeyboardEvent<HTMLElement>, action: () => void) {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  action();
+}
+
 type DiscoverData = {
   algorithm: {
     version: string;
@@ -77,13 +85,8 @@ const FILTERS: Array<{ key: DiscoverFilter; label: string }> = [
   { key: "tipped", label: "Tipped Before" },
 ];
 
-function fallbackAvatar(seed: string) {
-  return `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(seed || "creator")}`;
-}
-
 function avatarFor(item: { username?: string | null; authorId?: string | null; profileImageUrl?: string | null }) {
-  const seed = item.username || item.authorId || "creator";
-  return item.profileImageUrl || (item.username ? `https://unavatar.io/twitter/${item.username.replace(/^@/, "")}` : fallbackAvatar(seed));
+  return creatorAvatarUrl({ username: item.username, authorId: item.authorId, profileImageUrl: item.profileImageUrl, seed: "creator" });
 }
 
 function displayHandle(item: { username?: string | null; authorId?: string | null }) {
@@ -108,7 +111,9 @@ function reasonIcon(reasonType: RecommendationReasonType) {
 
 function shareInviteUrl(creator: DiscoverCreator) {
   const handle = creator.username ? `@${creator.username.replace(/^@/, "")}` : "this creator";
-  const text = `${handle}, you have support waiting on Teep. Claim your creator account and receive tips from your audience.`;
+  const amount = Number(creator.totalReceivedUsd);
+  const waiting = Number.isFinite(amount) && amount > 0 ? `$${amount.toFixed(2)}` : "unclaimed tips";
+  const text = `${handle}, you have ${waiting} waiting to be claimed on Teep. Connect your creator account to receive it.`;
   return `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}`;
 }
 
@@ -134,6 +139,14 @@ export default function DashboardDiscover() {
   const [postTipSending, setPostTipSending] = useState(false);
   const [postTipError, setPostTipError] = useState("");
   const [postPreviews, setPostPreviews] = useState<Record<string, { excerpt: string | null; authorName: string | null }>>({});
+  const [authPromptOpen, setAuthPromptOpen] = useState(false);
+  const hasAccount = ready && authenticated && Boolean(address) && Boolean(smartWalletClient?.account);
+
+  const requireAccount = useCallback(() => {
+    if (hasAccount) return true;
+    setAuthPromptOpen(true);
+    return false;
+  }, [hasAccount]);
 
   const loadDiscover = useCallback(() => {
     let url = `${API_BASE}/api/v1/discover`;
@@ -165,6 +178,28 @@ export default function DashboardDiscover() {
   useEffect(() => {
     loadDiscover();
   }, [loadDiscover]);
+
+  useEffect(() => {
+    if (filter === "tipped" && !hasAccount) setFilter("trending");
+  }, [filter, hasAccount]);
+
+  useEffect(() => {
+    if (!drawer) return;
+    const previousOverflow = document.body.style.overflow;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setDrawer(null);
+    };
+    document.body.style.overflow = "hidden";
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [drawer]);
+
+  useEffect(() => {
+    if (authPromptOpen && hasAccount) setAuthPromptOpen(false);
+  }, [authPromptOpen, hasAccount]);
 
   useEffect(() => {
     const posts = data?.trendingPosts || [];
@@ -250,18 +285,21 @@ export default function DashboardDiscover() {
   }, [data, filter]);
 
   const openDirectTip = useCallback((creator: DiscoverCreator) => {
+    if (!requireAccount()) return;
     setDirectTipTarget(creator);
     setDirectTipAmount("5.00");
     setDirectTipError("");
-  }, []);
+  }, [requireAccount]);
 
   const openPostTip = useCallback((post: DiscoverPost) => {
+    if (!requireAccount()) return;
     setPostTipTarget(post);
     setPostTipAmount("5.00");
     setPostTipError("");
-  }, []);
+  }, [requireAccount]);
 
   const sendPostTip = useCallback(async () => {
+    if (!requireAccount()) return;
     if (!postTipTarget || !smartWalletClient?.account || !address) return;
     const handle = postTipTarget.username?.replace(/^@/, "");
     const tweetId = postTipTarget.tweetId;
@@ -310,6 +348,7 @@ export default function DashboardDiscover() {
           authorHandle: handle,
           tweetId,
           detail: `Tipped @${handle}`,
+          sourceMethod: "web_discover",
           walletProof: await requestActivityProof(),
         }),
       }).catch(() => {});
@@ -322,9 +361,10 @@ export default function DashboardDiscover() {
     } finally {
       setPostTipSending(false);
     }
-  }, [address, loadDiscover, postTipAmount, postTipTarget, requestActivityProof, smartWalletClient]);
+  }, [address, loadDiscover, postTipAmount, postTipTarget, requestActivityProof, requireAccount, smartWalletClient]);
 
   const sendDirectTip = useCallback(async () => {
+    if (!requireAccount()) return;
     if (!directTipTarget || !smartWalletClient?.account || !address) return;
     const handle = directTipTarget.username?.replace(/^@/, "");
     let authorId = directTipTarget.authorId;
@@ -373,6 +413,7 @@ export default function DashboardDiscover() {
           txHash,
           authorHandle: handle,
           detail: `Direct tip to @${handle}`,
+          sourceMethod: "web_discover",
           walletProof: await requestActivityProof(),
         }),
       }).catch(() => {});
@@ -384,7 +425,7 @@ export default function DashboardDiscover() {
     } finally {
       setDirectTipSending(false);
     }
-  }, [address, directTipAmount, directTipTarget, loadDiscover, requestActivityProof, smartWalletClient]);
+  }, [address, directTipAmount, directTipTarget, loadDiscover, requestActivityProof, requireAccount, smartWalletClient]);
 
   const directTipModal = directTipTarget ? (
     <TeepTipModal
@@ -463,7 +504,7 @@ export default function DashboardDiscover() {
                       }}
                       role="option"
                     >
-                      <img src={avatarFor(creator)} alt="" onError={(event) => { event.currentTarget.src = fallbackAvatar(creator.username || creator.authorId); }} />
+                      <img src={avatarFor(creator)} alt="" onError={(event) => avatarErrorFallback(event, creator.username || creator.authorId)} />
                       <span>
                         <strong>{displayHandle(creator)}</strong>
                         <small>{creator.displayName || creator.reason}</small>
@@ -483,7 +524,10 @@ export default function DashboardDiscover() {
               key={item.key}
               type="button"
               className={filter === item.key ? "is-active" : ""}
-              onClick={() => setFilter(item.key)}
+              onClick={() => {
+                if (item.key === "tipped" && !requireAccount()) return;
+                setFilter(item.key);
+              }}
             >
               {item.label}
             </button>
@@ -508,11 +552,12 @@ export default function DashboardDiscover() {
               ) : (
                 <div className="dashboard-discover-card-grid">
                   {visiblePosts.map((post) => {
+                    const openPostDrawer = () => setDrawer({ kind: "post", post: { ...post, postPreview: postPreviews[post.contentId]?.excerpt || post.postPreview } });
                     return (
-                          <article key={post.contentId} className="dashboard-discover-post-card dashboard-card" onClick={() => setDrawer({ kind: "post", post: { ...post, postPreview: postPreviews[post.contentId]?.excerpt || post.postPreview } })}>
+                          <article key={post.contentId} className="dashboard-discover-post-card dashboard-card" role="button" tabIndex={0} aria-label={`View tipped post details for ${displayHandle(post)}`} onClick={openPostDrawer} onKeyDown={(event) => activateOnKey(event, openPostDrawer)}>
                         <div className="dashboard-discover-card-top">
                           <div className="dashboard-discover-identity">
-                            <img src={avatarFor(post)} alt="" onError={(event) => { event.currentTarget.src = fallbackAvatar(post.username || post.authorId); }} />
+                            <img src={avatarFor(post)} alt="" onError={(event) => avatarErrorFallback(event, post.username || post.authorId)} />
                             <div>
                               <strong>{displayHandle(post)}</strong>
                               <span>{postPreviews[post.contentId]?.authorName || post.displayName || "Creator"} · tip received {post.lastTipAgo}</span>
@@ -531,7 +576,7 @@ export default function DashboardDiscover() {
                           <div><span>Tippers</span><strong>{post.uniqueTippers}</strong></div>
                           <div><span>Today</span><strong>{post.tipsToday} tips</strong></div>
                         </div>
-                        <div className="dashboard-discover-actions" onClick={(event) => event.stopPropagation()}>
+                        <div className="dashboard-discover-actions" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
                           <button type="button" className="btn-primary" onClick={() => openPostTip(post)} disabled={!post.username || !post.tweetId}>Tip Post</button>
                           <a href={openXUrl(post.username, post.tweetId)} target="_blank" rel="noopener noreferrer" className="btn-secondary">Open on X</a>
                           <a href={`https://twitter.com/intent/tweet?text=${encodeURIComponent(`This post is receiving support on Teep: ${openXUrl(post.username, post.tweetId)}`)}`} target="_blank" rel="noopener noreferrer" className="btn-secondary dashboard-discover-icon-btn" aria-label="Share post">
@@ -560,10 +605,12 @@ export default function DashboardDiscover() {
                 <div className="dashboard-discover-empty">No creators match this view yet.</div>
               ) : (
                 <div className="dashboard-discover-creator-list">
-                  {visibleCreators.map((creator) => (
-                    <article key={creator.authorId || creator.username || creator.reason} className="dashboard-discover-creator-row dashboard-card" onClick={() => setDrawer({ kind: "creator", creator })}>
+                  {visibleCreators.map((creator) => {
+                    const openCreatorDrawer = () => setDrawer({ kind: "creator", creator });
+                    return (
+                    <article key={creator.authorId || creator.username || creator.reason} className="dashboard-discover-creator-row dashboard-card" role="button" tabIndex={0} aria-label={`View creator details for ${displayHandle(creator)}`} onClick={openCreatorDrawer} onKeyDown={(event) => activateOnKey(event, openCreatorDrawer)}>
                       <div className="dashboard-discover-creator-main">
-                        <img src={avatarFor(creator)} alt="" onError={(event) => { event.currentTarget.src = fallbackAvatar(creator.username || creator.authorId); }} />
+                        <img src={avatarFor(creator)} alt="" onError={(event) => avatarErrorFallback(event, creator.username || creator.authorId)} />
                         <div>
                           <h4>
                             {displayHandle(creator)}
@@ -581,7 +628,7 @@ export default function DashboardDiscover() {
                           </div>
                         </div>
                       </div>
-                      <div className="dashboard-discover-row-actions" onClick={(event) => event.stopPropagation()}>
+                      <div className="dashboard-discover-row-actions" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
                         {creator.claimStatus === "unclaimed" ? (
                           <button type="button" className="btn-primary" onClick={() => openDirectTip(creator)}>Tip Anyway</button>
                         ) : (
@@ -590,11 +637,12 @@ export default function DashboardDiscover() {
                         {creator.claimStatus === "unclaimed" ? (
                           <a href={shareInviteUrl(creator)} target="_blank" rel="noopener noreferrer" className="btn-secondary">Share Invite</a>
                         ) : (
-                          <button type="button" className="btn-secondary" onClick={() => setDrawer({ kind: "creator", creator })}>View Details</button>
+                          <button type="button" className="btn-secondary" onClick={openCreatorDrawer}>View Details</button>
                         )}
                       </div>
                     </article>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </section>
@@ -613,7 +661,7 @@ export default function DashboardDiscover() {
                 {topCreatorRows.slice(0, 3).map((creator, index) => (
                   <button key={creator.authorId || creator.username || index} type="button" onClick={() => setDrawer({ kind: "creator", creator })}>
                     <span>{index + 1}</span>
-                    <img src={avatarFor(creator)} alt="" onError={(event) => { event.currentTarget.src = fallbackAvatar(creator.username || creator.authorId); }} />
+                    <img src={avatarFor(creator)} alt="" onError={(event) => avatarErrorFallback(event, creator.username || creator.authorId)} />
                     <strong>{creator.username || "Creator"}</strong>
                     <b>${creator.totalReceivedUsd}</b>
                   </button>
@@ -667,57 +715,67 @@ export default function DashboardDiscover() {
       </main>
 
       {drawer && (
-        <aside className="dashboard-discover-drawer" aria-label="Creator detail drawer">
-          <div className="dashboard-discover-drawer-head">
-            <div className="dashboard-discover-identity">
-              <img src={avatarFor(drawer.kind === "post" ? drawer.post : drawer.creator)} alt="" onError={(event) => { event.currentTarget.src = fallbackAvatar(drawer.kind === "post" ? drawer.post.authorId : drawer.creator.authorId); }} />
-              <div>
-                <strong>{displayHandle(drawer.kind === "post" ? drawer.post : drawer.creator)}</strong>
-                <span>{drawer.kind === "post" ? `Post tip context · ${drawer.post.lastTipAgo}` : drawer.creator.reason}</span>
+        <div className="dashboard-discover-modal-layer" role="presentation" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setDrawer(null);
+        }}>
+          <aside className="dashboard-discover-drawer" role="dialog" aria-modal="true" aria-label="Creator details">
+            <div className="dashboard-discover-drawer-head">
+              <div className="dashboard-discover-identity">
+                <img src={avatarFor(drawer.kind === "post" ? drawer.post : drawer.creator)} alt="" onError={(event) => avatarErrorFallback(event, drawer.kind === "post" ? drawer.post.authorId : drawer.creator.authorId)} />
+                <div>
+                  <strong>{displayHandle(drawer.kind === "post" ? drawer.post : drawer.creator)}</strong>
+                  <span>{drawer.kind === "post" ? `Post tip context · ${drawer.post.lastTipAgo}` : drawer.creator.reason}</span>
+                </div>
+              </div>
+              <button type="button" onClick={() => setDrawer(null)} aria-label="Close details">
+                <span className="material-symbols-outlined" aria-hidden>close</span>
+              </button>
+            </div>
+            <div className="dashboard-discover-drawer-body">
+              <div className="dashboard-discover-drawer-reason">
+                <span>Why this {drawer.kind === "post" ? "post" : "creator"}</span>
+                <strong>{drawer.kind === "post" ? drawer.post.reason : drawer.creator.reason}</strong>
+              </div>
+              <div className="dashboard-discover-drawer-stats">
+                <div><span>Received</span><strong>${drawer.kind === "post" ? drawer.post.totalTippedUsd : drawer.creator.totalReceivedUsd}</strong></div>
+                <div><span>Tippers</span><strong>{drawer.kind === "post" ? drawer.post.uniqueTippers : drawer.creator.uniqueSupporters ?? "-"}</strong></div>
+                <div><span>Posts</span><strong>{drawer.kind === "post" ? 1 : drawer.creator.tippedPosts ?? "-"}</strong></div>
+              </div>
+              <div className="dashboard-discover-drawer-next">
+                <span>Best next action</span>
+                <h4>{drawer.kind === "post" ? "Tip this post" : drawer.creator.claimStatus === "unclaimed" ? "Invite this creator to claim" : "Send a direct tip"}</h4>
+                <p>
+                  {drawer.kind === "post"
+                    ? "Keep the tip tied to this post so the receipt and share copy stay specific."
+                    : drawer.creator.claimStatus === "unclaimed"
+                      ? "This creator has support waiting. Share an invite so they can discover Teep and claim."
+                      : "Use direct tip when you want to support the creator without referencing a specific post."}
+                </p>
+                {drawer.kind === "post" && <button type="button" className="btn-primary" onClick={() => openPostTip(drawer.post)} disabled={!drawer.post.username || !drawer.post.tweetId}>Tip Post</button>}
+                {drawer.kind === "creator" && drawer.creator.claimStatus === "unclaimed" && <a href={shareInviteUrl(drawer.creator)} target="_blank" rel="noopener noreferrer" className="btn-primary">Share Invite</a>}
+                {drawer.kind === "creator" && drawer.creator.claimStatus !== "unclaimed" && <button type="button" className="btn-primary" onClick={() => openDirectTip(drawer.creator)}>Send Direct Tip</button>}
+              </div>
+              <div className="dashboard-discover-drawer-signals">
+                <div><span>Latest tip</span><strong>{drawer.kind === "post" ? drawer.post.lastTipAgo : drawer.creator.lastTipAgo || "No recent tip"}</strong></div>
+                <div><span>Recent activity</span><strong>{drawer.kind === "post" ? `${drawer.post.tipsToday} tips today` : `${drawer.creator.recentTipCount || 0} tips this week`}</strong></div>
+                <div><span>Claim status</span><strong>{drawer.kind === "post" ? drawer.post.claimStatus : drawer.creator.claimStatus}</strong></div>
               </div>
             </div>
-            <button type="button" onClick={() => setDrawer(null)} aria-label="Close details">
-              <span className="material-symbols-outlined" aria-hidden>close</span>
-            </button>
-          </div>
-          <div className="dashboard-discover-drawer-body">
-            <div className="dashboard-discover-drawer-reason">
-              <span>Why this {drawer.kind === "post" ? "post" : "creator"}</span>
-              <strong>{drawer.kind === "post" ? drawer.post.reason : drawer.creator.reason}</strong>
+            <div className="dashboard-discover-drawer-actions">
+              {drawer.kind === "creator" && drawer.creator.claimStatus === "unclaimed" && (
+                <button type="button" className="btn-secondary" onClick={() => openDirectTip(drawer.creator)}>Tip Anyway</button>
+              )}
+              <a href={openXUrl(drawer.kind === "post" ? drawer.post.username : drawer.creator.username, drawer.kind === "post" ? drawer.post.tweetId : null)} target="_blank" rel="noopener noreferrer" className="btn-secondary">Open on X</a>
+              <button type="button" className="btn-secondary" onClick={() => setDrawer(null)}>Close</button>
             </div>
-            <div className="dashboard-discover-drawer-stats">
-              <div><span>Received</span><strong>${drawer.kind === "post" ? drawer.post.totalTippedUsd : drawer.creator.totalReceivedUsd}</strong></div>
-              <div><span>Tippers</span><strong>{drawer.kind === "post" ? drawer.post.uniqueTippers : drawer.creator.uniqueSupporters ?? "-"}</strong></div>
-              <div><span>Posts</span><strong>{drawer.kind === "post" ? 1 : drawer.creator.tippedPosts ?? "-"}</strong></div>
-            </div>
-            <div className="dashboard-discover-drawer-next">
-              <span>Best next action</span>
-              <h4>{drawer.kind === "post" ? "Tip this post" : drawer.creator.claimStatus === "unclaimed" ? "Invite this creator to claim" : "Send a direct tip"}</h4>
-              <p>
-                {drawer.kind === "post"
-                  ? "Keep the tip tied to this post so the receipt and share copy stay specific."
-                  : drawer.creator.claimStatus === "unclaimed"
-                    ? "This creator has support waiting. Share an invite so they can discover Teep and claim."
-                    : "Use direct tip when you want to support the creator without referencing a specific post."}
-              </p>
-              {drawer.kind === "post" && <button type="button" className="btn-primary" onClick={() => openPostTip(drawer.post)} disabled={!drawer.post.username || !drawer.post.tweetId}>Tip Post</button>}
-              {drawer.kind === "creator" && drawer.creator.claimStatus === "unclaimed" && <a href={shareInviteUrl(drawer.creator)} target="_blank" rel="noopener noreferrer" className="btn-primary">Share Invite</a>}
-              {drawer.kind === "creator" && drawer.creator.claimStatus !== "unclaimed" && <button type="button" className="btn-primary" onClick={() => openDirectTip(drawer.creator)}>Send Direct Tip</button>}
-            </div>
-            <div className="dashboard-discover-drawer-signals">
-              <div><span>Latest tip</span><strong>{drawer.kind === "post" ? drawer.post.lastTipAgo : drawer.creator.lastTipAgo || "No recent tip"}</strong></div>
-              <div><span>Recent activity</span><strong>{drawer.kind === "post" ? `${drawer.post.tipsToday} tips today` : `${drawer.creator.recentTipCount || 0} tips this week`}</strong></div>
-              <div><span>Claim status</span><strong>{drawer.kind === "post" ? drawer.post.claimStatus : drawer.creator.claimStatus}</strong></div>
-            </div>
-          </div>
-          <div className="dashboard-discover-drawer-actions">
-            {drawer.kind === "creator" && drawer.creator.claimStatus === "unclaimed" && (
-              <button type="button" className="btn-secondary" onClick={() => openDirectTip(drawer.creator)}>Tip Anyway</button>
-            )}
-            <a href={openXUrl(drawer.kind === "post" ? drawer.post.username : drawer.creator.username, drawer.kind === "post" ? drawer.post.tweetId : null)} target="_blank" rel="noopener noreferrer" className="btn-secondary">Open on X</a>
-            <button type="button" className="btn-secondary" onClick={() => setDrawer(null)}>Close</button>
-          </div>
-        </aside>
+          </aside>
+        </div>
+      )}
+      {authPromptOpen && (
+        <DashboardConnectCard
+          onDismiss={() => setAuthPromptOpen(false)}
+          message="Sign in to tip creators, view creators you have tipped before, and use your Teep account history."
+        />
       )}
       {directTipModal}
       {postTipModal}

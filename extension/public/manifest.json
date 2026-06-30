@@ -2,23 +2,26 @@
   "manifest_version": 3,
   "name": "Teep",
   "version": "0.1.0",
-  "description": "Tip anyone and earn tips on X instantly.",
+  "description": "Beta extension for tipping creators on X with test funds on Arc testnet. Test funds have no real-world value.",
   "permissions": [
-    "storage",
-    "tabs"
+    "storage"
   ],
   "host_permissions": [
     "https://x.com/*",
     "https://twitter.com/*",
-    "https://api.developer.coinbase.com/*",
-    "https://*.g.alchemy.com/*",
     "https://auth.privy.io/*",
     "https://*.privy.io/*",
+    "https://*.privy.systems/*",
+    "https://explorer-api.walletconnect.com/*",
+    "https://*.zerodev.app/*",
+    "https://*.pimlico.io/*",
+    "https://api.getteep.xyz/*",
+    "https://rpc.testnet.arc.network/*",
     "http://localhost:3001/*",
     "http://127.0.0.1:3001/*"
   ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; connect-src 'self' https: wss: http://localhost:3001 http://127.0.0.1:3001;"
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; connect-src 'self' https://auth.privy.io https://*.privy.io https://*.privy.systems wss://*.privy.systems https://explorer-api.walletconnect.com https://*.zerodev.app https://*.pimlico.io https://api.getteep.xyz https://rpc.testnet.arc.network wss://rpc.testnet.arc.network http://localhost:3001 http://127.0.0.1:3001;"
   },
   "background": {
     "service_worker": "background.js",
@@ -40,11 +43,5 @@
     "16": "icon16.png",
     "48": "icon48.png",
     "128": "icon128.png"
-  },
-  "web_accessible_resources": [
-    {
-      "resources": ["popup.html"],
-      "matches": ["https://x.com/*", "https://twitter.com/*"]
-    }
-  ]
+  }
 }

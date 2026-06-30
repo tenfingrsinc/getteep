@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import * as QRCode from "qrcode";
 import { API_BASE, CHROME_STORE_URL, RECEIPT_BASE_URL, DOCS_URL, CHAIN_NAME, EXPLORER_TX_URL, HAS_CHROME_STORE_LISTING } from "../config";
+import { avatarErrorFallback, xAvatarUrl } from "../lib/avatar";
 
 interface ReceiptData {
   fromAddress: string | null;
@@ -15,6 +17,9 @@ interface ReceiptData {
   authorHandle: string | null;
   tweetId: string | null;
   kind?: string;
+  creatorClaimStatus?: "unclaimed" | "verified" | "claim_wallet_active";
+  creatorVerified?: boolean;
+  creatorOwnerAddress?: string | null;
   receiptPreferences?: {
     shareAmountEnabled?: boolean;
     shareLinksEnabled?: boolean;
@@ -26,11 +31,6 @@ function formatUsdRaw(raw: string): string {
   const n = Number(raw) / 1e6;
   if (isNaN(n)) return "0.00";
   return n.toFixed(2);
-}
-
-function truncateAddress(addr: string): string {
-  if (!addr || addr.length < 12) return addr;
-  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
 function setMeta(propertyOrName: string, content: string): void {
@@ -53,8 +53,198 @@ function XLogoIcon({ className }: { className?: string }) {
   );
 }
 
-const installLabel = HAS_CHROME_STORE_LISTING ? "Install Extension" : "Join Beta";
 const claimLabel = HAS_CHROME_STORE_LISTING ? "Claim My Tip Now" : "Get Teep";
+const appPath = "/dashboard";
+
+function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.arcTo(x + width, y, x + width, y + height, radius);
+  ctx.arcTo(x + width, y + height, x, y + height, radius);
+  ctx.arcTo(x, y + height, x, y, radius);
+  ctx.arcTo(x, y, x + width, y, radius);
+  ctx.closePath();
+}
+
+function wrapCanvasText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, maxWidth: number, lineHeight: number) {
+  const words = text.split(" ");
+  let line = "";
+  for (const word of words) {
+    const testLine = line ? `${line} ${word}` : word;
+    if (ctx.measureText(testLine).width > maxWidth && line) {
+      ctx.fillText(line, x, y);
+      line = word;
+      y += lineHeight;
+    } else {
+      line = testLine;
+    }
+  }
+  if (line) ctx.fillText(line, x, y);
+}
+
+async function drawReceiptQr(ctx: CanvasRenderingContext2D, receiptUrl: string, x: number, y: number, size: number) {
+  if (!receiptUrl) return;
+  const qrCanvas = document.createElement("canvas");
+  qrCanvas.width = size;
+  qrCanvas.height = size;
+  try {
+    await QRCode.toCanvas(qrCanvas, receiptUrl, {
+      errorCorrectionLevel: "M",
+      margin: 1,
+      width: size,
+      color: {
+        dark: "#111111",
+        light: "#ffffff",
+      },
+    });
+    ctx.drawImage(qrCanvas, x, y, size, size);
+  } catch {
+    ctx.fillStyle = "rgba(205,189,255,0.16)";
+    roundRect(ctx, x, y, size, size, 18);
+    ctx.fill();
+  }
+}
+
+function receiptInitial(value?: string) {
+  const clean = (value || "T").replace(/^@/, "").trim();
+  return clean.slice(0, 2).toUpperCase() || "T";
+}
+
+async function generateReceiptImage(params: { receiptUrl: string; amount: string; title: string; subtitle: string; from?: string; to?: string; date: string }): Promise<string> {
+  const canvas = document.createElement("canvas");
+  canvas.width = 1080;
+  canvas.height = 1080;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return "";
+  const from = params.from || "You";
+  const to = params.to || "Creator";
+
+  ctx.fillStyle = "#050505";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.fillStyle = "#ffffff";
+  roundRect(ctx, 150, 150, 780, 780, 30);
+  ctx.fill();
+  ctx.strokeStyle = "#7c3aed";
+  ctx.lineWidth = 3;
+  roundRect(ctx, 150, 150, 780, 780, 30);
+  ctx.stroke();
+
+  ctx.fillStyle = "#111111";
+  ctx.font = "900 36px Inter, system-ui, sans-serif";
+  ctx.fillText("Teep", 205, 238);
+  ctx.fillStyle = "#7c3aed";
+  ctx.font = "800 18px Inter, system-ui, sans-serif";
+  ctx.fillText("RECEIPT", 205, 274);
+
+  ctx.fillStyle = "#111111";
+  ctx.font = "900 82px Inter, system-ui, sans-serif";
+  ctx.textAlign = "right";
+  ctx.fillText(`$${params.amount}`, 875, 265);
+  ctx.textAlign = "left";
+
+  ctx.strokeStyle = "#eee9f8";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(205, 325);
+  ctx.lineTo(875, 325);
+  ctx.stroke();
+
+  ctx.fillStyle = "#111111";
+  ctx.font = "900 34px Inter, system-ui, sans-serif";
+  ctx.fillText(`${params.title} sent`, 205, 385);
+  ctx.fillStyle = "#55505f";
+  ctx.font = "500 22px Inter, system-ui, sans-serif";
+  wrapCanvasText(ctx, params.subtitle || "You supported a creator and helped fuel the social internet.", 205, 425, 620, 31);
+
+  const avatarY = 580;
+  ctx.fillStyle = "#f4f0ff";
+  ctx.beginPath();
+  ctx.arc(300, avatarY, 50, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#7c3aed";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = "#7c3aed";
+  ctx.beginPath();
+  ctx.arc(300, avatarY, 34, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "900 23px Inter, system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText(receiptInitial(from), 300, avatarY + 8);
+
+  ctx.strokeStyle = "#7c3aed";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(390, avatarY);
+  ctx.lineTo(690, avatarY);
+  ctx.stroke();
+  ctx.fillStyle = "#ffffff";
+  ctx.beginPath();
+  ctx.arc(540, avatarY, 28, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#7c3aed";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = "#7c3aed";
+  ctx.font = "800 29px Inter, system-ui, sans-serif";
+  ctx.fillText(">", 540, avatarY + 10);
+
+  ctx.fillStyle = "#f4f0ff";
+  ctx.beginPath();
+  ctx.arc(780, avatarY, 50, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#7c3aed";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = "#111111";
+  ctx.beginPath();
+  ctx.arc(780, avatarY, 34, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "900 23px Inter, system-ui, sans-serif";
+  ctx.fillText(receiptInitial(to), 780, avatarY + 8);
+
+  ctx.fillStyle = "#111111";
+  ctx.font = "700 22px Inter, system-ui, sans-serif";
+  ctx.fillText(from, 300, 665);
+  ctx.fillText(to, 780, 665);
+  ctx.textAlign = "left";
+
+  ctx.strokeStyle = "#eee9f8";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(205, 710);
+  ctx.lineTo(875, 710);
+  ctx.stroke();
+
+  ctx.fillStyle = "#6b6478";
+  ctx.font = "500 21px Inter, system-ui, sans-serif";
+  ctx.fillText("Date", 205, 770);
+  ctx.fillStyle = "#111111";
+  ctx.font = "650 21px Inter, system-ui, sans-serif";
+  ctx.fillText(params.date, 205, 807);
+
+  ctx.fillStyle = "#f8f7fb";
+  roundRect(ctx, 718, 730, 132, 132, 18);
+  ctx.fill();
+  await drawReceiptQr(ctx, params.receiptUrl, 728, 740, 112);
+  ctx.fillStyle = "#7c3aed";
+  ctx.font = "750 20px Inter, system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText("Scan to view", 784, 894);
+  ctx.textAlign = "left";
+
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "800 24px Inter, system-ui, sans-serif";
+  ctx.fillText("Support creators directly via @teepxyz", 150, 990);
+  ctx.fillStyle = "#a78bfa";
+  ctx.font = "700 21px Inter, system-ui, sans-serif";
+  ctx.fillText("https://getteep.xyz", 150, 1028);
+
+  return canvas.toDataURL("image/png");
+}
 
 export default function TxReceipt() {
   const { txHash } = useParams<{ txHash: string }>();
@@ -143,14 +333,14 @@ export default function TxReceipt() {
     const receiptPart = `\n\nReceipt: ${receiptUrl}`;
     const text =
       data.kind === "direct_creator_tip"
-        ? `I just sent ${creator} a direct creator tip${amountPart} with Teep.${receiptPart}\nSupport creators directly.`
+        ? `I just sent ${creator} a direct creator tip${amountPart} with Teep.${receiptPart}\nSupport creators directly via @teepxyz.`
         : data.kind === "deposit"
-          ? `I just added${amountPart} to ${creator}.${receiptPart}\nSupport creators directly.`
+          ? `I just added${amountPart} to ${creator}.${receiptPart}\nSupport creators directly via @teepxyz.`
           : data.kind === "withdrawal"
-            ? `I just withdrew${amountPart} ${creator}.${receiptPart}\nSupport creators directly.`
+            ? `I just withdrew${amountPart} ${creator}.${receiptPart}\nSupport creators directly via @teepxyz.`
             : data.kind === "referral_fee_received"
-              ? `I just earned${amountPart} from Teep referrals.${receiptPart}\nSupport creators directly.`
-              : `I just tipped ${creator}${amountPart} with Teep.${receiptPart}\nSupport creators directly.`;
+              ? `I just earned${amountPart} from Teep referrals.${receiptPart}\nSupport creators directly via @teepxyz.`
+              : `I just tipped ${creator}${amountPart} with Teep.${receiptPart}\nSupport creators directly via @teepxyz.`;
     window.open(`https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}`, "_blank", "noopener,noreferrer");
   };
 
@@ -158,6 +348,28 @@ export default function TxReceipt() {
     navigator.clipboard.writeText(receiptUrl);
     setCopyDone(true);
     setTimeout(() => setCopyDone(false), 2000);
+  };
+
+  const downloadReceipt = async () => {
+    if (!data) return;
+    const amountUsd = formatUsdRaw(data.amount);
+    const from = data.fromIdentity || "A supporter";
+    const to = data.authorHandle ? `@${data.authorHandle}` : "Creator";
+    const date = new Date(data.timestamp * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+    const imageUrl = await generateReceiptImage({
+      receiptUrl,
+      amount: amountUsd,
+      title: receiptKind,
+      subtitle: `${from} ${receiptVerb} ${to} with Teep.`,
+      from,
+      to,
+      date,
+    });
+    if (!imageUrl) return;
+    const link = document.createElement("a");
+    link.download = `teep-receipt-${data.txHash.slice(0, 10)}.png`;
+    link.href = imageUrl;
+    link.click();
   };
 
   if (loading) {
@@ -168,9 +380,7 @@ export default function TxReceipt() {
             <img src="/logo.svg" alt="Teep" width={32} height={32} />
             <span>Teep</span>
           </Link>
-          <a href={CHROME_STORE_URL} target="_blank" rel="noopener noreferrer" className="tx-receipt-install">
-            {installLabel}
-          </a>
+          <Link to={appPath} className="tx-receipt-install">Launch App</Link>
         </header>
         <main className="tx-receipt-main">
           <p style={{ color: "var(--text-muted)" }}>Loading receipt…</p>
@@ -187,9 +397,7 @@ export default function TxReceipt() {
             <img src="/logo.svg" alt="Teep" width={32} height={32} />
             <span>Teep</span>
           </Link>
-          <a href={CHROME_STORE_URL} target="_blank" rel="noopener noreferrer" className="tx-receipt-install">
-            {installLabel}
-          </a>
+          <Link to={appPath} className="tx-receipt-install">Launch App</Link>
         </header>
         <main className="tx-receipt-main">
           <p style={{ color: "var(--text-secondary)", marginBottom: "var(--space-4)" }}>{error || "Receipt not found."}</p>
@@ -203,7 +411,7 @@ export default function TxReceipt() {
   }
 
   const amountUsd = formatUsdRaw(data.amount);
-  const creatorHandle = data.authorHandle ? `@${data.authorHandle}` : truncateAddress(data.toAddress);
+  const creatorHandle = data.authorHandle ? `@${data.authorHandle}` : "Creator";
   const isDirectTip = data.kind === "direct_creator_tip";
   const isPostTip = !data.kind || data.kind === "post_tip";
   const receiptKind =
@@ -226,6 +434,12 @@ export default function TxReceipt() {
   const tweetSnippet = oembed?.excerpt ?? "Post linked to this tip";
   const explorerUrl = `${EXPLORER_TX_URL}/${data.txHash}`;
   const dateStr = new Date(data.timestamp * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  const isCreatorClaimed =
+    data.creatorVerified === true ||
+    data.creatorClaimStatus === "verified" ||
+    data.creatorClaimStatus === "claim_wallet_active";
+  const showCreatorClaimState = isPostTip || isDirectTip;
+  const showCreatorClaimPrompt = showCreatorClaimState && !isCreatorClaimed;
 
   return (
     <div className="tx-receipt-page">
@@ -234,24 +448,17 @@ export default function TxReceipt() {
           <img src="/logo.svg" alt="Teep" width={32} height={32} />
           <span>Teep</span>
         </Link>
-        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-          <a href={explorerUrl} target="_blank" rel="noopener noreferrer" style={{ fontSize: "var(--text-small)", color: "var(--text-secondary)", textDecoration: "none" }}>
-            View on Explorer
-          </a>
-          <a href={CHROME_STORE_URL} target="_blank" rel="noopener noreferrer" className="tx-receipt-install">
-            {installLabel}
-          </a>
-        </div>
+        <Link to={appPath} className="tx-receipt-install">Launch App</Link>
       </header>
 
       <main className="tx-receipt-main">
         <div className="tx-receipt-hero">
           <div className="tx-receipt-success-icon">
-            <span className="material-symbols-outlined" style={{ fontSize: 40 }}>check_circle</span>
+            <span className="material-symbols-outlined" aria-hidden style={{ fontSize: 40 }}>check_circle</span>
           </div>
           <h1 className="tx-receipt-title">{receiptTitle}</h1>
           <p className="tx-receipt-line">
-            <span className="tx-receipt-handle">{data.fromIdentity || (data.fromAddress ? truncateAddress(data.fromAddress) : "A supporter")}</span> {receiptVerb} <span className="tx-receipt-handle">{isPostTip || isDirectTip ? creatorHandle : "Teep"}</span>
+            <span className="tx-receipt-handle">{data.fromIdentity || "A supporter"}</span> {receiptVerb} <span className="tx-receipt-handle">{isPostTip || isDirectTip ? creatorHandle : "Teep"}</span>
           </p>
           {data.displayAmount !== false && <div className="tx-receipt-amount">${amountUsd} USD</div>}
         </div>
@@ -259,7 +466,12 @@ export default function TxReceipt() {
         {tweetUrl && !isDirectTip && (
           <div className="tx-receipt-tweet-card">
             <div className="tx-receipt-tweet-header">
-              <img src={`https://unavatar.io/twitter/${data.authorHandle}`} alt="" className="tx-receipt-tweet-avatar" onError={(e) => { e.currentTarget.src = `https://api.dicebear.com/7.x/avataaars/svg?seed=${data.authorHandle}`; }} />
+              <img
+                src={xAvatarUrl(data.authorHandle) || "/logo.svg"}
+                alt=""
+                className="tx-receipt-tweet-avatar"
+                onError={(event) => avatarErrorFallback(event, data.authorHandle)}
+              />
               <div>
                 <p className="tx-receipt-tweet-handle">{tweetDisplayName}</p>
                 <p className="tx-receipt-tweet-time">{dateStr}</p>
@@ -271,14 +483,14 @@ export default function TxReceipt() {
           </div>
         )}
 
-        {(isPostTip || isDirectTip) && <div className="tx-receipt-status-pill">
-          <span className="material-symbols-outlined" style={{ fontSize: 18 }}>schedule</span>
-          Waiting for creator to claim
+        {showCreatorClaimState && <div className={`tx-receipt-status-pill ${isCreatorClaimed ? "is-claimed" : "is-waiting"}`} role="status" aria-live="polite">
+          <span className="material-symbols-outlined" aria-hidden style={{ fontSize: 18 }}>{isCreatorClaimed ? "check_circle" : "schedule"}</span>
+          {isCreatorClaimed ? "Claimed by creator" : "Waiting for creator to claim"}
         </div>}
 
-        {(isPostTip || isDirectTip) && <div className="tx-receipt-claim-card">
+        {showCreatorClaimPrompt && <div className="tx-receipt-claim-card">
           <h3 className="tx-receipt-claim-title">
-            <span className="material-symbols-outlined" style={{ color: "var(--accent)", fontSize: 28 }}>payments</span>
+            <span className="material-symbols-outlined" aria-hidden style={{ color: "var(--accent)", fontSize: 28 }}>payments</span>
             You received a tip
           </h3>
           <p className="tx-receipt-claim-desc">
@@ -295,22 +507,26 @@ export default function TxReceipt() {
             Share on X
           </button>
           <button type="button" onClick={copyLink} className="tx-receipt-btn-copy">
-            <span className="material-symbols-outlined">link</span>
+            <span className="material-symbols-outlined" aria-hidden>link</span>
             {copyDone ? "Copied!" : "Copy Link"}
+          </button>
+          <button type="button" onClick={downloadReceipt} className="tx-receipt-btn-copy">
+            <span className="material-symbols-outlined" aria-hidden>download</span>
+            Download Receipt
           </button>
         </div>
 
         <details className="tx-receipt-details" open={detailsOpen} onToggle={(e) => setDetailsOpen((e.target as HTMLDetailsElement).open)}>
           <summary className="tx-receipt-details-summary">
-            <span className="material-symbols-outlined" style={{ color: "var(--text-muted)" }}>receipt_long</span>
+            <span className="material-symbols-outlined" aria-hidden style={{ color: "var(--text-muted)" }}>receipt_long</span>
             Transaction Details
-            <span className="material-symbols-outlined" style={{ transform: detailsOpen ? "rotate(180deg)" : undefined, transition: "transform 0.2s" }}>expand_more</span>
+            <span className="material-symbols-outlined" aria-hidden style={{ transform: detailsOpen ? "rotate(180deg)" : undefined, transition: "transform 0.2s" }}>expand_more</span>
           </summary>
           <div className="tx-receipt-details-inner">
             {data.displayAmount !== false && <div className="tx-receipt-detail-row"><span>Amount</span><span>${amountUsd} USD</span></div>}
             <div className="tx-receipt-detail-row"><span>Receipt Type</span><span>{receiptKind}</span></div>
-            <div className="tx-receipt-detail-row"><span>Sender</span><span className="tx-receipt-mono">{data.fromIdentity || (data.fromAddress ? truncateAddress(data.fromAddress) : "Private")}</span></div>
-            <div className="tx-receipt-detail-row"><span>Receiver</span><span className="tx-receipt-mono">{truncateAddress(data.toAddress)}</span></div>
+            <div className="tx-receipt-detail-row"><span>Sender</span><span className="tx-receipt-mono">{data.fromIdentity || "A supporter"}</span></div>
+            <div className="tx-receipt-detail-row"><span>Receiver</span><span className="tx-receipt-mono">{isPostTip || isDirectTip ? creatorHandle : "Teep"}</span></div>
             <div className="tx-receipt-detail-row"><span>Transaction Hash</span><span className="tx-receipt-mono">{data.txHash.slice(0, 10)}…{data.txHash.slice(-8)}</span></div>
             <div className="tx-receipt-detail-row"><span>Network</span><span>{CHAIN_NAME}</span></div>
             <div className="tx-receipt-detail-row"><span>Timestamp</span><span>{dateStr}</span></div>
@@ -320,7 +536,7 @@ export default function TxReceipt() {
 
         <div className="tx-receipt-how">
           <h4 className="tx-receipt-how-title">
-            <span className="material-symbols-outlined" style={{ color: "var(--accent)" }}>verified_user</span>
+            <span className="material-symbols-outlined" aria-hidden style={{ color: "var(--accent)" }}>verified_user</span>
             How Teep Works
           </h4>
           <p className="tx-receipt-how-p">

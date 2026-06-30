@@ -8,6 +8,7 @@ import { getRpcUrl } from "../config/chain";
 import { createWalletChallenge, isWalletAuthPurpose, verifyWalletProof } from "../services/walletAuth";
 import { createBackendPublicClient } from "../services/rpcClient";
 import { createCreatorClaimedNotifications } from "../services/notifications";
+import { claimPendingTipsForXUser } from "../services/teepBalance";
 
 const FACTORY_ABI = [
   { name: "isDeployed", type: "function", stateMutability: "view", inputs: [{ name: "_authorId", type: "uint256" }], outputs: [{ type: "bool" }] },
@@ -37,7 +38,7 @@ const pendingOAuthFlows = new Map<
     ownerAddress: string;
     codeVerifier: string;
     expiresAt: number;
-    mode: "claim" | "refresh_profile";
+    mode: "claim" | "refresh_profile" | "x_tipping";
     expectedAuthorId?: string;
   }
 >();
@@ -89,7 +90,7 @@ router.post("/x/start", (req: Request, res: Response) => {
  * Starts a light X re-verification to refresh the current handle/profile for an
  * already claimed creator account. This never creates a new claim wallet.
  */
-router.post("/x/refresh-profile/start", (req: Request, res: Response) => {
+router.post("/x/refresh-profile/start", async (req: Request, res: Response) => {
   const ownerAddress = String(req.body?.ownerAddress || "").toLowerCase();
   const requestedAuthorId = typeof req.body?.authorId === "string" ? req.body.authorId.trim() : "";
 
@@ -100,10 +101,10 @@ router.post("/x/refresh-profile/start", (req: Request, res: Response) => {
 
   const db = getDb();
   const claim = requestedAuthorId
-    ? db.prepare(
+    ? await db.prepare(
         "SELECT author_id FROM verified_claims WHERE owner_address = ? AND author_id = ? ORDER BY verified_at DESC LIMIT 1"
       ).get(ownerAddress, requestedAuthorId) as { author_id: string } | undefined
-    : db.prepare(
+    : await db.prepare(
         "SELECT author_id FROM verified_claims WHERE owner_address = ? ORDER BY verified_at DESC LIMIT 1"
       ).get(ownerAddress) as { author_id: string } | undefined;
 
@@ -121,6 +122,32 @@ router.post("/x/refresh-profile/start", (req: Request, res: Response) => {
     expiresAt: Date.now() + 10 * 60 * 1000,
     mode: "refresh_profile",
     expectedAuthorId: claim.author_id,
+  });
+
+  const authUrl = oauthService.getAuthUrl(state, codeChallenge);
+  res.json({ authUrl, state });
+});
+
+/**
+ * POST /auth/x/tipping/start
+ * Links an X account to a wallet for X bot tipping (Mode A).
+ */
+router.post("/x/tipping/start", (req: Request, res: Response) => {
+  const { ownerAddress } = req.body;
+
+  if (!isAddress(ownerAddress)) {
+    res.status(400).json({ error: "Valid ownerAddress is required" });
+    return;
+  }
+
+  const state = crypto.randomBytes(32).toString("hex");
+  const { codeVerifier, codeChallenge } = createPkcePair();
+
+  pendingOAuthFlows.set(state, {
+    ownerAddress: ownerAddress.toLowerCase(),
+    codeVerifier,
+    expiresAt: Date.now() + 10 * 60 * 1000,
+    mode: "x_tipping",
   });
 
   const authUrl = oauthService.getAuthUrl(state, codeChallenge);
@@ -176,6 +203,79 @@ router.get("/x/callback", async (req: Request, res: Response) => {
     const authorIdHash = authorId; // Backward-compatible local name for older logging paths.
     const db = getDb();
 
+    if (flow.mode === "x_tipping") {
+      const ownerAddress = flow.ownerAddress.toLowerCase();
+      const existingLink = await db
+        .prepare(`SELECT user_address FROM x_accounts WHERE x_user_id = ?`)
+        .get(profile.id) as { user_address: string } | undefined;
+      if (existingLink && existingLink.user_address !== ownerAddress) {
+        res.status(409).send(`
+          <html><body style="font-family:system-ui;padding:2rem;text-align:center;">
+            <h2>This X account is already linked</h2>
+            <p>@${escapeHtml(profile.username)} is already linked to another Teep wallet for X tipping.</p>
+          </body></html>
+        `);
+        return;
+      }
+
+      const existingWallet = await db
+        .prepare(`SELECT x_user_id FROM x_accounts WHERE user_address = ?`)
+        .get(ownerAddress) as { x_user_id: string } | undefined;
+      if (existingWallet && existingWallet.x_user_id !== profile.id) {
+        res.status(409).send(`
+          <html><body style="font-family:system-ui;padding:2rem;text-align:center;">
+            <h2>Wallet already linked to another X account</h2>
+            <p>This Teep wallet is already linked for X tipping. Use the X account already connected to this wallet.</p>
+          </body></html>
+        `);
+        return;
+      }
+
+      await db.prepare(
+        `INSERT INTO x_accounts (x_user_id, user_address, x_username, verified_at)
+         VALUES (?, ?, ?, now())
+         ON CONFLICT(x_user_id) DO UPDATE SET
+           user_address = excluded.user_address,
+           x_username = excluded.x_username,
+           verified_at = now()`
+      ).run(profile.id, ownerAddress, profile.username);
+
+      const tokenAddress = (process.env.USDC_ADDRESS || "0x3600000000000000000000000000000000000000").toLowerCase();
+      await db.prepare(
+        `INSERT INTO x_tipping_permissions (user_address, enabled, token_address, max_per_tip_raw, max_daily_raw, updated_at)
+         VALUES (?, false, ?, ?, ?, now())
+         ON CONFLICT(user_address) DO NOTHING`
+      ).run(
+        ownerAddress,
+        tokenAddress,
+        process.env.X_BOT_MAX_PER_TIP_RAW || "10000000",
+        process.env.X_BOT_MAX_DAILY_RAW || "50000000"
+      );
+
+      const claimResult = await claimPendingTipsForXUser(profile.id, ownerAddress);
+      console.log(
+        `[Auth] X tipping linked: @${profile.username} (${profile.id}) -> ${ownerAddress} (claimed ${claimResult.claimedCount})`
+      );
+
+      res.setHeader("Content-Type", "text/html");
+      res.send(`<!DOCTYPE html>
+<html><head><title>Teep - X Tipping Linked</title>
+<style>
+  body { background: #0a0a0a; color: #e5e5e5; font-family: -apple-system, system-ui, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+  .card { text-align: center; padding: 40px; background: #111; border-radius: 16px; border: 1px solid #1a1a2e; max-width: 420px; }
+  h1 { font-size: 24px; color: #00ba7c; margin-bottom: 8px; }
+  p { color: #71767b; font-size: 14px; line-height: 1.5; }
+  .handle { color: #1d9bf0; font-weight: 700; }
+</style></head><body>
+<div class="card">
+  <h1>X account linked</h1>
+  <p><span class="handle">@${escapeHtml(profile.username)}</span> is linked for Teep X tipping.</p>
+  <p>Fund your Teep balance and enable X tipping in dashboard settings.</p>
+</div>
+</body></html>`);
+      return;
+    }
+
     if (flow.mode === "refresh_profile") {
       if (flow.expectedAuthorId !== authorId) {
         res.status(409).send(`
@@ -188,9 +288,9 @@ router.get("/x/callback", async (req: Request, res: Response) => {
         return;
       }
 
-      const update = db.prepare(
+      const update = await db.prepare(
         `UPDATE verified_claims
-         SET username = ?, display_name = ?, profile_image_url = ?, verified_at = datetime('now')
+         SET username = ?, display_name = ?, profile_image_url = ?, verified_at = now()
          WHERE owner_address = ? AND author_id = ?`
       ).run(
         profile.username,
@@ -243,7 +343,7 @@ router.get("/x/callback", async (req: Request, res: Response) => {
     // author_id must match tips.author_id from the indexer (stable X numeric user ID)
     const authorIdForDb = authorId;
     try {
-      db.prepare(
+      await db.prepare(
         `UPDATE verified_claims
          SET author_id = ?, username = ?, display_name = ?, profile_image_url = ?
          WHERE owner_address = ? AND LOWER(username) = LOWER(?)`
@@ -260,7 +360,7 @@ router.get("/x/callback", async (req: Request, res: Response) => {
     }
 
     // One claim per X account (first claim wins) — prevent sybil: same X linked to multiple wallets
-    const existing = db.prepare(
+    const existing = await db.prepare(
       "SELECT owner_address FROM verified_claims WHERE author_id = ?"
     ).get(authorIdForDb) as { owner_address: string } | undefined;
     if (existing) {
@@ -278,11 +378,16 @@ router.get("/x/callback", async (req: Request, res: Response) => {
       // Same wallet re-verifying: fall through to replace (refresh display_name etc.)
     }
 
-    db.prepare(`
-      INSERT OR REPLACE INTO verified_claims (author_id, username, display_name, owner_address, profile_image_url)
+    await db.prepare(`
+      INSERT INTO verified_claims (author_id, username, display_name, owner_address, profile_image_url)
       VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(author_id, owner_address) DO UPDATE SET
+        username = excluded.username,
+        display_name = excluded.display_name,
+        profile_image_url = excluded.profile_image_url,
+        verified_at = now()
     `).run(authorIdForDb, profile.username, profile.name, flow.ownerAddress.toLowerCase(), profile.profile_image_url ?? null);
-    createCreatorClaimedNotifications({
+    await createCreatorClaimedNotifications({
       authorId: authorIdForDb,
       username: profile.username,
       ownerAddress: flow.ownerAddress.toLowerCase(),
@@ -291,16 +396,12 @@ router.get("/x/callback", async (req: Request, res: Response) => {
     console.log(`[Auth] Claim verified: @${profile.username} (${profile.id}) → ${flow.ownerAddress} [authorIdHash: ${authorIdHash}]`);
 
     // 5. Store attestation keyed by owner address for extension to retrieve
-    db.prepare(`
-      CREATE TABLE IF NOT EXISTS pending_attestations (
-        owner_address TEXT PRIMARY KEY,
-        attestation_json TEXT NOT NULL,
-        created_at TEXT DEFAULT (datetime('now'))
-      )
-    `).run();
-    db.prepare(`
-      INSERT OR REPLACE INTO pending_attestations (owner_address, attestation_json)
+    await db.prepare(`
+      INSERT INTO pending_attestations (owner_address, attestation_json)
       VALUES (?, ?)
+      ON CONFLICT(owner_address) DO UPDATE SET
+        attestation_json = excluded.attestation_json,
+        created_at = now()
     `).run(flow.ownerAddress.toLowerCase(), JSON.stringify(attestation));
 
     // 6. Return styled success page
@@ -353,7 +454,7 @@ router.get("/claim-wallet-status/:address", async (req: Request, res: Response) 
   const db = getDb();
   if (DEBUG) console.log("[Teep:Backend] claim-wallet-status request", { address: address.slice(0, 10) + "…" });
 
-  const claim = db.prepare(
+  const claim = await db.prepare(
     "SELECT author_id, username FROM verified_claims WHERE owner_address = ? ORDER BY verified_at DESC LIMIT 1"
   ).get(address) as { author_id: string; username: string } | undefined;
 
@@ -366,18 +467,19 @@ router.get("/claim-wallet-status/:address", async (req: Request, res: Response) 
 
   // Total earned (cumulative tips received for this creator); does not decrease on withdrawal.
   // Include legacy hash-derived author IDs by matching the verified X handle in tip metadata.
-  const totalEarnedRow = db.prepare(
-    `SELECT COALESCE(SUM(CAST(t.amount AS REAL)), 0) as total
+  const totalEarnedRow = await db.prepare(
+    `SELECT COALESCE(SUM(CAST(t.amount AS NUMERIC)), 0) as total
      FROM tips t LEFT JOIN tip_metadata m ON t.content_id = m.content_id
      WHERE ${creatorTipPredicate("t")}`
-  ).get(authorIdForChain, claim.username) as { total: number } | undefined;
-  const totalEarnedRaw = String(Math.round(totalEarnedRow?.total ?? 0));
+  ).get(authorIdForChain, claim.username) as { total: string } | undefined;
+  const totalEarnedRaw = String(Math.round(Number(totalEarnedRow?.total ?? 0)));
 
-  // Always use current factory's computeClaimWallet for where tips go (CREATE2 address receives even if not deployed).
-  // Return legacy address(es) from DB when different so extension can sum balances (old + new after redeploy).
+  // Always use the current factory's computeClaimWallet for where tips go.
+  // Legacy addresses remain recorded for recovery, but are not part of the
+  // creator's current spendable Tips Earned balance.
   const factoryAddress = process.env.FACTORY_ADDRESS as `0x${string}` | undefined;
   const rpcUrl = getRpcUrl();
-  const row = db.prepare(
+  const row = await db.prepare(
     "SELECT wallet_address FROM claim_wallets WHERE author_id = ?"
   ).get(authorIdForChain) as { wallet_address: string } | undefined;
 
@@ -405,8 +507,10 @@ router.get("/claim-wallet-status/:address", async (req: Request, res: Response) 
         const dbAddr = row.wallet_address.toLowerCase();
         if (dbAddr !== claimWalletAddress) {
           try {
-            db.prepare(
-              "INSERT OR IGNORE INTO claim_wallet_legacy (author_id, wallet_address) VALUES (?, ?)"
+            await db.prepare(
+              `INSERT INTO claim_wallet_legacy (author_id, wallet_address)
+               VALUES (?, ?)
+               ON CONFLICT(author_id, wallet_address) DO NOTHING`
             ).run(authorIdForChain, dbAddr);
           } catch (e) {
             if (DEBUG) console.warn("[Teep:Backend] claim-wallet-status: failed to record legacy", e);
@@ -417,7 +521,7 @@ router.get("/claim-wallet-status/:address", async (req: Request, res: Response) 
       // Sync DB so claim_wallets matches current contract for future lookups
       if (!row || row.wallet_address?.toLowerCase() !== claimWalletAddress) {
         try {
-          db.prepare(
+          await db.prepare(
             "INSERT INTO claim_wallets (author_id, wallet_address, owner_address, deployed_at_block, tx_hash) VALUES (?, ?, ?, 0, '') ON CONFLICT(author_id) DO UPDATE SET wallet_address = excluded.wallet_address, owner_address = excluded.owner_address"
           ).run(authorIdForChain, claimWalletAddress, address);
           if (DEBUG) console.log("[Teep:Backend] claim-wallet-status: synced claim_wallets with chain address");
@@ -426,23 +530,9 @@ router.get("/claim-wallet-status/:address", async (req: Request, res: Response) 
         }
       }
 
-      // All legacy/alternate addresses for this author and owner so extension can sum
-      // USDC across pre-migration and post-migration claim wallets.
-      const legacyRows = db.prepare(
-        "SELECT wallet_address FROM claim_wallet_legacy WHERE author_id = ?"
-      ).all(authorIdForChain) as Array<{ wallet_address: string }>;
-      const ownerWalletRows = db.prepare(
-        "SELECT wallet_address FROM claim_wallets WHERE LOWER(owner_address) = ?"
-      ).all(address) as Array<{ wallet_address: string }>;
-      const legacyClaimWalletAddresses = [
-        ...legacyRows.map((r) => r.wallet_address.toLowerCase()),
-        ...ownerWalletRows.map((r) => r.wallet_address.toLowerCase()),
-      ].filter((wallet, index, all) => wallet !== claimWalletAddress && all.indexOf(wallet) === index);
-
       res.json({
         deployed: !!deployed,
         claimWalletAddress,
-        legacyClaimWalletAddresses: legacyClaimWalletAddresses.length ? legacyClaimWalletAddresses : undefined,
         totalEarnedRaw,
       });
       return;
@@ -454,24 +544,17 @@ router.get("/claim-wallet-status/:address", async (req: Request, res: Response) 
   // Fallback when chain not configured: use indexer DB
   if (row) {
     if (DEBUG) console.log("[Teep:Backend] claim-wallet-status: from DB", { claimWalletAddress: row.wallet_address?.slice(0, 10) + "…" });
-    const ownerWalletRows = db.prepare(
-      "SELECT wallet_address FROM claim_wallets WHERE LOWER(owner_address) = ?"
-    ).all(address) as Array<{ wallet_address: string }>;
     const claimWalletAddress = row.wallet_address.toLowerCase();
-    const legacyClaimWalletAddresses = ownerWalletRows
-      .map((r) => r.wallet_address.toLowerCase())
-      .filter((wallet, index, all) => wallet !== claimWalletAddress && all.indexOf(wallet) === index);
     res.json({
       deployed: true,
       claimWalletAddress: row.wallet_address,
-      legacyClaimWalletAddresses: legacyClaimWalletAddresses.length ? legacyClaimWalletAddresses : undefined,
       totalEarnedRaw,
     });
     return;
   }
 
   if (DEBUG) console.log("[Teep:Backend] claim-wallet-status: no claim wallet");
-  res.json({ deployed: false, claimWalletAddress: null, legacyClaimWalletAddresses: undefined, totalEarnedRaw });
+  res.json({ deployed: false, claimWalletAddress: null, totalEarnedRaw });
 });
 
 /**
@@ -479,11 +562,11 @@ router.get("/claim-wallet-status/:address", async (req: Request, res: Response) 
  * Check if a wallet address has any verified X claims.
  * This is the source of truth — backed by the database.
  */
-router.get("/claim-status/:address", (req: Request, res: Response) => {
+router.get("/claim-status/:address", async (req: Request, res: Response) => {
   const address = (req.params.address as string).toLowerCase();
   const db = getDb();
 
-  const claims = db.prepare(
+  const claims = await db.prepare(
     "SELECT author_id, username, display_name, profile_image_url, verified_at FROM verified_claims WHERE owner_address = ? ORDER BY verified_at DESC"
   ).all(address) as Array<{
     author_id: string;
@@ -529,7 +612,7 @@ async function issueAttestation(addressParam: string, res: Response) {
   const db = getDb();
 
   // Verify the address has a verified claim
-  const claim = db.prepare(
+  const claim = await db.prepare(
       "SELECT author_id FROM verified_claims WHERE owner_address = ?"
   ).get(address) as { author_id: string } | undefined;
 
@@ -568,7 +651,7 @@ router.get("/x/user/:username", async (req: Request, res: Response) => {
   try {
     const profile = await oauthService.getUserByUsername(username);
     try {
-      getDb().prepare(
+      await getDb().prepare(
         `UPDATE verified_claims
          SET author_id = ?, username = ?, display_name = ?, profile_image_url = ?
          WHERE LOWER(username) = LOWER(?)`
@@ -586,7 +669,7 @@ router.get("/x/user/:username", async (req: Request, res: Response) => {
   } catch (err: any) {
     console.error("[Auth] X username resolve failed:", err.message);
     const db = getDb();
-    const row = db.prepare(
+    const row = await db.prepare(
       "SELECT author_id, username, display_name, profile_image_url FROM verified_claims WHERE lower(username) = ? ORDER BY verified_at DESC LIMIT 1"
     ).get(username) as {
       author_id: string;

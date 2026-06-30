@@ -1,4 +1,5 @@
 import { getDb } from "../db/database";
+import { resolveAddressIdentities } from "./identity";
 
 type Period = "7d" | "30d" | "90d" | "all";
 
@@ -31,13 +32,6 @@ type SupporterAggregate = {
   lastTipAt: number;
 };
 
-type SupporterIdentity = {
-  address: string;
-  username: string | null;
-  social_x_handle: string | null;
-  privacy_hide_address: number | null;
-};
-
 type PostAggregate = {
   contentId: string;
   tweetId: string | null;
@@ -50,7 +44,7 @@ type PostAggregate = {
   hasOembedCandidate: boolean;
 };
 
-export type CreatorPerformanceResult = ReturnType<typeof getCreatorPerformance>;
+export type CreatorPerformanceResult = Awaited<ReturnType<typeof getCreatorPerformance>>;
 
 const DAY_SECONDS = 24 * 60 * 60;
 
@@ -116,15 +110,6 @@ function xPostUrl(authorHandle: string | null, tweetId: string | null) {
   return `https://x.com/${authorHandle.replace(/^@/, "")}/status/${tweetId}`;
 }
 
-function truncateAddress(address: string) {
-  return `${address.slice(0, 6)}...${address.slice(-4)}`;
-}
-
-function normalizeHandle(handle: string | null | undefined) {
-  if (!handle) return null;
-  return handle.replace(/^@/, "").toLowerCase();
-}
-
 function isDirectTip(row: TipRow) {
   return row.kind === "direct_creator_tip" || !row.tweet_id;
 }
@@ -183,16 +168,21 @@ function deltaPercent(currentRaw: bigint, previousRaw: bigint) {
   return Number.isFinite(scaled) ? scaled : null;
 }
 
-export function getCreatorPerformance(usernameParam: string, options: { period?: unknown; endDate?: unknown } = {}) {
+export async function getCreatorPerformance(
+  usernameParam: string,
+  options: { period?: unknown; endDate?: unknown; recentPage?: unknown; recentLimit?: unknown } = {},
+) {
   const identifier = normalizeCreatorIdentifier(usernameParam);
   const period = parsePeriod(options.period);
   const days = periodToDays(period);
+  const requestedRecentPage = Math.max(1, Number(options.recentPage || 1) || 1);
+  const recentLimit = Math.min(50, Math.max(1, Number(options.recentLimit || 7) || 7));
   const endAt = parseUnixDay(options.endDate) ?? Math.floor(Date.now() / 1000);
   const startAt = days == null ? null : endAt - days * DAY_SECONDS + 1;
   const previous = previousWindow(startAt, endAt, days);
   const db = getDb();
 
-  const claim = db
+  const claim = await db
     .prepare(
       `SELECT author_id, username, display_name, profile_image_url
        FROM verified_claims
@@ -204,7 +194,7 @@ export function getCreatorPerformance(usernameParam: string, options: { period?:
 
   if (!claim) return null;
 
-  const allRows = db
+  const allRows = await db
     .prepare(
       `SELECT t.content_id, t.author_id, t.from_address, t.to_address, t.amount, t.tx_hash,
               t.block_number, t.log_index, t.timestamp,
@@ -328,35 +318,20 @@ export function getCreatorPerformance(usernameParam: string, options: { period?:
     return b.lastTipAt - a.lastTipAt;
   });
 
-  const supporterIdentities = supporterList.length > 0
-    ? (db
-        .prepare(
-          `SELECT address, username, social_x_handle, privacy_hide_address
-           FROM user_settings
-           WHERE LOWER(address) IN (${supporterList.map(() => "?").join(",")})`
-        )
-        .all(...supporterList.map((supporter) => supporter.address)) as SupporterIdentity[])
-    : [];
-  const supporterIdentityByAddress = new Map(
-    supporterIdentities.map((identity) => [identity.address.toLowerCase(), identity])
-  );
+  const supporterIdentityByAddress = await resolveAddressIdentities(supporterList.map((supporter) => supporter.address));
 
   const formatSupporter = (supporter: SupporterAggregate) => {
     const identity = supporterIdentityByAddress.get(supporter.address);
-    const teepUsername = normalizeHandle(identity?.username);
-    const socialXHandle = normalizeHandle(identity?.social_x_handle);
-    const displayName = socialXHandle
-      ? `@${socialXHandle}`
-      : teepUsername
-      ? `@${teepUsername}`
-      : truncateAddress(supporter.address);
     return {
       address: supporter.address,
-      truncatedAddress: truncateAddress(supporter.address),
-      displayName,
-      teepUsername,
-      socialXHandle,
-      publicAddress: identity?.privacy_hide_address === 0 ? supporter.address : null,
+      truncatedAddress: identity?.truncatedAddress ?? supporter.address,
+      displayName: identity?.displayName ?? "Teep supporter",
+      teepUsername: identity?.teepUsername ?? null,
+      socialXHandle: identity?.socialXHandle ?? null,
+      publicAddress: identity?.publicAddress ?? null,
+      creatorUsername: identity?.creatorUsername ?? null,
+      creatorDisplayName: identity?.creatorDisplayName ?? null,
+      profileImageUrl: identity?.profileImageUrl ?? null,
       totalRaw: supporter.totalRaw.toString(),
       totalUsd: rawToUsd(supporter.totalRaw),
       tipCount: supporter.tipCount,
@@ -390,7 +365,7 @@ export function getCreatorPerformance(usernameParam: string, options: { period?:
       isRepeat: true,
     }));
 
-  const recentSupport = currentRows.slice(0, 7).map((row) => ({
+  const formatRecentSupport = (row: TipRow) => ({
     type: isDirectTip(row) ? "direct_tip" : "post_tip",
     contentId: row.content_id,
     tweetId: row.tweet_id,
@@ -403,9 +378,18 @@ export function getCreatorPerformance(usernameParam: string, options: { period?:
     txHash: row.tx_hash,
     timestamp: row.timestamp,
     receiptAvailable: true,
-  }));
+    fromIdentity: supporterIdentityByAddress.get(row.from_address.toLowerCase()) ?? null,
+  });
 
-  const latestSignals = recentSupport.slice(0, 3).map((tip) => ({
+  const recentSupportPageCount = Math.max(1, Math.ceil(currentRows.length / recentLimit));
+  const recentPage = Math.min(requestedRecentPage, recentSupportPageCount);
+  const recentSupportOffset = (recentPage - 1) * recentLimit;
+  const recentSupport = currentRows
+    .slice(recentSupportOffset, recentSupportOffset + recentLimit)
+    .map(formatRecentSupport);
+  const latestSupport = currentRows.slice(0, 7).map(formatRecentSupport);
+
+  const latestSignals = latestSupport.slice(0, 3).map((tip) => ({
     type: tip.type === "direct_tip" ? "direct_tip_received" : "tip_received",
     title: tip.type === "direct_tip" ? "Direct tip received" : "New tip received",
     amountRaw: tip.amountRaw,
@@ -491,6 +475,12 @@ export function getCreatorPerformance(usernameParam: string, options: { period?:
       repeat: repeatSupporters,
     },
     recentSupport,
+    recentSupportPage: {
+      page: recentPage,
+      limit: recentLimit,
+      total: currentRows.length,
+      pageCount: recentSupportPageCount,
+    },
     latestSignals,
     decisions,
     daily: dailySeries,

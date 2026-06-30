@@ -1,5 +1,5 @@
 import { decodeEventLog, formatUnits, parseAbiItem, toHex, type Address, type Log } from "viem";
-import { getDb } from "../db/database";
+import { one, run } from "../db/database";
 import { ARC_TESTNET_USDC, getRpcUrl } from "../config/chain";
 import { createBackendPublicClient } from "./rpcClient";
 import { createDepositConfirmedNotification } from "./notifications";
@@ -41,8 +41,10 @@ export async function syncInboundUsdcFunding(userAddress: string): Promise<void>
   const confirmedBlock = currentBlock > CONFIRMATIONS ? currentBlock - CONFIRMATIONS : 0n;
   if (confirmedBlock <= 0n) return;
 
-  const db = getDb();
-  const state = db.prepare("SELECT last_block as lastBlock FROM funding_sync_state WHERE user_address = ?").get(address) as { lastBlock: number } | undefined;
+  const state = await one<{ lastBlock: number }>(
+    "SELECT last_block as \"lastBlock\" FROM funding_sync_state WHERE user_address = ?",
+    [address]
+  );
   const configuredStart = BigInt(process.env.FUNDING_SYNC_START_BLOCK || "0");
   const defaultStart = confirmedBlock > LOOKBACK_BLOCKS ? confirmedBlock - LOOKBACK_BLOCKS : 0n;
   const latestWindowStart = confirmedBlock > MAX_BLOCKS_PER_SYNC ? confirmedBlock - MAX_BLOCKS_PER_SYNC + 1n : 0n;
@@ -62,16 +64,16 @@ export async function syncInboundUsdcFunding(userAddress: string): Promise<void>
     ];
     for (const log of logs) {
       const createdAt = await getBlockCreatedAt(client, log.blockNumber);
-      recordInboundFunding(log, createdAt);
+      await recordInboundFunding(log, createdAt);
     }
     cursor = batchTo + 1n;
   }
 
-  db.prepare(`
+  await run(`
     INSERT INTO funding_sync_state (user_address, last_block, updated_at)
     VALUES (?, ?, ?)
     ON CONFLICT(user_address) DO UPDATE SET last_block = excluded.last_block, updated_at = excluded.updated_at
-  `).run(address, Number(toBlock), Date.now());
+  `, [address, Number(toBlock), Date.now()]);
 }
 
 async function fetchErc20InboundLogs(client: ReturnType<typeof createBackendPublicClient>, address: Address, fromBlock: bigint, toBlock: bigint): Promise<InboundFundingLog[]> {
@@ -134,16 +136,17 @@ async function getBlockCreatedAt(client: ReturnType<typeof createBackendPublicCl
   return createdAt;
 }
 
-function recordInboundFunding(log: InboundFundingLog, createdAt: number): void {
+async function recordInboundFunding(log: InboundFundingLog, createdAt: number): Promise<void> {
   if (log.from === log.to) return;
   const id = `${log.source}:${log.txHash}:${log.logIndex}`;
   const amount = formatUnits(log.amountRaw, log.decimals);
   const amountRawUsdc = log.decimals === 6 ? log.amountRaw.toString() : (log.amountRaw / 10n ** BigInt(log.decimals - 6)).toString();
-  const result = getDb().prepare(`
-    INSERT OR IGNORE INTO funding_provider_sessions (
+  const changes = await run(`
+    INSERT INTO funding_provider_sessions (
       id, provider, provider_session_id, kind, user_address, status, redirect_url, metadata_json, created_at, updated_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
+    ON CONFLICT (id) DO NOTHING
+  `, [
     id,
     log.provider,
     `${log.txHash}:${log.logIndex}`,
@@ -164,9 +167,9 @@ function recordInboundFunding(log: InboundFundingLog, createdAt: number): void {
     }),
     createdAt,
     Date.now()
-  );
-  if (result.changes > 0) {
-    createDepositConfirmedNotification({
+  ]);
+  if (changes > 0) {
+    await createDepositConfirmedNotification({
       userAddress: log.to,
       amountRaw: amountRawUsdc,
       txHash: log.txHash,

@@ -1,52 +1,82 @@
 import { ReactNode, useState, useRef, useEffect } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { usePrivy } from "@privy-io/react-auth";
-import { getAvatarUrls } from "@teep/shared";
 import { CHROME_STORE_URL, DOCS_URL, GITHUB_URL, TWITTER_URL, DISCORD_URL, HAS_CHROME_STORE_LISTING } from "./config";
-import Icon from "./components/Icon";
-
-function truncateEmail(email: string): string {
-  if (!email || !email.includes("@")) return email;
-  const [local, domain] = email.split("@");
-  if (local.length <= 4) return `${local}@${domain}`;
-  return `${local.slice(0, 4)}…@${domain}`;
-}
 
 export default function Layout({ children }: { children: ReactNode }) {
-  const { ready, authenticated, login, logout, user } = usePrivy();
   const location = useLocation();
-  const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const isDashboard = location.pathname.startsWith("/dashboard") || location.pathname.startsWith("/creator");
+  const [headerScrolled, setHeaderScrolled] = useState(false);
+  const mobileToggleRef = useRef<HTMLButtonElement>(null);
+  const mobileMenuRef = useRef<HTMLDivElement>(null);
+  const isCreatorDashboard =
+    location.pathname === "/creator/dashboard" ||
+    location.pathname === "/creator/withdraw" ||
+    location.pathname === "/creator/settings" ||
+    location.pathname === "/creator/referrals" ||
+    location.pathname === "/creator/performance" ||
+    location.pathname.startsWith("/creator/grow/");
+  const isDashboard = location.pathname.startsWith("/dashboard") || isCreatorDashboard;
   const isReceipt = location.pathname.startsWith("/tx");
   const isHome = location.pathname === "/";
-  const hideGlobalNav = isDashboard || isReceipt;
+  const isTipPost = location.pathname.startsWith("/t/");
+  const isOps = location.pathname.startsWith("/ops");
+  const isPublicProfile =
+    location.pathname.startsWith("/profile/") ||
+    location.pathname.startsWith("/tipper/") ||
+    location.pathname.startsWith("/u/") ||
+    (location.pathname.startsWith("/creator/") && !isCreatorDashboard);
+  const isPublicWide = location.pathname === "/leaderboard" || isPublicProfile || isTipPost;
+  const isUtilityPage = ["/fees", "/privacy", "/support", "/terms"].includes(location.pathname);
+  const hideGlobalNav = isDashboard || isReceipt || isOps || location.pathname.startsWith("/profile/tipper/") || location.pathname.startsWith("/tipper/");
 
   useEffect(() => {
-    function handleClickOutside(e: MouseEvent) {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setUserMenuOpen(false);
-    }
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
+    if (!mobileNavOpen) return;
 
-  useEffect(() => {
-    if (mobileNavOpen) document.body.classList.add("layout-mobile-nav-open");
-    else document.body.classList.remove("layout-mobile-nav-open");
-    return () => document.body.classList.remove("layout-mobile-nav-open");
+    const previousOverflow = document.body.style.overflow;
+    document.body.classList.add("layout-mobile-nav-open");
+    document.body.style.overflow = "hidden";
+    const panel = mobileMenuRef.current;
+    const focusableSelector = 'a[href], button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    const focusable = panel ? Array.from(panel.querySelectorAll<HTMLElement>(focusableSelector)) : [];
+    focusable[0]?.focus();
+
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setMobileNavOpen(false);
+        return;
+      }
+      if (event.key !== "Tab" || focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      document.body.classList.remove("layout-mobile-nav-open");
+      document.body.style.overflow = previousOverflow;
+      mobileToggleRef.current?.focus();
+    };
   }, [mobileNavOpen]);
 
-  const displayName = user?.email?.address
-    ? truncateEmail(user.email.address)
-    : user?.wallet?.address
-      ? `${user.wallet.address.slice(0, 6)}…${user.wallet.address.slice(-4)}`
-      : "Account";
-  const twitterHandle = user?.twitter?.username ?? (user?.twitter as { username?: string } | undefined)?.username;
-  const avatarUrls = getAvatarUrls(twitterHandle ?? displayName, displayName);
-  const googlePicture = (user?.google as { picture?: string } | undefined)?.picture;
-  const twitterPicture = (user?.twitter as { profile_image_url?: string } | undefined)?.profile_image_url;
-  const avatarUrl = googlePicture ?? twitterPicture ?? avatarUrls.primary;
+  useEffect(() => {
+    if (hideGlobalNav) {
+      setHeaderScrolled(false);
+      return;
+    }
+    const updateHeader = () => setHeaderScrolled(window.scrollY > 12);
+    updateHeader();
+    window.addEventListener("scroll", updateHeader, { passive: true });
+    return () => window.removeEventListener("scroll", updateHeader);
+  }, [hideGlobalNav]);
 
   const closeMobile = () => setMobileNavOpen(false);
   const focusHashTarget = (hash: string) => {
@@ -71,21 +101,10 @@ export default function Layout({ children }: { children: ReactNode }) {
   }, [location.pathname, location.hash]);
 
   return (
-    <div className={`layout ${isHome ? "layout--lp" : ""}`}>
-      {!hideGlobalNav && isHome && (
-        <div className="lp-announce">
-          <p className="lp-announce-text">
-            <strong>Teep Beta</strong>
-            <span className="lp-announce-sep" aria-hidden />
-            <span className="lp-announce-desc">Creator tipping is live on Arc testnet</span>
-          </p>
-          <a href={CHROME_STORE_URL} target="_blank" rel="noopener noreferrer" className="lp-announce-link">
-            {HAS_CHROME_STORE_LISTING ? "Get Started" : "Join the Beta"} <span aria-hidden>→</span>
-          </a>
-        </div>
-      )}
+    <div className={`layout ${isHome ? "layout--lp" : ""} ${!hideGlobalNav ? "layout--public-shell" : ""} ${isUtilityPage ? "layout--utility" : ""}`}>
+      <a className="layout-skip-link" href="#main-content">Skip to content</a>
       {!hideGlobalNav && (
-        <header className="layout-header layout-header--landing">
+        <header className={`layout-header layout-header--landing ${headerScrolled ? "layout-header--scrolled" : ""}`}>
           <div className="layout-header-inner">
             <Link to="/" className="layout-logo layout-logo-with-icon">
               <span className="layout-logo-icon" aria-hidden>
@@ -94,72 +113,22 @@ export default function Layout({ children }: { children: ReactNode }) {
               <span>Teep</span>
             </Link>
             <nav className="layout-nav layout-nav--center layout-nav--desktop" aria-label="Main">
+              <Link to="/#product" onClick={() => handleHashLinkClick("#product")}>Product</Link>
               <Link to="/#how-it-works" onClick={() => handleHashLinkClick("#how-it-works")}>How it works</Link>
-              <Link to="/#stats" onClick={() => handleHashLinkClick("#stats")}>Stats</Link>
+              <Link to="/#activity" onClick={() => handleHashLinkClick("#activity")}>Live Activity</Link>
               <Link to="/#faq" onClick={() => handleHashLinkClick("#faq")}>FAQ</Link>
             </nav>
             <div className="layout-header-right layout-header-right--desktop">
-              {ready && authenticated ? (
-                <div className="layout-user-wrap" ref={menuRef}>
-                  <button
-                    type="button"
-                    className="layout-user-trigger"
-                    onClick={() => setUserMenuOpen((o) => !o)}
-                    aria-expanded={userMenuOpen}
-                    aria-haspopup="true"
-                  >
-                    <span className="layout-user-avatar">
-                      <img
-                        src={avatarUrl}
-                        alt=""
-                        width={28}
-                        height={28}
-                        onError={(e) => {
-                          e.currentTarget.src = avatarUrls.fallback;
-                          e.currentTarget.onerror = null;
-                        }}
-                      />
-                      <span className="layout-user-avatar-placeholder" aria-hidden>{displayName.charAt(0).toUpperCase()}</span>
-                    </span>
-                    <span className="layout-user-email">{displayName}</span>
-                    <span className="layout-user-chevron" aria-hidden>{userMenuOpen ? "▲" : "▼"}</span>
-                  </button>
-                  {userMenuOpen && (
-                    <div className="layout-user-menu">
-                      <div className="layout-user-menu-email">{user?.email?.address || "Connected"}</div>
-                      <Link to="/dashboard" className="layout-user-menu-item" onClick={() => setUserMenuOpen(false)}>
-                        Dashboard
-                      </Link>
-                      <button type="button" onClick={() => { logout(); setUserMenuOpen(false); }} className="layout-user-menu-logout">
-                        <span className="layout-user-menu-logout-icon" aria-hidden>⎋</span>
-                        Log out
-                      </button>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                ready && (
-                  <button type="button" onClick={login} className="layout-nav-btn">
-                    Connect
-                  </button>
-                )
-              )}
-              <a
-                href={CHROME_STORE_URL}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="layout-cta-download"
-              >
-                <Icon name="puzzle" className="layout-cta-download-icon" />
-                {HAS_CHROME_STORE_LISTING ? "Download Extension" : "Join Beta"}
-              </a>
+              <a href="/dashboard" target="_blank" rel="noopener noreferrer" className="layout-home-dashboard">Launch App</a>
             </div>
             <button
+              ref={mobileToggleRef}
               type="button"
               className="layout-nav-toggle"
               onClick={() => setMobileNavOpen((o) => !o)}
               aria-expanded={mobileNavOpen}
-              aria-label="Toggle menu"
+              aria-controls="layout-mobile-menu"
+              aria-label={mobileNavOpen ? "Close menu" : "Open menu"}
             >
               <span className="layout-nav-toggle-bar" />
               <span className="layout-nav-toggle-bar" />
@@ -171,7 +140,15 @@ export default function Layout({ children }: { children: ReactNode }) {
 
       {/* Mobile menu overlay: logo + X, then navs, then CTAs */}
       {!hideGlobalNav && (
-        <div className={`layout-mobile-menu ${mobileNavOpen ? "layout-mobile-menu--open" : ""}`} aria-hidden={!mobileNavOpen}>
+        <div
+          ref={mobileMenuRef}
+          id="layout-mobile-menu"
+          className={`layout-mobile-menu ${mobileNavOpen ? "layout-mobile-menu--open" : ""}`}
+          aria-hidden={!mobileNavOpen}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Navigation menu"
+        >
           <div className="layout-mobile-menu-inner">
             <div className="layout-mobile-menu-header">
               <Link to="/" className="layout-logo layout-logo-with-icon" onClick={closeMobile}>
@@ -190,57 +167,31 @@ export default function Layout({ children }: { children: ReactNode }) {
               </button>
             </div>
             <nav className="layout-mobile-menu-nav" aria-label="Main">
+              <Link to="/#product" onClick={() => handleHashLinkClick("#product")}>Product</Link>
               <Link to="/#how-it-works" onClick={() => handleHashLinkClick("#how-it-works")}>How it works</Link>
-              <Link to="/#stats" onClick={() => handleHashLinkClick("#stats")}>Stats</Link>
+              <Link to="/#activity" onClick={() => handleHashLinkClick("#activity")}>Live Activity</Link>
               <Link to="/#faq" onClick={() => handleHashLinkClick("#faq")}>FAQ</Link>
             </nav>
             <div className="layout-mobile-menu-footer">
-              {ready && authenticated ? (
-                <div className="layout-mobile-menu-user">
-                  <Link to="/dashboard" className="layout-mobile-menu-cta layout-mobile-menu-cta--user" onClick={closeMobile}>
-                    <span className="layout-user-avatar">
-                      <img src={avatarUrl} alt="" width={24} height={24} onError={(e) => { e.currentTarget.src = avatarUrls.fallback; e.currentTarget.onerror = null; }} />
-                      <span className="layout-user-avatar-placeholder" aria-hidden>{displayName.charAt(0).toUpperCase()}</span>
-                    </span>
-                    {displayName}
-                  </Link>
-                  <button type="button" onClick={() => { logout(); closeMobile(); }} className="layout-mobile-menu-logout">
-                    Log out
-                  </button>
-                </div>
-              ) : (
-                ready && (
-                  <button type="button" onClick={() => { closeMobile(); login(); }} className="layout-mobile-menu-cta layout-mobile-menu-cta--connect">
-                    Connect
-                  </button>
-                )
-              )}
-              <a
-                href={CHROME_STORE_URL}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="layout-mobile-menu-cta layout-mobile-menu-cta--download"
-                onClick={closeMobile}
-              >
-                <Icon name="puzzle" />
-                {HAS_CHROME_STORE_LISTING ? "Download Extension" : "Join Beta"}
+              <a href="/dashboard" target="_blank" rel="noopener noreferrer" className="layout-mobile-menu-cta layout-mobile-menu-cta--connect" onClick={closeMobile}>
+                Launch App
               </a>
             </div>
           </div>
         </div>
       )}
-      <main className={`layout-main ${isDashboard ? "layout-main--dashboard" : ""} ${isHome || isReceipt ? "layout-main--full" : ""}`}>
+      <main id="main-content" tabIndex={-1} className={`layout-main ${isDashboard ? "layout-main--dashboard" : ""} ${isHome || isReceipt || isPublicWide || isOps ? "layout-main--full" : ""}`}>
         {children}
       </main>
-      {!hideGlobalNav && isHome && (
+      {!hideGlobalNav && (
         <footer className="lp-footer">
           <div className="lp-footer-top">
             <div className="lp-footer-brand-col">
-              <div className="lp-footer-status">
-                <span className="lp-footer-status-dot" aria-hidden />
-                Live on Arc Testnet
-              </div>
-              <p className="lp-footer-build">Build the future of creator support on Teep</p>
+              <Link to="/" className="lp-footer-wordmark" aria-label="Teep home">
+                <img src="/logo.svg" alt="" width={31} height={31} />
+                <span>Teep</span>
+              </Link>
+              <p className="lp-footer-build">Social finance for creators and communities.</p>
               <div className="lp-footer-social">
                 <a href={TWITTER_URL} target="_blank" rel="noopener noreferrer">Twitter</a>
                 <a href={DISCORD_URL} target="_blank" rel="noopener noreferrer">Discord</a>
@@ -250,6 +201,7 @@ export default function Layout({ children }: { children: ReactNode }) {
             <div className="lp-footer-cols">
               <div className="lp-footer-col">
                 <h4>Product</h4>
+                <Link to="/#product" onClick={() => handleHashLinkClick("#product")}>Product</Link>
                 <Link to="/#how-it-works" onClick={() => handleHashLinkClick("#how-it-works")}>How it works</Link>
                 <Link to="/#stats" onClick={() => handleHashLinkClick("#stats")}>Stats</Link>
                 <Link to="/#faq" onClick={() => handleHashLinkClick("#faq")}>FAQ</Link>
@@ -257,8 +209,7 @@ export default function Layout({ children }: { children: ReactNode }) {
               </div>
               <div className="lp-footer-col">
                 <h4>Creators</h4>
-                <Link to="/dashboard">Dashboard</Link>
-                <Link to="/leaderboard">Leaderboard</Link>
+                <a href="/dashboard" target="_blank" rel="noopener noreferrer">Dashboard</a>
                 <Link to="/support">Support</Link>
               </div>
               <div className="lp-footer-col">
@@ -271,43 +222,13 @@ export default function Layout({ children }: { children: ReactNode }) {
               </div>
             </div>
           </div>
-          <div className="lp-footer-blocks" aria-hidden>
-            <span className="lp-footer-block lp-footer-block--tall" />
-            <span className="lp-footer-block" />
-            <span className="lp-footer-block" />
-            <span className="lp-footer-block" />
-          </div>
           <div className="lp-footer-bottom">
-            <span>© {new Date().getFullYear()} Teep. Your money. You control it. Not affiliated with X Corp.</span>
+            <span>© {new Date().getFullYear()} Teep. Your money. You control it. Not affiliated with any platform Teep supports.</span>
             <div className="lp-footer-legal">
               <Link to="/terms">Terms of Service</Link>
               <Link to="/privacy">Privacy Policy</Link>
             </div>
           </div>
-        </footer>
-      )}
-      {!hideGlobalNav && !isHome && (
-        <footer className="layout-footer">
-          <div className="layout-footer-brand">
-            <Link to="/" className="layout-footer-logo">Teep</Link>
-            <p className="layout-footer-tagline">Non-custodial tipping protocol</p>
-          </div>
-          <div className="layout-footer-row">
-            <div className="layout-footer-links">
-              <a href={DOCS_URL} target="_blank" rel="noopener noreferrer">Docs</a>
-              <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer">GitHub</a>
-              <Link to="/support">Support</Link>
-              <Link to="/#stats" onClick={() => handleHashLinkClick("#stats")}>Stats</Link>
-            </div>
-            <div className="layout-footer-social">
-              <a href={TWITTER_URL} target="_blank" rel="noopener noreferrer" aria-label="Twitter">Twitter</a>
-              <a href={DISCORD_URL} target="_blank" rel="noopener noreferrer" aria-label="Discord">Discord</a>
-              <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer" aria-label="GitHub">GitHub</a>
-            </div>
-          </div>
-          <p className="layout-footer-copy">
-            © {new Date().getFullYear()} Teep. Your money. You control it. Not affiliated with X Corp.
-          </p>
         </footer>
       )}
     </div>

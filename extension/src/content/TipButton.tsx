@@ -1,22 +1,24 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useId, useRef } from "react";
 import { createPortal } from "react-dom";
+import { parseUnits } from "viem";
 import { computeContentId } from "../utils/contentId";
 import { fetchTipData, formatUSDC } from "../utils/api";
 import { TIP_PRESETS, CONFIG } from "../utils/config";
 import { debugLog } from "../utils/debug";
+import { parseTipAmount } from "../utils/tipAmount";
 
 interface TipButtonProps {
   tweetId: string;
   authorHandle: string;
 }
 
-type TipState = "idle" | "selecting" | "confirming" | "sending" | "success" | "error";
+type TipState = "idle" | "selecting" | "confirming" | "sending" | "pending" | "success" | "error";
 
 export const TipButton: React.FC<TipButtonProps> = ({ tweetId, authorHandle }) => {
   const [state, setState] = useState<TipState>("idle");
   const [totalTipped, setTotalTipped] = useState<string>("0");
   const [tipCount, setTipCount] = useState<number>(0);
-  const [selectedAmount, setSelectedAmount] = useState<number>(1);
+  const [selectedAmount, setSelectedAmount] = useState<string>("1");
   const [customAmount, setCustomAmount] = useState<string>("");
   const [customError, setCustomError] = useState<string>("");
   const [errorMsg, setErrorMsg] = useState<string>("");
@@ -28,26 +30,27 @@ export const TipButton: React.FC<TipButtonProps> = ({ tweetId, authorHandle }) =
   const panelRef = useRef<HTMLDivElement>(null);
   const activeRequestIdRef = useRef<string | null>(null);
   const confirmInFlightRef = useRef(false);
+  const lastFocusedRef = useRef<HTMLElement | null>(null);
+  const dialogTitleId = useId();
+  const dialogDescriptionId = useId();
 
   const contentId = computeContentId(authorHandle, tweetId);
 
   const tipLinkUrl = `${CONFIG.WEB_APP_URL}/t/${authorHandle.replace(/^@/, "")}/${tweetId}`;
   const applyTipTotals = useCallback((totalAmount: string, count: number) => {
-    chrome.storage.local.get(["localDomTipTotals"], (stored) => {
-      const localTotals = stored.localDomTipTotals || {};
-      const local = localTotals[contentId];
-      const isFresh = local?.updatedAt && Date.now() - Number(local.updatedAt) < 30 * 60 * 1000;
-      const localAmount = isFresh ? Number(local?.amount || 0) : 0;
-      const localCount = isFresh ? Number(local?.count || 0) : 0;
-      if (local && !isFresh) {
-        const nextTotals = { ...localTotals };
-        delete nextTotals[contentId];
-        chrome.storage.local.set({ localDomTipTotals: nextTotals });
-      }
-      setTotalTipped((Number(totalAmount || 0) + localAmount).toString());
-      setTipCount(count + localCount);
-    });
-  }, [contentId]);
+    setTotalTipped(String(totalAmount || "0"));
+    setTipCount(count);
+  }, []);
+
+  const closePanel = useCallback(() => {
+    setState("idle");
+    window.requestAnimationFrame(() => lastFocusedRef.current?.focus());
+  }, []);
+
+  useEffect(() => {
+    if (state !== "idle" || !lastFocusedRef.current) return;
+    window.requestAnimationFrame(() => lastFocusedRef.current?.focus());
+  }, [state]);
 
   const handleCopyTipLink = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -68,11 +71,12 @@ export const TipButton: React.FC<TipButtonProps> = ({ tweetId, authorHandle }) =
 
   useEffect(() => {
     let cancelled = false;
+    if (!chrome.runtime?.sendMessage) return;
     chrome.runtime.sendMessage({ type: "GET_CURRENT_USER_TIPPER_SETTINGS" }, (res: { defaultTipAmount?: number }) => {
       if (cancelled) return;
       const amount = Number(res?.defaultTipAmount || 0);
       if (Number.isFinite(amount) && amount > 0) {
-        setSelectedAmount(amount);
+        setSelectedAmount(String(amount));
       }
     });
     return () => {
@@ -109,11 +113,55 @@ export const TipButton: React.FC<TipButtonProps> = ({ tweetId, authorHandle }) =
         btnRef.current?.contains(target) ||
         panelRef.current?.contains(target)
       ) return;
-      setState("idle");
+      closePanel();
     };
     document.addEventListener("mousedown", handler, true);
     return () => document.removeEventListener("mousedown", handler, true);
+  }, [closePanel, state]);
+
+  useEffect(() => {
+    if (state !== "selecting") return;
+    if (!panelRef.current?.contains(document.activeElement)) {
+      lastFocusedRef.current = document.activeElement as HTMLElement | null;
+    }
+    window.requestAnimationFrame(() => {
+      const focusable = panelRef.current?.querySelector<HTMLElement>(
+        "button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex='-1'])"
+      );
+      (focusable || panelRef.current)?.focus();
+    });
   }, [state]);
+
+  useEffect(() => {
+    if (state !== "selecting" && state !== "confirming") return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closePanel();
+        return;
+      }
+      if (event.key !== "Tab" || !panelRef.current) return;
+      const focusable = Array.from(panelRef.current.querySelectorAll<HTMLElement>(
+        "button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex='-1'])"
+      )).filter((element) => element.offsetParent !== null);
+      if (!focusable.length) {
+        event.preventDefault();
+        panelRef.current.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown, true);
+    return () => document.removeEventListener("keydown", handleKeyDown, true);
+  }, [closePanel, state]);
 
   // Reposition on scroll/resize while open
   useEffect(() => {
@@ -133,14 +181,15 @@ export const TipButton: React.FC<TipButtonProps> = ({ tweetId, authorHandle }) =
       updatePanelPosition();
       setState("selecting");
     } else {
-      setState("idle");
+      closePanel();
     }
-  }, [state, updatePanelPosition]);
+  }, [closePanel, state, updatePanelPosition]);
 
   // Preload balance when modal opens so amount selection feels instant
   useEffect(() => {
     if (state !== "selecting") return;
     let cancelled = false;
+    if (!chrome.runtime?.sendMessage) return;
     chrome.runtime.sendMessage({ type: "GET_CURRENT_USER_USDC_BALANCE" }, (res: { balance?: string; error?: string }) => {
       if (cancelled) return;
       if (res?.balance !== undefined) {
@@ -153,58 +202,49 @@ export const TipButton: React.FC<TipButtonProps> = ({ tweetId, authorHandle }) =
 
   const handleAmountSelect = useCallback((amount: number) => {
     setCustomError("");
-    setSelectedAmount(amount);
+    setSelectedAmount(String(amount));
     setState("confirming");
   }, []);
 
   const handleCustomSubmit = useCallback(() => {
-    const val = parseFloat(customAmount);
-    if (isNaN(val) || val <= 0) {
-      setCustomError("Enter a valid amount");
-      return;
+    try {
+      const parsed = parseTipAmount(customAmount);
+      setCustomError("");
+      setSelectedAmount(parsed.display);
+      setState("confirming");
+    } catch (err: any) {
+      setCustomError(err?.message || "Enter a valid amount.");
     }
-    if (val < CONFIG.MIN_TIP_USDC) {
-      setCustomError(`Min $${CONFIG.MIN_TIP_USDC}`);
-      return;
-    }
-    setCustomError("");
-    setSelectedAmount(val);
-    setState("confirming");
   }, [customAmount]);
 
-  // Listen for tip transaction result via chrome.storage (set by the signing window)
+  // Listen for the trusted background worker to relay the transaction result.
   useEffect(() => {
-    if (state !== "sending") return;
+    if (state !== "sending" && state !== "pending") return;
 
-    const listener = (changes: { [key: string]: chrome.storage.StorageChange }) => {
+    const listener = (message: any) => {
+      if (message?.type !== "TIP_TX_RESULT") return;
+      const result = message.payload;
       const activeRequestId = activeRequestIdRef.current;
-      const requestResultKey = activeRequestId ? `tipResult:${activeRequestId}` : "";
-      const result = (requestResultKey && changes[requestResultKey]?.newValue) || changes.tipResult?.newValue;
       if (!result || result.contentId !== contentId) return;
       if (activeRequestId && result.requestId && result.requestId !== activeRequestId) return;
 
+      if (result.pending) {
+        confirmInFlightRef.current = false;
+        setState("pending");
+        return;
+      }
       if (result.success) {
         activeRequestIdRef.current = null;
         confirmInFlightRef.current = false;
         setState("success");
-        const tipAmount = result.amount ? Number(result.amount) * 1_000_000 : selectedAmount * 1_000_000;
+        const tipAmount = result.amountIsRaw
+          ? Number(result.amount)
+          : result.amount
+            ? Number(parseUnits(String(result.amount), CONFIG.USDC_DECIMALS))
+            : Number(parseUnits(selectedAmount, CONFIG.USDC_DECIMALS));
         const newTotal = (Number(totalTipped) + tipAmount).toString();
         setTotalTipped(newTotal);
         setTipCount((c) => c + 1);
-        chrome.storage.local.get(["localDomTipTotals"], (stored) => {
-          const localTotals = stored.localDomTipTotals || {};
-          const existing = localTotals[contentId] || { amount: 0, count: 0, updatedAt: 0 };
-          chrome.storage.local.set({
-            localDomTipTotals: {
-              ...localTotals,
-              [contentId]: {
-                amount: Number(existing.amount || 0) + tipAmount,
-                count: Number(existing.count || 0) + 1,
-                updatedAt: Date.now(),
-              },
-            },
-          });
-        });
         setTimeout(() => setState("idle"), 2500);
 
         // Broadcast to other TipButtons on the page
@@ -218,12 +258,10 @@ export const TipButton: React.FC<TipButtonProps> = ({ tweetId, authorHandle }) =
         setState("error");
         setTimeout(() => setState("idle"), 3000);
       }
-      // Clean up result from storage
-      chrome.storage.local.remove(requestResultKey ? [requestResultKey, "tipResult"] : "tipResult");
     };
 
-    chrome.storage.onChanged.addListener(listener);
-    return () => chrome.storage.onChanged.removeListener(listener);
+    chrome.runtime.onMessage.addListener(listener);
+    return () => chrome.runtime.onMessage.removeListener(listener);
   }, [state, contentId, totalTipped, selectedAmount]);
 
   // Listen for broadcasts from other TipButton instances
@@ -264,11 +302,23 @@ export const TipButton: React.FC<TipButtonProps> = ({ tweetId, authorHandle }) =
     if (confirmInFlightRef.current || state === "sending") return;
     confirmInFlightRef.current = true;
     setErrorMsg("");
-    const rawAmount = Math.floor(selectedAmount * 1_000_000);
+    let rawAmount: bigint;
+    try {
+      rawAmount = parseTipAmount(selectedAmount).raw;
+    } catch (err: any) {
+      setErrorMsg(err?.message || "Enter a valid amount.");
+      setState("error");
+      confirmInFlightRef.current = false;
+      return;
+    }
     const cacheAge = balanceLoadedAt != null ? Date.now() - balanceLoadedAt : Infinity;
     const useCache = cachedBalance != null && cacheAge <= 2000;
     if (!useCache) {
       const res = await new Promise<{ balance?: string; error?: string }>((resolve) => {
+        if (!chrome.runtime?.sendMessage) {
+          resolve({ error: "Extension updated. Reload this X page and try again." });
+          return;
+        }
         chrome.runtime.sendMessage({ type: "GET_CURRENT_USER_USDC_BALANCE" }, resolve);
       });
       if (res?.error || res?.balance === undefined) {
@@ -278,7 +328,7 @@ export const TipButton: React.FC<TipButtonProps> = ({ tweetId, authorHandle }) =
         setTimeout(() => setState("idle"), 3000);
         return;
       }
-      if (BigInt(res.balance) < BigInt(rawAmount)) {
+      if (BigInt(res.balance) < rawAmount) {
         setErrorMsg("Insufficient funds to tip");
         setState("error");
         confirmInFlightRef.current = false;
@@ -287,7 +337,7 @@ export const TipButton: React.FC<TipButtonProps> = ({ tweetId, authorHandle }) =
       }
       setCachedBalance(res.balance ?? null);
       setBalanceLoadedAt(Date.now());
-    } else if (BigInt(cachedBalance!) < BigInt(rawAmount)) {
+    } else if (BigInt(cachedBalance!) < rawAmount) {
       setErrorMsg("Insufficient funds to tip");
       setState("error");
       confirmInFlightRef.current = false;
@@ -298,6 +348,9 @@ export const TipButton: React.FC<TipButtonProps> = ({ tweetId, authorHandle }) =
     const tipRequestPayload = { contentId, amount: selectedAmount, tweetId, authorHandle };
     debugLog("TipContent", "Sending TIP_REQUEST to background", tipRequestPayload);
     try {
+      if (!chrome.runtime?.sendMessage) {
+        throw new Error("Extension updated. Reload this X page and try again.");
+      }
       const response = await chrome.runtime.sendMessage({
         type: "TIP_REQUEST",
         payload: tipRequestPayload,
@@ -347,10 +400,15 @@ export const TipButton: React.FC<TipButtonProps> = ({ tweetId, authorHandle }) =
       <div
         role="presentation"
         style={S.backdrop}
-        onClick={() => setState("idle")}
+        onClick={closePanel}
       />
       <div
         ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={dialogTitleId}
+        aria-describedby={dialogDescriptionId}
+        tabIndex={-1}
         style={{
           ...S.panel,
           top: panelPos.top,
@@ -361,13 +419,17 @@ export const TipButton: React.FC<TipButtonProps> = ({ tweetId, authorHandle }) =
       >
       {state === "selecting" && (
         <>
-          <div style={S.panelTitle}>Tip @{authorHandle}</div>
+          <div id={dialogTitleId} style={S.panelTitle}>Tip @{authorHandle}</div>
+          <div id={dialogDescriptionId} style={S.srOnly}>
+            Choose an amount in test USDC, then review the tip before sending.
+          </div>
           {cachedBalance != null && (
             <div style={S.balanceRow}>Balance: {formatUSDC(cachedBalance)}</div>
           )}
           <button
             type="button"
             onClick={handleCopyTipLink}
+            data-teep-control="true"
             style={S.copyLinkRow}
             title="Paste in post or bio so others can tip"
           >
@@ -384,6 +446,7 @@ export const TipButton: React.FC<TipButtonProps> = ({ tweetId, authorHandle }) =
               <button
                 key={amount}
                 onClick={() => handleAmountSelect(amount)}
+                data-teep-control="true"
                 style={S.amountBtn}
                 onMouseEnter={(e) => {
                   const el = e.currentTarget;
@@ -417,25 +480,32 @@ export const TipButton: React.FC<TipButtonProps> = ({ tweetId, authorHandle }) =
                 setCustomError("");
               }}
               onKeyDown={(e) => { if (e.key === "Enter") handleCustomSubmit(); }}
+              aria-label="Custom tip amount in test USDC"
+              data-teep-control="true"
               style={S.customInput}
             />
-            <button onClick={handleCustomSubmit} style={S.customGoBtn}>
+            <button
+              onClick={handleCustomSubmit}
+              style={S.customGoBtn}
+              aria-label="Review custom tip amount"
+              data-teep-control="true"
+            >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M5 12h14M12 5l7 7-7 7" /></svg>
             </button>
           </div>
-          {customError && <div style={S.customErr}>{customError}</div>}
+          {customError && <div role="alert" style={S.customErr}>{customError}</div>}
         </>
       )}
 
       {state === "confirming" && (
         <>
-          <div style={S.panelTitle}>
-            Send <span style={{ color: "#1d9bf0" }}>${selectedAmount}</span> USD
+          <div id={dialogTitleId} style={S.panelTitle}>
+            Send <span style={{ color: "#1d9bf0" }}>${selectedAmount}</span> in test USDC
           </div>
-          <div style={S.panelSub}>to @{authorHandle}</div>
+          <div id={dialogDescriptionId} style={S.panelSub}>to @{authorHandle}</div>
           <div style={S.confirmRow}>
-            <button onClick={handleConfirm} disabled={confirmInFlightRef.current} style={S.confirmBtn}>Confirm</button>
-            <button onClick={() => setState("selecting")} style={S.backBtn}>Back</button>
+            <button data-teep-control="true" onClick={handleConfirm} disabled={confirmInFlightRef.current} style={S.confirmBtn}>Confirm</button>
+            <button data-teep-control="true" onClick={() => setState("selecting")} style={S.backBtn}>Back</button>
           </div>
         </>
       )}
@@ -446,7 +516,7 @@ export const TipButton: React.FC<TipButtonProps> = ({ tweetId, authorHandle }) =
 
   // Error toast — also portaled
   const errorToast = state === "error" && panelPos ? createPortal(
-    <div style={{ ...S.toast, top: panelPos.top, left: Math.max(8, panelPos.left) }}>
+    <div role="alert" aria-live="assertive" style={{ ...S.toast, top: panelPos.top, left: Math.max(8, panelPos.left) }}>
       {errorMsg || "Something went wrong"}
     </div>,
     document.body
@@ -454,6 +524,12 @@ export const TipButton: React.FC<TipButtonProps> = ({ tweetId, authorHandle }) =
 
   return (
     <div data-teep="true" style={S.wrap}>
+      <style>{`
+        [data-teep-control="true"]:focus-visible {
+          outline: 2px solid #a78bfa !important;
+          outline-offset: 2px !important;
+        }
+      `}</style>
       <button
         ref={btnRef}
         onClick={handleTipClick}
@@ -461,18 +537,23 @@ export const TipButton: React.FC<TipButtonProps> = ({ tweetId, authorHandle }) =
           ...S.btn,
           color:
             state === "success" ? "#00ba7c"
-            : state === "sending" ? "#f6a623"
+            : state === "sending" || state === "pending" ? "#f6a623"
             : isOpen ? "#1d9bf0"
             : "#71767b",
         }}
-        title={`Tip @${authorHandle} with USD`}
+        title={`Tip @${authorHandle} with test USDC`}
+        aria-expanded={isOpen}
+        aria-haspopup="dialog"
+        aria-label={`Tip @${authorHandle} with test USDC`}
+        data-teep-control="true"
       >
         <span style={S.iconWrap}>{coinIcon}</span>
         <span style={S.tipLabel}>Tip</span>
-        {(tipCount > 0 || state === "success" || state === "sending") && (
+        {(tipCount > 0 || state === "success" || state === "sending" || state === "pending") && (
           <span style={S.btnLabel}>
             {state === "success" ? "Sent!"
               : state === "sending" ? "..."
+              : state === "pending" ? "Confirming"
               : totalTipped !== "0" ? formatUSDC(totalTipped)
               : ""}
           </span>
@@ -566,6 +647,17 @@ const S: Record<string, React.CSSProperties> = {
     fontWeight: 700,
     color: "#e7e9ea",
     marginBottom: "4px",
+  },
+  srOnly: {
+    position: "absolute",
+    width: "1px",
+    height: "1px",
+    padding: 0,
+    margin: "-1px",
+    overflow: "hidden",
+    clip: "rect(0, 0, 0, 0)",
+    whiteSpace: "nowrap",
+    border: 0,
   },
   balanceRow: {
     fontSize: "12px",

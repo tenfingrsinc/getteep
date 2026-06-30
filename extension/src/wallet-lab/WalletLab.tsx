@@ -135,8 +135,8 @@ export function WalletLab() {
     try {
       const parsed = parsePostUrl(labPostUrl);
       if (!parsed) throw new Error("Enter a valid X post URL");
-      const amount = Number(labTipAmount);
-      if (!Number.isFinite(amount) || amount <= 0) throw new Error("Enter a valid tip amount");
+      const amount = labTipAmount.trim();
+      if (!/^(?:0|[1-9]\d*)(?:\.\d{1,6})?$/.test(amount)) throw new Error("Enter a valid tip amount");
       const contentId = computeContentId(parsed.authorHandle, parsed.tweetId);
       const authorId = handleToAuthorId(parsed.authorHandle);
       const response = await chrome.runtime.sendMessage({

@@ -9,7 +9,14 @@
     "build:dev": "webpack --mode development",
     "build:debug": "cross-env DEBUG_TEEP=true ALLOW_INSECURE_EXTENSION_BUILD=true webpack --mode production",
     "build:demo": "cross-env BLUR_EMAIL=true webpack --mode production",
-    "clean": "rimraf dist"
+    "clean": "rimraf dist",
+    "typecheck": "tsc --noEmit",
+    "verify:encoding": "node scripts/verify-encoding.js",
+    "audit:runtime": "npm audit --omit=dev --audit-level=high",
+    "build:release": "node scripts/release.js build",
+    "verify:release": "node scripts/release.js verify",
+    "package:release": "node scripts/release.js package",
+    "release": "npm run typecheck && npm run verify:encoding && npm run audit:runtime && npm run build:release && npm run verify:release && npm run package:release"
   },
   "dependencies": {
     "@privy-io/react-auth": "^3.15.0",
@@ -17,6 +24,7 @@
     "buffer": "^6.0.3",
     "ethers": "^6.13.0",
     "permissionless": "^0.2.47",
+    "qrcode": "^1.5.4",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
     "viem": "^2.21.0"

@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { Link } from "react-router-dom";
 import { buildFundingPolicy } from "@teep/shared";
 import { ENABLE_FIAT_OFFRAMP, ENABLE_FIAT_ONRAMP, FAUCET_URL, FUNDING_ENV, OFFRAMP_URL, ONRAMP_URL } from "../config";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 
 interface RechargePromptProps {
   open: boolean;
@@ -34,6 +35,7 @@ export default function RechargePrompt({
   const [faucetLoading, setFaucetLoading] = useState(false);
   const [faucetMsg, setFaucetMsg] = useState("");
   const [depositCopyFeedback, setDepositCopyFeedback] = useState(false);
+  const dialogRef = useDialogFocus<HTMLDivElement>(open, onClose);
   const fundingPolicy = buildFundingPolicy({
     environment: FUNDING_ENV,
     faucetUrl: FAUCET_URL,
@@ -76,17 +78,6 @@ export default function RechargePrompt({
   }, [walletAddress]);
 
   useEffect(() => {
-    if (!open) return;
-    const handleEscape = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    document.addEventListener("keydown", handleEscape);
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.removeEventListener("keydown", handleEscape);
-      document.body.style.overflow = "";
-    };
-  }, [open, onClose]);
-
-  useEffect(() => {
     if (!open) {
       setFundingDropdownOpen(false);
       setFaucetMsg("");
@@ -107,7 +98,7 @@ export default function RechargePrompt({
       aria-labelledby="recharge-title"
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
-      <div className="modal-panel modal-panel--recharge">
+      <div ref={dialogRef} className="modal-panel modal-panel--recharge" tabIndex={-1}>
         <h2 id="recharge-title" className="modal-title">
           Add funds to continue
         </h2>
@@ -124,6 +115,7 @@ export default function RechargePrompt({
                 onClick={() => setFundingDropdownOpen((o) => !o)}
                 aria-expanded={fundingDropdownOpen}
                 aria-haspopup="true"
+                data-autofocus
               >
                 Add funds
                 <span className="recharge-funding-chevron" aria-hidden>{fundingDropdownOpen ? "▲" : "▼"}</span>

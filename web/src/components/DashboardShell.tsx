@@ -1,9 +1,9 @@
 import { ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { usePrivy } from "@privy-io/react-auth";
-import { useSmartWallets } from "@privy-io/react-auth/smart-wallets";
 import { API_BASE } from "../config";
 import { useAccountRole } from "../context/AccountRoleContext";
+import { useReferral } from "../context/ReferralContext";
 
 type DashboardShellProps = {
   address?: string;
@@ -27,12 +27,26 @@ export type DashboardNavSection = {
   links: DashboardNavLink[];
 };
 
-function shortAddress(address?: string) {
-  return address ? `${address.slice(0, 6)}...${address.slice(-4)}` : "None";
+function accountLabelFromSettings(settings: unknown) {
+  const source = settings as { socialXHandle?: string | null; username?: string | null; displayName?: string | null } | null;
+  const label = source?.socialXHandle || source?.username || source?.displayName || "";
+  return label ? (label.startsWith("@") ? label : `@${label}`) : "Teep account";
 }
 
-function initials(address?: string) {
-  return address ? address.slice(2, 4).toUpperCase() : "U";
+function usernameFallback(email?: string | null) {
+  const local = email?.includes("@") ? email.split("@")[0] : "";
+  const cleaned = local
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 24);
+  return cleaned.length >= 3 ? cleaned : "";
+}
+
+function initials(label?: string) {
+  const clean = (label || "Teep account").replace(/^@/, "").trim();
+  return clean.slice(0, 2).toUpperCase() || "TA";
 }
 
 type NotificationRecord = {
@@ -51,21 +65,27 @@ export default function DashboardShell({
   mobileNavLinks,
 }: DashboardShellProps) {
   const { pathname } = useLocation();
-  const { logout } = usePrivy();
-  const { client: smartWalletClient } = useSmartWallets();
+  const { logout, user } = usePrivy();
   const accountRole = useAccountRole();
+  const {
+    code: referralCode,
+    referredCount: referralCount,
+    loading: referralLoading,
+    status: referralMsg,
+    copyLink: copyReferralLink,
+  } = useReferral();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [notificationOpen, setNotificationOpen] = useState(false);
+  const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
   const [notifications, setNotifications] = useState<NotificationRecord[]>([]);
   const [notificationUnread, setNotificationUnread] = useState(0);
-  const [referralCode, setReferralCode] = useState<string | null>(null);
-  const [referralCount, setReferralCount] = useState(0);
   const [referralCopied, setReferralCopied] = useState(false);
-  const [referralLoading, setReferralLoading] = useState(false);
-  const [referralMsg, setReferralMsg] = useState("");
+  const [accountDisplayName, setAccountDisplayName] = useState("Teep account");
   const routeForcesCreatorNav = pathname.startsWith("/creator");
   const notificationRef = useRef<HTMLDivElement>(null);
   const userMenuRef = useRef<HTMLDivElement>(null);
+  const mobileMoreButtonRef = useRef<HTMLButtonElement>(null);
+  const mobileMoreCloseRef = useRef<HTMLButtonElement>(null);
   const showCreatorNav = routeForcesCreatorNav || accountRole.isCreator;
   const roleResolved = routeForcesCreatorNav || accountRole.status !== "loading";
 
@@ -83,7 +103,7 @@ export default function DashboardShell({
     { to: "/creator/settings", icon: "settings", label: "Settings", active: pathname === "/creator/settings" || pathname === "/creator/grow/settings" },
   ];
   const creatorTipperDashboardLinks: DashboardNavLink[] = [
-    { to: "/dashboard", icon: "account_balance_wallet", label: "Tipper Dashboard", active: pathname === "/dashboard" },
+    { to: "/dashboard?view=tipper", icon: "account_balance_wallet", label: "Tipper Dashboard", active: pathname === "/dashboard" },
   ];
   const tipperDashboardLinks: DashboardNavLink[] = [
     { to: "/dashboard", icon: "account_balance_wallet", label: "Tipper Dashboard", active: pathname === "/dashboard" },
@@ -101,12 +121,22 @@ export default function DashboardShell({
     : [{ title: "Tipper Dashboard", links: tipperDashboardLinks }];
   const resolvedNavSections = navSections || dynamicNavSections;
   const defaultMobileLinks = showCreatorNav
-    ? [creatorDashboardLinks[0], creatorDashboardLinks[1], growTipsLinks[0], creatorAccountLinks[0]]
+    ? [creatorDashboardLinks[0], creatorDashboardLinks[1], creatorDashboardLinks[2], growTipsLinks[0]]
     : tipperDashboardLinks;
   const resolvedMobileLinks = mobileNavLinks || defaultMobileLinks;
+  const isLinkActive = (link: DashboardNavLink) => link.active ?? pathname === link.to;
+  const mobilePrimaryPaths = new Set(resolvedMobileLinks.map((link) => link.to));
+  const mobileMoreSections = showCreatorNav
+    ? resolvedNavSections
+      .map((section) => ({
+        ...section,
+        links: section.links.filter((link) => !mobilePrimaryPaths.has(link.to)),
+      }))
+      .filter((section) => section.links.length > 0)
+    : [];
+  const mobileMoreActive = mobileMoreSections.some((section) => section.links.some(isLinkActive));
   const resolvedSidebarKicker = sidebarKicker || (showCreatorNav ? "Creator Dashboard" : "Tipper Dashboard");
   const dashboardHomePath = showCreatorNav ? "/creator/dashboard" : "/dashboard";
-  const isLinkActive = (link: DashboardNavLink) => link.active ?? pathname === link.to;
 
   const fetchNotifications = useCallback(() => {
     if (!address) return;
@@ -122,6 +152,27 @@ export default function DashboardShell({
   useEffect(() => {
     fetchNotifications();
   }, [fetchNotifications]);
+
+  useEffect(() => {
+    if (!address) {
+      setAccountDisplayName("Teep account");
+      return;
+    }
+    let cancelled = false;
+    const fallbackUsername = usernameFallback(user?.email?.address);
+    const query = fallbackUsername ? `?preferredUsername=${encodeURIComponent(fallbackUsername)}` : "";
+    fetch(`${API_BASE}/api/v1/wallet/${address}/settings${query}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((settings) => {
+        if (!cancelled) setAccountDisplayName(accountLabelFromSettings(settings));
+      })
+      .catch(() => {
+        if (!cancelled) setAccountDisplayName("Teep account");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [address, user?.email?.address]);
 
   useEffect(() => {
     if (!notificationOpen) return;
@@ -146,20 +197,24 @@ export default function DashboardShell({
   }, [userMenuOpen]);
 
   useEffect(() => {
-    if (!address) return;
-    let cancelled = false;
-    Promise.all([
-      fetch(`${API_BASE}/referral/code/${address}`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
-      fetch(`${API_BASE}/referral/stats/${address}`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
-    ]).then(([codeRes, statsRes]) => {
-      if (cancelled) return;
-      setReferralCode(codeRes?.code || null);
-      setReferralCount(Number(statsRes?.referredCount || 0));
-    });
-    return () => {
-      cancelled = true;
+    setMobileMoreOpen(false);
+  }, [pathname]);
+
+  useEffect(() => {
+    if (!mobileMoreOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileMoreOpen(false);
     };
-  }, [address]);
+    document.body.style.overflow = "hidden";
+    document.addEventListener("keydown", handleKeyDown);
+    window.requestAnimationFrame(() => mobileMoreCloseRef.current?.focus());
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", handleKeyDown);
+      mobileMoreButtonRef.current?.focus();
+    };
+  }, [mobileMoreOpen]);
 
   const markNotificationRead = useCallback(async (id: number) => {
     if (!address) return;
@@ -168,52 +223,14 @@ export default function DashboardShell({
     setNotificationUnread((count) => Math.max(0, count - 1));
   }, [address]);
 
-  const requestWalletProof = useCallback(async () => {
-    if (!address || !smartWalletClient?.account) throw new Error("Connect your account first.");
-    const challengeRes = await fetch(`${API_BASE}/auth/wallet/challenge`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ address, purpose: "referral-code" }),
-    });
-    const challenge = await challengeRes.json();
-    if (!challengeRes.ok || !challenge.message) throw new Error(challenge.error || "Could not verify account.");
-    const signature = await smartWalletClient.signMessage({
-      account: smartWalletClient.account,
-      message: challenge.message,
-    } as Parameters<typeof smartWalletClient.signMessage>[0]);
-    return { message: challenge.message, signature };
-  }, [address, smartWalletClient]);
-
   const handleCopyReferral = useCallback(async () => {
     if (!address) return;
-    setReferralLoading(true);
-    setReferralMsg("");
-    try {
-      let code = referralCode;
-      if (!code) {
-        const walletProof = await requestWalletProof();
-        const response = await fetch(`${API_BASE}/referral/code`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ address, walletProof }),
-        });
-        const data = await response.json();
-        if (!response.ok || !data.code) throw new Error(data.error || "Could not create referral code.");
-        code = String(data.code);
-        setReferralCode(code);
-      }
-      const refLink = `${window.location.origin}/?ref=${encodeURIComponent(code)}`;
-      await navigator.clipboard.writeText(refLink);
+    const copied = await copyReferralLink();
+    if (copied) {
       setReferralCopied(true);
-      setReferralMsg("Referral link copied.");
       window.setTimeout(() => setReferralCopied(false), 2000);
-    } catch (error) {
-      setReferralMsg(error instanceof Error ? error.message : "Could not copy referral link.");
-    } finally {
-      setReferralLoading(false);
-      window.setTimeout(() => setReferralMsg(""), 5000);
     }
-  }, [address, referralCode, requestWalletProof]);
+  }, [address, copyReferralLink]);
 
   return (
     <div className="dashboard-layout">
@@ -266,13 +283,13 @@ export default function DashboardShell({
           </div>
           <div className="dashboard-sidebar-wallet">
             <div>Account Connected</div>
-            <strong>{shortAddress(address)}</strong>
+            <strong>{accountDisplayName}</strong>
             <span aria-hidden />
           </div>
         </div>
       </aside>
 
-      <div className="dashboard-body">
+      <div className={`dashboard-body${pathname === "/creator/dashboard" ? " dashboard-body--scrollbar-hidden" : ""}`}>
         <header className="dashboard-header">
           <Link to={dashboardHomePath} className="dashboard-header-logo" aria-label="Teep dashboard">
             <img src="/logo.svg" alt="" width={36} height={36} />
@@ -315,7 +332,7 @@ export default function DashboardShell({
                   aria-label="Account menu"
                   aria-expanded={userMenuOpen}
                 >
-                  {initials(address)}
+                  {initials(accountDisplayName)}
                 </button>
                 {userMenuOpen && (
                   <div className="dashboard-user-menu">
@@ -331,14 +348,71 @@ export default function DashboardShell({
         </header>
         {children}
       </div>
-      <nav className="dashboard-mobile-nav" aria-label="Dashboard navigation">
+      <nav className={`dashboard-mobile-nav${showCreatorNav ? " dashboard-mobile-nav--creator" : ""}`} aria-label="Dashboard navigation">
         {resolvedMobileLinks.map((link) => (
           <Link key={link.to} to={link.to} className={isLinkActive(link) ? "is-active" : ""}>
             <span className="material-symbols-outlined" aria-hidden>{link.icon}</span>
             <span>{link.label.replace(" Creators", "")}</span>
           </Link>
         ))}
+        {showCreatorNav && mobileMoreSections.length > 0 && (
+          <button
+            ref={mobileMoreButtonRef}
+            type="button"
+            className={mobileMoreActive || mobileMoreOpen ? "is-active" : ""}
+            aria-label="More dashboard navigation"
+            aria-expanded={mobileMoreOpen}
+            aria-controls="dashboard-mobile-more-sheet"
+            onClick={() => setMobileMoreOpen(true)}
+          >
+            <span className="material-symbols-outlined" aria-hidden>menu</span>
+            <span>More</span>
+          </button>
+        )}
       </nav>
+      {showCreatorNav && mobileMoreSections.length > 0 && (
+        <div className={`dashboard-mobile-more${mobileMoreOpen ? " is-open" : ""}`} aria-hidden={!mobileMoreOpen}>
+          <button
+            type="button"
+            className="dashboard-mobile-more-backdrop"
+            aria-label="Close more navigation"
+            tabIndex={mobileMoreOpen ? 0 : -1}
+            onClick={() => setMobileMoreOpen(false)}
+          />
+          <section
+            id="dashboard-mobile-more-sheet"
+            className="dashboard-mobile-more-sheet"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="dashboard-mobile-more-title"
+          >
+            <div className="dashboard-mobile-more-handle" aria-hidden />
+            <div className="dashboard-mobile-more-head">
+              <div>
+                <span>Creator dashboard</span>
+                <h2 id="dashboard-mobile-more-title">More</h2>
+              </div>
+              <button ref={mobileMoreCloseRef} type="button" aria-label="Close more navigation" onClick={() => setMobileMoreOpen(false)}>
+                <span className="material-symbols-outlined" aria-hidden>close</span>
+              </button>
+            </div>
+            <nav className="dashboard-mobile-more-links" aria-label="More dashboard navigation">
+              {mobileMoreSections.map((section, sectionIndex) => (
+                <div key={section.title || sectionIndex} className="dashboard-mobile-more-group">
+                  {section.title && <h3>{section.title}</h3>}
+                  {section.links.map((link) => (
+                    <Link key={link.to} to={link.to} className={isLinkActive(link) ? "is-active" : ""}>
+                      <span className="material-symbols-outlined" aria-hidden>{link.icon}</span>
+                      <span>{link.label}</span>
+                      <span className="material-symbols-outlined dashboard-mobile-more-chevron" aria-hidden>chevron_right</span>
+                    </Link>
+                  ))}
+                </div>
+              ))}
+            </nav>
+          </section>
+        </div>
+      )}
     </div>
   );
 }

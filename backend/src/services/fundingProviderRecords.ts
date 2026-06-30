@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import { getDb } from "../db/database";
+import { run } from "../db/database";
 
 type ProviderKind = "faucet" | "crypto_receive" | "fiat_onramp" | "fiat_offramp";
 type ProviderStatus = "created" | "pending" | "completed" | "failed" | "cancelled";
@@ -28,14 +28,14 @@ function safeJson(metadata?: Record<string, unknown>): string | null {
   return JSON.stringify(metadata);
 }
 
-export function createFundingProviderSession(input: CreateFundingProviderSessionInput): string {
+export async function createFundingProviderSession(input: CreateFundingProviderSessionInput): Promise<string> {
   const id = randomUUID();
   const now = Date.now();
-  getDb().prepare(`
+  await run(`
     INSERT INTO funding_provider_sessions (
       id, provider, provider_session_id, kind, user_address, status, redirect_url, metadata_json, created_at, updated_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
+  `, [
     id,
     input.provider,
     input.providerSessionId || null,
@@ -46,24 +46,25 @@ export function createFundingProviderSession(input: CreateFundingProviderSession
     safeJson(input.metadata),
     now,
     now
-  );
+  ]);
   return id;
 }
 
-export function updateFundingProviderSessionStatus(id: string, status: ProviderStatus, metadata?: Record<string, unknown>): void {
-  getDb().prepare(`
+export async function updateFundingProviderSessionStatus(id: string, status: ProviderStatus, metadata?: Record<string, unknown>): Promise<void> {
+  await run(`
     UPDATE funding_provider_sessions
     SET status = ?, metadata_json = COALESCE(?, metadata_json), updated_at = ?
     WHERE id = ?
-  `).run(status, safeJson(metadata), Date.now(), id);
+  `, [status, safeJson(metadata), Date.now(), id]);
 }
 
-export function recordFundingProviderWebhook(input: RecordFundingProviderWebhookInput): void {
-  getDb().prepare(`
-    INSERT OR IGNORE INTO funding_provider_webhooks (
+export async function recordFundingProviderWebhook(input: RecordFundingProviderWebhookInput): Promise<void> {
+  await run(`
+    INSERT INTO funding_provider_webhooks (
       provider, provider_event_id, event_type, session_id, status, metadata_json, received_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(
+    ON CONFLICT (provider, provider_event_id) DO NOTHING
+  `, [
     input.provider,
     input.providerEventId || null,
     input.eventType,
@@ -71,5 +72,5 @@ export function recordFundingProviderWebhook(input: RecordFundingProviderWebhook
     input.status || "received",
     safeJson(input.metadata),
     Date.now()
-  );
+  ]);
 }

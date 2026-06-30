@@ -2,6 +2,7 @@ import { ReactNode } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import { useSmartWallets } from "@privy-io/react-auth/smart-wallets";
 import DashboardShell from "./DashboardShell";
+import { DashboardConnectPage, DashboardPreparingPage } from "./DashboardAuthState";
 
 type CreatorDashboardShellProps = {
   title: string;
@@ -25,6 +26,14 @@ export default function CreatorDashboardShell({ title, children }: CreatorDashbo
   const { ready, authenticated } = usePrivy();
   const { client: smartWalletClient } = useSmartWallets();
   const address = ready && authenticated ? (smartWalletClient?.account?.address || "").toLowerCase() : "";
+
+  if (!ready || (authenticated && !address)) {
+    return <DashboardPreparingPage title={title} address={address} message="Preparing your creator dashboard." />;
+  }
+
+  if (!authenticated) {
+    return <DashboardConnectPage title={title} />;
+  }
 
   return (
     <DashboardShell address={address} title={title}>

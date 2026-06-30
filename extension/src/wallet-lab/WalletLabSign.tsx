@@ -8,11 +8,12 @@ import "./walletLab.css";
 
 type PendingTip = {
   requestId?: string;
+  intentKey?: string;
   requestKey?: string;
   contentId: string;
   authorHandle: string;
   tweetId?: string;
-  amount: number;
+  amount: number | string;
   rawAmount: string;
   needsApproval?: boolean;
   approveData?: { to: string; data: string } | null;
@@ -128,7 +129,16 @@ export function WalletLabSign() {
       const keysToRemove = [storageKeys(resolvedRequestId).pendingKey];
       if (pendingTip.requestId) keysToRemove.push("pendingTip");
       await chrome.storage.local.remove(keysToRemove);
-      chrome.runtime.sendMessage({ type: "TIP_TX_COMPLETE", payload: { success: true, txHash, requestId: resolvedRequestId, requestKey: pendingTip.requestKey } }).catch(() => {});
+      chrome.runtime.sendMessage({
+        type: "TIP_TX_COMPLETE",
+        payload: {
+          success: true,
+          intentStatus: "confirmed",
+          txHash,
+          requestId: resolvedRequestId,
+          intentKey: pendingTip.intentKey || pendingTip.requestKey,
+        },
+      }).catch(() => {});
       console.info("[Teep:WalletLabSign] pending tip tx success", success);
     } catch (err) {
       const failure = compactError(err);
@@ -146,7 +156,16 @@ export function WalletLabSign() {
         [storageKeys(resolvedRequestId).resultKey]: failurePayload,
         tipResult: failurePayload,
       });
-      chrome.runtime.sendMessage({ type: "TIP_TX_COMPLETE", payload: { success: false, requestId: resolvedRequestId, requestKey: pendingTip.requestKey } }).catch(() => {});
+      chrome.runtime.sendMessage({
+        type: "TIP_TX_COMPLETE",
+        payload: {
+          success: false,
+          intentStatus: "failed",
+          error: failurePayload.error,
+          requestId: resolvedRequestId,
+          intentKey: pendingTip.intentKey || pendingTip.requestKey,
+        },
+      }).catch(() => {});
       console.warn("[Teep:WalletLabSign] pending tip tx failed", failure);
     }
   };

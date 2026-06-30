@@ -2,10 +2,12 @@ const path = require("path");
 const webpack = require("webpack");
 const CopyPlugin = require("copy-webpack-plugin");
 
-try {
-  require("dotenv").config({ path: path.resolve(__dirname, ".env") });
-} catch {
-  // dotenv is optional for the extension; CI can pass env directly.
+if (process.env.EXTENSION_RELEASE_BUILD !== "true") {
+  try {
+    require("dotenv").config({ path: path.resolve(__dirname, ".env") });
+  } catch {
+    // dotenv is optional for the extension; CI can pass env directly.
+  }
 }
 
 const LOCAL_URL_RE = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/|$)/i;
@@ -40,8 +42,56 @@ function hostPermissionFromUrl(value) {
   }
 }
 
+function cspSourceFromUrl(value) {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    return `${url.protocol}//${url.host}`;
+  } catch {
+    return null;
+  }
+}
+
 function unique(values) {
   return [...new Set(values.filter(Boolean))];
+}
+
+function walletLabReleaseGuard(isProduction) {
+  return {
+    apply(compiler) {
+      if (!isProduction) return;
+
+      compiler.hooks.thisCompilation.tap("WalletLabReleaseGuard", (compilation) => {
+        compilation.hooks.processAssets.tap(
+          {
+            name: "WalletLabReleaseGuard",
+            stage: webpack.Compilation.PROCESS_ASSETS_STAGE_SUMMARIZE,
+          },
+          (assets) => {
+            const prohibitedAssets = Object.keys(assets).filter((name) => name.includes("wallet-lab"));
+            const backgroundSource = assets["background.js"]?.source().toString() || "";
+            const prohibitedBackgroundMarkers = [
+              "TIP_REQUEST_LAB",
+              "wallet-lab",
+            ].filter((marker) => backgroundSource.includes(marker));
+
+            if (prohibitedAssets.length || prohibitedBackgroundMarkers.length) {
+              const details = [
+                prohibitedAssets.length ? `assets: ${prohibitedAssets.join(", ")}` : null,
+                prohibitedBackgroundMarkers.length
+                  ? `background markers: ${prohibitedBackgroundMarkers.join(", ")}`
+                  : null,
+              ].filter(Boolean).join("; ");
+
+              compilation.errors.push(
+                new Error(`Production extension contains wallet lab diagnostics (${details}).`)
+              );
+            }
+          }
+        );
+      });
+    },
+  };
 }
 
 function buildManifest(source, isProduction) {
@@ -53,13 +103,33 @@ function buildManifest(source, isProduction) {
     "https://twitter.com/*",
     "https://auth.privy.io/*",
     "https://*.privy.io/*",
+    "https://*.privy.systems/*",
+    "https://explorer-api.walletconnect.com/*",
+    "https://*.zerodev.app/*",
+    "https://*.pimlico.io/*",
     hostPermissionFromUrl(process.env.API_BASE_URL),
     hostPermissionFromUrl(process.env.RPC_URL || process.env.ARC_RPC_URL || "https://rpc.testnet.arc.network"),
   ]);
 
+  const connectSources = unique([
+    "'self'",
+    "https://auth.privy.io",
+    "https://*.privy.io",
+    // Privy selects per-chain RPC hosts under this domain at runtime.
+    "https://*.privy.systems",
+    "wss://*.privy.systems",
+    // Privy queries WalletConnect's registry while initializing wallet clients.
+    "https://explorer-api.walletconnect.com",
+    // Kernel bundler/paymaster endpoints are tenant-specific subdomains.
+    "https://*.zerodev.app",
+    "https://*.pimlico.io",
+    cspSourceFromUrl(process.env.API_BASE_URL),
+    cspSourceFromUrl(process.env.RPC_URL || process.env.ARC_RPC_URL || "https://rpc.testnet.arc.network"),
+  ]);
   manifest.content_security_policy = {
-    extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; connect-src 'self' https: wss:;",
+    extension_pages: `script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; connect-src ${connectSources.join(" ")};`,
   };
+  delete manifest.web_accessible_resources;
 
   return JSON.stringify(manifest, null, 2);
 }
@@ -67,17 +137,31 @@ function buildManifest(source, isProduction) {
 module.exports = (_env, argv) => {
   const isProduction = argv.mode === "production";
   if (isProduction) assertProductionEnv(process.env);
+  const outputPath = process.env.EXTENSION_OUTPUT_DIR
+    ? path.resolve(process.env.EXTENSION_OUTPUT_DIR)
+    : path.resolve(__dirname, "dist");
 
-  return {
-  entry: {
+  const entry = {
     content: "./src/content/index.tsx",
     background: "./src/background/index.ts",
     popup: "./src/popup/index.tsx",
-    "wallet-lab": "./src/wallet-lab/index.tsx",
-    "wallet-lab-sign": "./src/wallet-lab/signIndex.tsx",
-  },
+    ...(!isProduction
+      ? {
+          "wallet-lab": "./src/wallet-lab/index.tsx",
+          "wallet-lab-sign": "./src/wallet-lab/signIndex.tsx",
+        }
+      : {}),
+  };
+
+  const publicCopyIgnore = [
+    "**/manifest.json",
+    ...(isProduction ? ["**/wallet-lab.html", "**/wallet-lab-sign.html"] : []),
+  ];
+
+  return {
+  entry,
   output: {
-    path: path.resolve(__dirname, "dist"),
+    path: outputPath,
     filename: "[name].js",
     clean: true,
   },
@@ -94,7 +178,12 @@ module.exports = (_env, argv) => {
     rules: [
       {
         test: /\.tsx?$/,
-        use: "ts-loader",
+        use: {
+          loader: "ts-loader",
+          options: {
+            transpileOnly: true,
+          },
+        },
         include: [
           path.resolve(__dirname, "src"),
           path.resolve(__dirname, "node_modules/@teep/shared"),
@@ -111,11 +200,11 @@ module.exports = (_env, argv) => {
     new CopyPlugin({
       patterns: [
         {
-          from: "public",
-          to: ".",
-          globOptions: {
-            ignore: ["**/manifest.json"],
-          },
+           from: "public",
+           to: ".",
+           globOptions: {
+             ignore: publicCopyIgnore,
+           },
         },
         {
           from: "public/manifest.json",
@@ -130,8 +219,9 @@ module.exports = (_env, argv) => {
     }),
     // Inject env variables at build time (DEBUG_TEEP=true enables full debug mode)
     // For local dev: WEB_APP_URL=http://localhost:5174 npm run build
-    new webpack.DefinePlugin({
-      "process.env.NODE_ENV": JSON.stringify(isProduction ? "production" : "development"),
+     new webpack.DefinePlugin({
+       "process.env.NODE_ENV": JSON.stringify(isProduction ? "production" : "development"),
+       "process.env.ENABLE_WALLET_LAB": JSON.stringify(isProduction ? "false" : "true"),
       "process.env.BLUR_EMAIL": JSON.stringify(process.env.BLUR_EMAIL || "false"),
       "process.env.DEBUG_TEEP": JSON.stringify(process.env.DEBUG_TEEP === "true" ? "true" : "false"),
       "process.env.DEBUG_TIPCOIN": JSON.stringify(process.env.DEBUG_TIPCOIN === "true" ? "true" : "false"),
@@ -151,9 +241,10 @@ module.exports = (_env, argv) => {
       "process.env.ENABLE_FIAT_OFFRAMP": JSON.stringify(process.env.ENABLE_FIAT_OFFRAMP === "true" ? "true" : "false"),
       "process.env.ONRAMP_URL": JSON.stringify(process.env.ONRAMP_URL || ""),
       "process.env.OFFRAMP_URL": JSON.stringify(process.env.OFFRAMP_URL || ""),
-      "process.env.RECEIPT_BASE_URL": JSON.stringify(process.env.RECEIPT_BASE_URL || ""),
-    }),
-  ],
+       "process.env.RECEIPT_BASE_URL": JSON.stringify(process.env.RECEIPT_BASE_URL || ""),
+     }),
+     walletLabReleaseGuard(isProduction),
+   ],
   devtool: isProduction ? false : "cheap-module-source-map",
   };
 };

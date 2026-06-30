@@ -3,6 +3,8 @@ type IconName =
   | "bolt"
   | "checkCircle"
   | "clock"
+  | "externalLink"
+  | "heart"
   | "link"
   | "puzzle"
   | "send"
@@ -30,6 +32,14 @@ const paths: Record<IconName, JSX.Element> = {
       <path d="M12 7v5l3 2" />
     </>
   ),
+  externalLink: (
+    <>
+      <path d="M15 3h6v6" />
+      <path d="m10 14 11-11" />
+      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+    </>
+  ),
+  heart: <path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.6l-1-1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 0 0 0-7.8Z" />,
   link: (
     <>
       <path d="M10 13a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1" />

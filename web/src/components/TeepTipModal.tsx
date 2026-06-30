@@ -1,3 +1,5 @@
+import { useDialogFocus } from "../hooks/useDialogFocus";
+
 type TeepTipModalProps = {
   open: boolean;
   title: string;
@@ -29,11 +31,19 @@ export default function TeepTipModal({
   onConfirm,
   onClose,
 }: TeepTipModalProps) {
+  const dialogRef = useDialogFocus<HTMLDivElement>(open, onClose, !sending);
+
   if (!open) return null;
 
   return (
-    <div className="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="teep-tip-modal-title">
-      <div className="modal-panel dashboard-direct-tip-modal dashboard-post-tip-modal">
+    <div
+      className="modal-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="teep-tip-modal-title"
+      onClick={(event) => event.target === event.currentTarget && !sending && onClose()}
+    >
+      <div ref={dialogRef} className="modal-panel dashboard-direct-tip-modal dashboard-post-tip-modal" tabIndex={-1}>
         <button type="button" className="dashboard-modal-close" onClick={onClose} aria-label="Close tip modal" disabled={sending}>
           <span className="material-symbols-outlined" aria-hidden>close</span>
         </button>
@@ -57,7 +67,7 @@ export default function TeepTipModal({
               value={amount}
               onChange={(event) => onAmountChange(event.target.value)}
               readOnly={readOnlyAmount}
-              autoFocus
+              data-autofocus
             />
           </div>
         </label>

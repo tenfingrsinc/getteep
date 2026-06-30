@@ -1,6 +1,19 @@
 import { Link } from "react-router-dom";
 
-const lastUpdated = "2026-05-13";
+const lastUpdated = "2026-06-14";
+
+const sectionStyle = {
+  color: "var(--text-secondary)",
+  lineHeight: "var(--line-relaxed)",
+  marginBottom: "var(--space-4)",
+};
+
+const headingStyle = {
+  fontSize: "var(--text-heading)",
+  fontWeight: 600,
+  marginTop: "var(--space-6)",
+  marginBottom: "var(--space-2)",
+};
 
 export default function Privacy() {
   return (
@@ -10,71 +23,81 @@ export default function Privacy() {
         Last updated: {lastUpdated}
       </p>
 
-      <p style={{ color: "var(--text-primary)", lineHeight: "var(--line-relaxed)", marginBottom: "var(--space-4)" }}>
-        Teep (“we”, “our”) respects your privacy. This policy describes what we collect, how we use it, and your rights. We do not sell your personal data.
+      <p style={{ ...sectionStyle, color: "var(--text-primary)" }}>
+        Teep respects your privacy. This policy covers the Teep website, dashboards, and browser extension.
+        We do not sell personal data or use it for advertising.
       </p>
 
-      <h2 style={{ fontSize: "var(--text-heading)", fontWeight: 600, marginTop: "var(--space-6)", marginBottom: "var(--space-2)" }}>
-        What we collect
-      </h2>
-      <ul style={{ color: "var(--text-secondary)", lineHeight: "var(--line-relaxed)", paddingLeft: "var(--space-5)", marginBottom: "var(--space-4)" }}>
-        <li><strong style={{ color: "var(--text-primary)" }}>Account and identity:</strong> Email address (e.g. when you sign in), wallet addresses you connect, and X (Twitter) account linkage — such as your X handle and verification state — when you connect or claim as a creator.</li>
-        <li><strong style={{ color: "var(--text-primary)" }}>Usage and transactions:</strong> Tips you send or receive, withdrawal and referral activity, and other actions needed to run the service. Transaction data is also recorded on a public blockchain.</li>
-        <li><strong style={{ color: "var(--text-primary)" }}>Technical:</strong> Logs (e.g. IP, device/browser type) for security, fraud prevention, and fixing issues.</li>
+      <h2 style={headingStyle}>What the extension accesses</h2>
+      <p style={sectionStyle}>
+        On supported X and Twitter pages, the extension reads the current post URL, post identifier, creator
+        handle, and visible post context needed to display Teep controls and prepare a tip. It does not collect
+        your general browsing history or read pages outside the sites listed in the extension permissions.
+      </p>
+
+      <h2 style={headingStyle}>Information we collect</h2>
+      <ul style={{ ...sectionStyle, paddingLeft: "var(--space-5)" }}>
+        <li><strong style={{ color: "var(--text-primary)" }}>Account and identity:</strong> email address, connected wallet addresses, X handle, X verification state, and creator profile information.</li>
+        <li><strong style={{ color: "var(--text-primary)" }}>Tips and account activity:</strong> tip intents, transaction hashes, balances, withdrawals, referrals, receipts, and related creator or post identifiers.</li>
+        <li><strong style={{ color: "var(--text-primary)" }}>Extension preferences:</strong> display settings, receipt preferences, acknowledged notices, and temporary transaction state used to prevent duplicate submissions.</li>
+        <li><strong style={{ color: "var(--text-primary)" }}>Technical and security data:</strong> IP address, browser or device information, request logs, errors, and abuse-prevention signals.</li>
+        <li><strong style={{ color: "var(--text-primary)" }}>Public blockchain data:</strong> wallet addresses and transactions are public and may remain permanently available on the blockchain.</li>
       </ul>
 
-      <h2 style={{ fontSize: "var(--text-heading)", fontWeight: 600, marginTop: "var(--space-6)", marginBottom: "var(--space-2)" }}>
-        How we use it
-      </h2>
-      <p style={{ color: "var(--text-secondary)", lineHeight: "var(--line-relaxed)", marginBottom: "var(--space-4)" }}>
-        We use this information to operate Teep: process tips and withdrawals, run referral programs, prevent abuse, provide support, comply with law, and improve the product. We do not sell your data to third parties for marketing or advertising.
+      <h2 style={headingStyle}>How we use information</h2>
+      <p style={sectionStyle}>
+        We use this information only to provide Teep features, authenticate users, create and secure wallets,
+        prepare and record transactions, prevent duplicate or fraudulent activity, show receipts and history,
+        provide support, maintain the beta, and comply with applicable law. We do not use extension data for
+        credit decisions, advertising, or sale to data brokers.
       </p>
 
-      <h2 style={{ fontSize: "var(--text-heading)", fontWeight: 600, marginTop: "var(--space-6)", marginBottom: "var(--space-2)" }}>
-        Retention
-      </h2>
-      <p style={{ color: "var(--text-secondary)", lineHeight: "var(--line-relaxed)", marginBottom: "var(--space-4)" }}>
-        We keep account, claim, support, withdrawal, abuse-prevention, and provider-session records only as long as needed to operate the beta, support users, prevent fraud, and meet legal obligations. On-chain data is permanent and public. You can ask us to delete or correct personal data we hold; see “Your rights” below.
-      </p>
-      <p style={{ color: "var(--text-secondary)", lineHeight: "var(--line-relaxed)", marginBottom: "var(--space-4)" }}>
-        Our current beta retention target is up to 24 months for account, support, withdrawal, provider, and security records unless a longer period is required for an active investigation, legal need, or financial auditability. Operational logs are generally kept for 30 to 90 days.
-      </p>
-
-      <h2 style={{ fontSize: "var(--text-heading)", fontWeight: 600, marginTop: "var(--space-6)", marginBottom: "var(--space-2)" }}>
-        Your rights
-      </h2>
-      <p style={{ color: "var(--text-secondary)", lineHeight: "var(--line-relaxed)", marginBottom: "var(--space-2)" }}>
-        Depending on where you live, you may have the right to:
-      </p>
-      <ul style={{ color: "var(--text-secondary)", lineHeight: "var(--line-relaxed)", paddingLeft: "var(--space-5)", marginBottom: "var(--space-4)" }}>
-        <li>Access the personal data we hold about you</li>
-        <li>Correct inaccurate data</li>
-        <li>Request deletion of your data (subject to legal and operational needs)</li>
-        <li>Data portability (e.g. a copy of your data in a usable format)</li>
-        <li>Object to or restrict certain processing</li>
-        <li>If you are in the EU/EEA/UK: lodge a complaint with your local data protection authority</li>
-      </ul>
-      <p style={{ color: "var(--text-secondary)", lineHeight: "var(--line-relaxed)", marginBottom: "var(--space-4)" }}>
-        To exercise these rights, contact us at{" "}
-        <a href="mailto:support@teep.xyz" style={{ color: "var(--link)" }}>support@teep.xyz</a> or use the subject “Privacy request”. We will respond within a reasonable time.
+      <h2 style={headingStyle}>Service providers</h2>
+      <p style={sectionStyle}>
+        Teep uses service providers to operate the product. These currently include Privy for authentication
+        and embedded-wallet services; smart-wallet, bundler, and paymaster infrastructure configured for Arc;
+        Arc network RPC and blockchain-indexing services; X for creator verification and supported-page context;
+        and Circle's testnet faucet when a user chooses to request test funds. Providers process only the data
+        needed for their service and are governed by their own privacy terms.
       </p>
 
-      <h2 style={{ fontSize: "var(--text-heading)", fontWeight: 600, marginTop: "var(--space-6)", marginBottom: "var(--space-2)" }}>
-        Cookies and similar tech
-      </h2>
-      <p style={{ color: "var(--text-secondary)", lineHeight: "var(--line-relaxed)", marginBottom: "var(--space-4)" }}>
-        We use only what’s needed to run the service: for example, session and security. We don’t use third-party advertising cookies. You can control cookies in your browser settings.
+      <h2 style={headingStyle}>Browser storage</h2>
+      <p style={sectionStyle}>
+        The extension stores account state, preferences, pending transaction records, and recent activity in
+        Chrome extension storage. Sensitive transaction state is restricted to trusted extension pages. You can
+        clear local extension data by removing the extension, although this does not delete Teep account records
+        or public blockchain transactions.
       </p>
 
-      <h2 style={{ fontSize: "var(--text-heading)", fontWeight: 600, marginTop: "var(--space-6)", marginBottom: "var(--space-2)" }}>
-        Changes
-      </h2>
-      <p style={{ color: "var(--text-secondary)", lineHeight: "var(--line-relaxed)", marginBottom: "var(--space-4)" }}>
-        We may update this policy from time to time. We’ll post the new version here and update the “Last updated” date. Continued use of Teep after changes means you accept the updated policy.
+      <h2 style={headingStyle}>Retention</h2>
+      <p style={sectionStyle}>
+        We retain account, support, withdrawal, provider, and security records only as long as needed to operate
+        the beta, prevent abuse, resolve disputes, and meet legal obligations. Our current target is up to 24
+        months for these operational records and generally 30 to 90 days for routine logs. Public blockchain
+        records cannot be edited or deleted by Teep.
+      </p>
+
+      <h2 style={headingStyle}>Your choices and deletion</h2>
+      <p style={sectionStyle}>
+        Depending on where you live, you may request access, correction, deletion, portability, restriction, or
+        objection regarding personal data we control. To request account or data deletion, email{" "}
+        <a href="mailto:support@getteep.xyz?subject=Account%20deletion%20request" style={{ color: "var(--link)" }}>
+          support@getteep.xyz
+        </a>{" "}
+        from your account email with the subject "Account deletion request" and include your Teep wallet address
+        or X handle. We may ask you to verify account ownership. We cannot delete public blockchain records or
+        records we must retain for security or legal reasons.
+      </p>
+
+      <h2 style={headingStyle}>Changes and contact</h2>
+      <p style={sectionStyle}>
+        We may update this policy as Teep changes. We will post the revised version here and update the date
+        above. Questions and privacy requests can be sent to{" "}
+        <a href="mailto:support@getteep.xyz" style={{ color: "var(--link)" }}>support@getteep.xyz</a>.
       </p>
 
       <p style={{ color: "var(--text-muted)", fontSize: "var(--text-small)", marginTop: "var(--space-6)" }}>
-        For support, see <Link to="/support">Support</Link>. For legal terms, see <Link to="/terms">Terms</Link>.
+        See <Link to="/support#account-deletion">Support and deletion instructions</Link> or read the <Link to="/terms">Terms</Link>.
       </p>
     </div>
   );

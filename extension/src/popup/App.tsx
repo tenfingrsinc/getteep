@@ -9,9 +9,11 @@ import {
   getTeepActivityTypeLabel,
   isTeepActivityPositive,
 } from "@teep/shared";
+import * as QRCode from "qrcode";
 import { formatUSDC } from "../utils/api";
 import { handleToAuthorId, parsePostUrl, computeContentId } from "../utils/contentId";
 import { CONFIG, TIP_PRESETS, FACTORY_ABI, CLAIM_WALLET_ABI, REFERRAL_REGISTRY_ABI, USDC_ABI } from "../utils/config";
+import { parseTipAmount } from "../utils/tipAmount";
 import { isDebug, debugLog, getDebugEntries, clearDebugEntries, addDebugListener, type DebugEntry } from "../utils/debug";
 import {
   getLocalTipAggregate,
@@ -28,7 +30,7 @@ function buildReceiptTweetText(params: { amount: string; authorHandle: string; t
   const line1 = postUrl
     ? `Hey @${handle}, just tipped you${amountPart} via Teep for this wonderful piece: ${postUrl}`
     : `Hey @${handle}, just tipped you${amountPart} via Teep`;
-  return `${line1}${receiptPart}\nSupport creators directly.`;
+  return `${line1}${receiptPart}\nSupport creators directly via @teepxyz.`;
 }
 /** Map contract/viem revert errors to user-friendly tip failure message (e.g. insufficient funds). */
 function getTipErrorMessage(err: unknown): string {
@@ -87,7 +89,171 @@ function safeAddress(address?: string): string | null {
   if (!address) return null;
   return `${address.slice(0, 6)}...${address.slice(-4)}`;
 }
-function generateReceiptImage(params: {
+async function drawReceiptQr(ctx: CanvasRenderingContext2D, receiptUrl: string, x: number, y: number, size: number) {
+  if (!receiptUrl) return;
+  const qrCanvas = document.createElement("canvas");
+  qrCanvas.width = size;
+  qrCanvas.height = size;
+  try {
+    await QRCode.toCanvas(qrCanvas, receiptUrl, {
+      errorCorrectionLevel: "M",
+      margin: 1,
+      width: size,
+      color: {
+        dark: "#111111",
+        light: "#ffffff",
+      },
+    });
+    ctx.drawImage(qrCanvas, x, y, size, size);
+  } catch {
+    ctx.fillStyle = "rgba(205,189,255,0.16)";
+    roundRect(ctx, x, y, size, size, 18);
+    ctx.fill();
+  }
+}
+
+function receiptInitial(value?: string) {
+  const clean = (value || "T").replace(/^@/, "").trim();
+  return clean.slice(0, 2).toUpperCase() || "T";
+}
+
+async function renderMinimalReceiptImage(
+  ctx: CanvasRenderingContext2D,
+  receiptUrl: string,
+  params: { amount: string; title: string; subtitle: string; from?: string; to?: string; date: string },
+): Promise<string> {
+  const canvas = ctx.canvas;
+  const from = params.from || "You";
+  const to = params.to || "Creator";
+
+  ctx.fillStyle = "#050505";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.fillStyle = "#ffffff";
+  roundRect(ctx, 150, 150, 780, 780, 30);
+  ctx.fill();
+  ctx.strokeStyle = "#7c3aed";
+  ctx.lineWidth = 3;
+  roundRect(ctx, 150, 150, 780, 780, 30);
+  ctx.stroke();
+
+  ctx.fillStyle = "#111111";
+  ctx.font = "900 36px Inter, system-ui, sans-serif";
+  ctx.fillText("Teep", 205, 238);
+  ctx.fillStyle = "#7c3aed";
+  ctx.font = "800 18px Inter, system-ui, sans-serif";
+  ctx.fillText("RECEIPT", 205, 274);
+
+  ctx.fillStyle = "#111111";
+  ctx.font = "900 82px Inter, system-ui, sans-serif";
+  ctx.textAlign = "right";
+  ctx.fillText(`$${params.amount}`, 875, 265);
+  ctx.textAlign = "left";
+
+  ctx.strokeStyle = "#eee9f8";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(205, 325);
+  ctx.lineTo(875, 325);
+  ctx.stroke();
+
+  ctx.fillStyle = "#111111";
+  ctx.font = "900 34px Inter, system-ui, sans-serif";
+  ctx.fillText(`${params.title} sent`, 205, 385);
+  ctx.fillStyle = "#55505f";
+  ctx.font = "500 22px Inter, system-ui, sans-serif";
+  wrapCanvasText(ctx, params.subtitle || "You supported a creator and helped fuel the social internet.", 205, 425, 620, 31);
+
+  const avatarY = 580;
+  ctx.fillStyle = "#f4f0ff";
+  ctx.beginPath();
+  ctx.arc(300, avatarY, 50, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#7c3aed";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = "#7c3aed";
+  ctx.beginPath();
+  ctx.arc(300, avatarY, 34, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "900 23px Inter, system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText(receiptInitial(from), 300, avatarY + 8);
+
+  ctx.strokeStyle = "#7c3aed";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(390, avatarY);
+  ctx.lineTo(690, avatarY);
+  ctx.stroke();
+  ctx.fillStyle = "#ffffff";
+  ctx.beginPath();
+  ctx.arc(540, avatarY, 28, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#7c3aed";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = "#7c3aed";
+  ctx.font = "800 29px Inter, system-ui, sans-serif";
+  ctx.fillText(">", 540, avatarY + 10);
+
+  ctx.fillStyle = "#f4f0ff";
+  ctx.beginPath();
+  ctx.arc(780, avatarY, 50, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#7c3aed";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = "#111111";
+  ctx.beginPath();
+  ctx.arc(780, avatarY, 34, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "900 23px Inter, system-ui, sans-serif";
+  ctx.fillText(receiptInitial(to), 780, avatarY + 8);
+
+  ctx.fillStyle = "#111111";
+  ctx.font = "700 22px Inter, system-ui, sans-serif";
+  ctx.fillText(from, 300, 665);
+  ctx.fillText(to, 780, 665);
+  ctx.textAlign = "left";
+
+  ctx.strokeStyle = "#eee9f8";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(205, 710);
+  ctx.lineTo(875, 710);
+  ctx.stroke();
+
+  ctx.fillStyle = "#6b6478";
+  ctx.font = "500 21px Inter, system-ui, sans-serif";
+  ctx.fillText("Date", 205, 770);
+  ctx.fillStyle = "#111111";
+  ctx.font = "650 21px Inter, system-ui, sans-serif";
+  ctx.fillText(params.date, 205, 807);
+
+  ctx.fillStyle = "#f8f7fb";
+  roundRect(ctx, 718, 730, 132, 132, 18);
+  ctx.fill();
+  await drawReceiptQr(ctx, receiptUrl, 728, 740, 112);
+  ctx.fillStyle = "#7c3aed";
+  ctx.font = "750 20px Inter, system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText("Scan to view", 784, 894);
+  ctx.textAlign = "left";
+
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "800 24px Inter, system-ui, sans-serif";
+  ctx.fillText("Support creators directly via @teepxyz", 150, 990);
+  ctx.fillStyle = "#a78bfa";
+  ctx.font = "700 21px Inter, system-ui, sans-serif";
+  ctx.fillText("https://getteep.xyz", 150, 1028);
+
+  return canvas.toDataURL("image/png");
+}
+
+async function generateReceiptImage(params: {
   amount: string;
   title: string;
   subtitle: string;
@@ -97,80 +263,156 @@ function generateReceiptImage(params: {
   txUrl?: string;
   date: string;
   kind: string;
-}): string {
+}): Promise<string> {
   const canvas = document.createElement("canvas");
   canvas.width = 1080;
-  canvas.height = 1350;
+  canvas.height = 1080;
   const ctx = canvas.getContext("2d")!;
+  const receiptUrl = params.txUrl || "https://getteep.xyz";
+  return renderMinimalReceiptImage(ctx, receiptUrl, params);
   const gradient = ctx.createLinearGradient(0, 0, 1080, 1350);
-  gradient.addColorStop(0, "#161121");
-  gradient.addColorStop(0.55, "#26134b");
-  gradient.addColorStop(1, "#0c1020");
+  gradient.addColorStop(0, "#08070d");
+  gradient.addColorStop(0.58, "#160d26");
+  gradient.addColorStop(1, "#050506");
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, 1080, 1350);
 
-  ctx.fillStyle = "rgba(255,255,255,0.08)";
+  ctx.fillStyle = "rgba(127, 74, 255, 0.16)";
   ctx.beginPath();
-  ctx.arc(930, 170, 260, 0, Math.PI * 2);
+  ctx.arc(940, 135, 240, 0, Math.PI * 2);
   ctx.fill();
-  ctx.fillStyle = "rgba(34,197,94,0.12)";
+  ctx.fillStyle = "rgba(0, 214, 143, 0.10)";
   ctx.beginPath();
-  ctx.arc(80, 1180, 320, 0, Math.PI * 2);
+  ctx.arc(65, 970, 270, 0, Math.PI * 2);
   ctx.fill();
 
-  ctx.fillStyle = "rgba(255,255,255,0.92)";
-  ctx.font = "800 58px Inter, system-ui, sans-serif";
-  ctx.fillText("Teep", 80, 110);
-  ctx.fillStyle = "rgba(226,232,240,0.78)";
-  ctx.font = "700 28px Inter, system-ui, sans-serif";
-  ctx.fillText(params.kind.toUpperCase(), 80, 155);
-
-  ctx.fillStyle = "rgba(255,255,255,0.10)";
-  roundRect(ctx, 80, 250, 920, 690, 42);
+  ctx.fillStyle = "rgba(20,18,28,0.94)";
+  roundRect(ctx, 140, 185, 800, 710, 34);
   ctx.fill();
-  ctx.strokeStyle = "rgba(255,255,255,0.16)";
+  ctx.strokeStyle = "rgba(205,189,255,0.14)";
   ctx.lineWidth = 2;
-  roundRect(ctx, 80, 250, 920, 690, 42);
+  roundRect(ctx, 140, 185, 800, 710, 34);
+  ctx.stroke();
+
+  const cardGlow = ctx.createLinearGradient(140, 185, 940, 185);
+  cardGlow.addColorStop(0, "rgba(255,255,255,0.02)");
+  cardGlow.addColorStop(1, "rgba(99,36,235,0.14)");
+  ctx.fillStyle = cardGlow;
+  roundRect(ctx, 140, 185, 800, 710, 34);
+  ctx.fill();
+
+  ctx.fillStyle = "rgba(255,255,255,0.07)";
+  ctx.fillRect(140, 350, 800, 1);
+  ctx.fillRect(140, 672, 800, 1);
+
+  ctx.fillStyle = "rgba(16,185,129,0.14)";
+  ctx.beginPath();
+  ctx.arc(242, 270, 36, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#10b981";
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.arc(242, 270, 13, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(235, 271);
+  ctx.lineTo(240, 276);
+  ctx.lineTo(251, 263);
   ctx.stroke();
 
   ctx.fillStyle = "#ffffff";
-  ctx.font = "900 104px Inter, system-ui, sans-serif";
-  ctx.fillText(`$${params.amount}`, 130, 420);
-  ctx.fillStyle = "#c4b5fd";
-  ctx.font = "800 42px Inter, system-ui, sans-serif";
-  ctx.fillText(params.title, 130, 500);
-  ctx.fillStyle = "rgba(226,232,240,0.78)";
-  ctx.font = "500 30px Inter, system-ui, sans-serif";
-  wrapCanvasText(ctx, params.subtitle, 130, 560, 820, 42);
+  ctx.font = "900 34px Inter, system-ui, sans-serif";
+  ctx.fillText(`${params.title} sent!`, 310, 253);
+  ctx.fillStyle = "rgba(230,224,239,0.86)";
+  ctx.font = "500 22px Inter, system-ui, sans-serif";
+  wrapCanvasText(ctx, params.subtitle || "You supported a creator and helped fuel the social internet.", 310, 292, 380, 31);
 
-  const rows = [
-    ["From", params.from || "Teep user"],
-    ["To", params.to || "Creator"],
-    ["Date", params.date],
-    ["Tx", params.txHash ? `${params.txHash.slice(0, 12)}...${params.txHash.slice(-8)}` : "Pending index"],
-  ];
-  let y = 720;
-  for (const [label, value] of rows) {
-    ctx.fillStyle = "rgba(226,232,240,0.62)";
-    ctx.font = "700 26px Inter, system-ui, sans-serif";
-    ctx.fillText(label, 130, y);
-    ctx.fillStyle = "#ffffff";
-    ctx.font = "800 30px Inter, system-ui, sans-serif";
-    ctx.fillText(value, 330, y);
-    y += 58;
-  }
+  ctx.fillStyle = "#cdbdff";
+  ctx.font = "900 52px Inter, system-ui, sans-serif";
+  ctx.textAlign = "right";
+  ctx.fillText(`$${params.amount}`, 880, 285);
+  ctx.textAlign = "left";
 
-  if (params.txUrl) {
-    ctx.fillStyle = "rgba(226,232,240,0.66)";
-    ctx.font = "500 24px Inter, system-ui, sans-serif";
-    ctx.fillText(params.txUrl.slice(0, 58), 130, 1040);
-  }
+  const from = params.from || "You";
+  const to = params.to || "Creator";
+  const avatarY = 470;
+  ctx.fillStyle = "#15111d";
+  ctx.beginPath();
+  ctx.arc(285, avatarY, 54, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,0.09)";
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.fillStyle = "#7c3aed";
+  ctx.beginPath();
+  ctx.arc(285, avatarY, 38, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "900 23px Inter, system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText(receiptInitial(from), 285, avatarY + 8);
+
+  ctx.strokeStyle = "rgba(169,137,255,0.62)";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(395, avatarY);
+  ctx.lineTo(685, avatarY);
+  ctx.stroke();
+  ctx.fillStyle = "#211e29";
+  ctx.beginPath();
+  ctx.arc(540, avatarY, 28, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "rgba(205,189,255,0.32)";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = "#cdbdff";
+  ctx.font = "800 29px Inter, system-ui, sans-serif";
+  ctx.fillText("→", 540, avatarY + 10);
+
+  ctx.fillStyle = "#15111d";
+  ctx.beginPath();
+  ctx.arc(795, avatarY, 54, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#cdbdff";
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.fillStyle = "#0f766e";
+  ctx.beginPath();
+  ctx.arc(795, avatarY, 38, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "900 23px Inter, system-ui, sans-serif";
+  ctx.fillText(receiptInitial(to), 795, avatarY + 8);
+
+  ctx.font = "700 22px Inter, system-ui, sans-serif";
+  ctx.fillText(from, 285, 575);
+  ctx.fillText(to, 795, 575);
+  ctx.textAlign = "left";
+
+  ctx.fillStyle = "rgba(255,255,255,0.04)";
+  roundRect(ctx, 735, 716, 140, 140, 22);
+  ctx.fill();
+  await drawReceiptQr(ctx, receiptUrl, 746, 727, 118);
+
+  ctx.fillStyle = "rgba(230,224,239,0.70)";
+  ctx.font = "500 21px Inter, system-ui, sans-serif";
+  ctx.fillText("Date", 202, 760);
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "650 21px Inter, system-ui, sans-serif";
+  ctx.fillText(params.date, 202, 800);
+  ctx.fillStyle = "rgba(230,224,239,0.70)";
+  ctx.font = "500 21px Inter, system-ui, sans-serif";
+  ctx.fillText("Receipt", 202, 840);
+  ctx.fillStyle = "#cdbdff";
+  ctx.font = "750 20px Inter, system-ui, sans-serif";
+  ctx.fillText("Scan to view", 202, 880);
+
   ctx.fillStyle = "#22c55e";
-  ctx.font = "800 28px Inter, system-ui, sans-serif";
-  ctx.fillText("Support creators directly", 80, 1220);
-  ctx.fillStyle = "rgba(226,232,240,0.62)";
-  ctx.font = "700 24px Inter, system-ui, sans-serif";
-  ctx.fillText("Teep v0.1.0", 80, 1262);
+  ctx.font = "900 24px Inter, system-ui, sans-serif";
+  ctx.fillText("Support creators directly via @teepxyz", 140, 965);
+  ctx.fillStyle = "rgba(226,232,240,0.72)";
+  ctx.font = "700 21px Inter, system-ui, sans-serif";
+  ctx.fillText("https://getteep.xyz", 140, 1004);
   return canvas.toDataURL("image/png");
 }
 
@@ -199,8 +441,21 @@ function wrapCanvasText(ctx: CanvasRenderingContext2D, text: string, x: number, 
   }
   if (line) ctx.fillText(line, x, y);
 }
-type Screen = "loading" | "connect" | "dashboard" | "claim" | "withdraw" | "send" | "history" | "profile" | "grow";
+type Screen = "loading" | "connect" | "dashboard" | "claim" | "send" | "history" | "profile" | "grow";
 type Theme = "dark" | "light";
+type DefiMiniStrategy = {
+  id: string;
+  name: string;
+  provider: string;
+  status: "preview" | "pending_provider" | "ready" | "disabled";
+  sourceChainName: string;
+  destinationChainName?: string;
+  assetSymbol: string;
+  estimatedApy: number;
+  riskLevel: "low" | "medium" | "high";
+  transactionEnabled: boolean;
+  bridgeProvider?: string;
+};
 const LIGHT_THEME = {
   bg: "#f6f6f8",
   card: "#ffffff",
@@ -240,10 +495,6 @@ export const App: React.FC = () => {
     const [claimStatus, setClaimStatus] = useState<"idle" | "pending" | "success">("idle");
     const [profileRefreshStatus, setProfileRefreshStatus] = useState<"idle" | "pending">("idle");
     const [profileRefreshMsg, setProfileRefreshMsg] = useState("");
-    const [socialXHandle, setSocialXHandle] = useState("");
-    const [socialXHandleSaved, setSocialXHandleSaved] = useState("");
-    const [socialXHandleMsg, setSocialXHandleMsg] = useState("");
-    const [socialXHandleSaving, setSocialXHandleSaving] = useState(false);
     const [claimedUsername, setClaimedUsername] = useState<string>("");
     const [claimedAuthorId, setClaimedAuthorId] = useState<string>("");
     const [referralCode, setReferralCode] = useState("");
@@ -317,6 +568,9 @@ export const App: React.FC = () => {
     const [walletCopyFeedback, setWalletCopyFeedback] = useState(false);
     const [referralStats, setReferralStats] = useState<{ referredCount: number } | null>(null);
     const [referrerStatus, setReferrerStatus] = useState<{ hasReferrer: boolean; referralCode?: string; hasReferrerOnChain?: boolean } | null>(null);
+    const [defiStrategies, setDefiStrategies] = useState<DefiMiniStrategy[]>([]);
+    const [defiLoading, setDefiLoading] = useState(false);
+    const [defiNotice, setDefiNotice] = useState("");
     const embeddedWallet = wallets.find((w) => w.walletClientType === "privy");
     const fundingPolicy = buildFundingPolicy({
       environment: CONFIG.FUNDING_ENV,
@@ -397,9 +651,9 @@ export const App: React.FC = () => {
       } as any);
       return { message: challenge.message, signature };
     }, [walletAddress, effectiveSmartWalletClient]);
-  // NORMAL MODE â€” Regular popup dashboard
+  // NORMAL MODE - Regular popup dashboard
   // ============================================================
-  // React to Privy auth state â€” delay showing "connect" so returning users see loading then dashboard, not welcome flash
+  // Delay "connect" so returning users see loading then the dashboard, not a welcome flash.
   useEffect(() => {
     if (!ready) return;
     const smartAddress = effectiveSmartWalletClient?.account?.address;
@@ -422,6 +676,41 @@ export const App: React.FC = () => {
       setShowTestnetWarning(true);
     }
   }, [screen, testnetWarningSeen, authenticated]);
+  useEffect(() => {
+    if (screen !== "grow") return;
+    let cancelled = false;
+    setDefiLoading(true);
+    fetch(`${CONFIG.API_BASE_URL}/defi/strategies`)
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error("Could not load strategies"))))
+      .then((data) => {
+        if (!cancelled) setDefiStrategies(Array.isArray(data.strategies) ? data.strategies : []);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setDefiStrategies([
+            {
+              id: "morpho-usdc-cross-chain-preview",
+              name: "Morpho USDC Yield",
+              provider: "Morpho",
+              status: "pending_provider",
+              sourceChainName: "Arc Testnet",
+              destinationChainName: "Base Sepolia",
+              assetSymbol: "USDC",
+              estimatedApy: 4.8,
+              riskLevel: "low",
+              transactionEnabled: false,
+              bridgeProvider: "Circle CCTP / Arc App Kit",
+            },
+          ]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setDefiLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [screen]);
   // Fetch claim status from backend DB (source of truth)
   const checkClaimStatus = useCallback(async (address: string) => {
     try {
@@ -694,23 +983,6 @@ export const App: React.FC = () => {
               .catch(() => setReferrerStatus(null));
           }, [screen, walletAddress]);
 
-          useEffect(() => {
-            if (screen !== "profile" || !walletAddress) return;
-            let cancelled = false;
-            fetch(`${CONFIG.API_BASE_URL}/wallet/${walletAddress}/settings`)
-              .then((r) => r.json())
-              .then((data) => {
-                if (cancelled) return;
-                const handle = data?.socialXHandle || "";
-                setSocialXHandle(handle);
-                setSocialXHandleSaved(handle);
-                setSocialXHandleMsg("");
-              })
-              .catch(() => {
-                if (!cancelled) setSocialXHandleMsg("Could not load your social handle.");
-              });
-            return () => { cancelled = true; };
-          }, [screen, walletAddress]);
           // Load claim wallet info when entering withdraw screen (backend is source of truth for deployed + address)
           const loadClaimWalletInfo = useCallback(async () => {
             if (!claimedUsername || !walletAddress) {
@@ -718,7 +990,7 @@ export const App: React.FC = () => {
               return;
             }
             const authorIdHash = claimedAuthorId || "";
-            debugLog("ClaimWallet", "Requesting claim-wallet-status from backend", { walletAddress: walletAddress.slice(0, 10) + "â€¦" });
+            debugLog("ClaimWallet", "Requesting claim-wallet-status from backend", { walletAddress: walletAddress.slice(0, 10) + "..." });
             try {
               const statusRes = await fetch(`${CONFIG.API_BASE_URL}/auth/claim-wallet-status/${walletAddress}`);
               const status = await statusRes.json();
@@ -727,21 +999,14 @@ export const App: React.FC = () => {
               if (status.claimWalletAddress) {
                 setClaimWalletDeployed(!!status.deployed);
                 setClaimWalletAddress(status.claimWalletAddress);
-                // Sum USDC balance at current + any legacy addresses (e.g. old factory's claim wallet after redeploy)
-                const addressesToSum: string[] = [status.claimWalletAddress];
-                if (Array.isArray(status.legacyClaimWalletAddresses)) addressesToSum.push(...status.legacyClaimWalletAddresses);
-                const fetchOne = (addr: string): Promise<string> =>
-                  new Promise((resolve) => {
-                    chrome.runtime.sendMessage({ type: "GET_CLAIM_WALLET_BALANCE", payload: { address: addr } }, (r: any) => {
-                      resolve(r?.balance !== undefined ? String(r.balance) : "0");
-                    });
-                  });
-                Promise.all(addressesToSum.map(fetchOne))
-                  .then((balances) => {
-                    const total = balances.reduce((sum, b) => sum + BigInt(b), 0n);
-                    setClaimWalletBalance(total.toString());
-                  })
-                  .catch(() => {});
+                chrome.runtime.sendMessage(
+                  { type: "GET_CLAIM_WALLET_BALANCE", payload: { address: status.claimWalletAddress } },
+                  (balanceResponse: any) => {
+                    if (balanceResponse?.balance !== undefined) {
+                      setClaimWalletBalance(String(balanceResponse.balance));
+                    }
+                  }
+                );
                 return;
               }
             } catch (e) {
@@ -894,34 +1159,6 @@ export const App: React.FC = () => {
     }
   }, [walletAddress, claimedAuthorId]);
 
-  const handleSaveSocialXHandle = useCallback(async () => {
-    if (!walletAddress) return;
-    const normalized = socialXHandle.trim().replace(/^@/, "").toLowerCase();
-    if (normalized && !/^[a-z0-9_]{1,15}$/.test(normalized)) {
-      setSocialXHandleMsg("Use a valid X handle without spaces.");
-      return;
-    }
-    setSocialXHandleSaving(true);
-    setSocialXHandleMsg("");
-    try {
-      const walletProof = await createWalletProof("account-settings");
-      const res = await fetch(`${CONFIG.API_BASE_URL}/wallet/${walletAddress}/social-profile`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ socialXHandle: normalized, walletProof }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Could not save social handle");
-      const saved = data?.socialXHandle || "";
-      setSocialXHandle(saved);
-      setSocialXHandleSaved(saved);
-      setSocialXHandleMsg(saved ? "Social handle saved." : "Social handle removed.");
-    } catch (err: any) {
-      setSocialXHandleMsg(err?.message || "Could not save social handle.");
-    } finally {
-      setSocialXHandleSaving(false);
-    }
-  }, [walletAddress, socialXHandle, createWalletProof]);
   // Deploy claim wallet on-chain using the attestation from backend
   const handleDeployClaimWallet = useCallback(async () => {
     if (!walletAddress || !effectiveSmartWalletClient || !claimedUsername) return;
@@ -1140,6 +1377,7 @@ export const App: React.FC = () => {
             amount: rawAmount.toString(),
             txHash,
             detail: `Withdraw tips to ${withdrawTo.slice(0, 6)}...${withdrawTo.slice(-4)}`,
+            sourceMethod: "extension",
           }),
         });
         // Only record referral_fee_received when we used legacy multi-call path; with withdrawWithFee the contract decides on-chain and we don't know if referrer got it.
@@ -1154,6 +1392,7 @@ export const App: React.FC = () => {
               amount: breakdown.referrerAmount,
               txHash,
               detail: "Referral fee from withdrawal",
+              sourceMethod: "extension",
             }),
           });
         }
@@ -1181,9 +1420,11 @@ const handleSendTip = useCallback(async () => {
     return;
   }
   const { authorHandle, tweetId } = parsed;
-  const amount = tipPreset != null ? tipPreset : parseFloat(customTipAmount);
-  if (isNaN(amount) || amount <= 0) {
-    setSendMsg("Choose or enter a valid tip amount");
+  let amount: string;
+  try {
+    amount = parseTipAmount(tipPreset != null ? String(tipPreset) : customTipAmount).display;
+  } catch (err: any) {
+    setSendMsg(err?.message || "Choose or enter a valid tip amount");
     return;
   }
   const contentId = computeContentId(authorHandle, tweetId);
@@ -1205,7 +1446,7 @@ const handleSendTip = useCallback(async () => {
       return;
     }
     if (res?.pending) {
-      setSendMsg("Signing window opened â€” confirm there to send. After success you can share on X.");
+      setSendMsg("Signing window opened. Confirm there to send. After success you can share on X.");
       setPostUrl("");
       setCustomTipAmount("");
       setTipPreset(1);
@@ -1226,10 +1467,6 @@ const cardTheme = isLight ? { background: T.card, border: `1px solid ${T.borderC
 const inputTheme = isLight ? { background: "#fff", color: T.text, border: `1px solid ${T.border}` } : {};
 const totalEarnedDisplay = formatUSDC(totalEarnedRaw || claimWalletBalance || "0");
 const totalTippedDisplay = formatUSDC(totalTipped || "0");
-const openWithdrawFlow = useCallback(() => {
-  setScreen(claimedUsername ? "withdraw" : "claim");
-}, [claimedUsername]);
-
 const iconPath = {
   add: "M12 5v14M5 12h14",
   send: "M5 12h14M13 5l7 7-7 7",
@@ -1265,7 +1502,6 @@ const formatActivityTime = (timestamp: number) => {
   const millis = timestamp > 1_000_000_000_000 ? timestamp : timestamp * 1000;
   return new Date(millis).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 };
-const getActivityTxUrl = (item: HistoryItem) => item.tx_hash ? `${CONFIG.EXPLORER_TX_URL}/${item.tx_hash}` : undefined;
 const getActivityReceiptUrl = (item: HistoryItem) => item.tx_hash ? `${CONFIG.RECEIPT_BASE_URL}/tx/${item.tx_hash}` : CONFIG.WEB_APP_URL;
 const getActivityCounterparty = (item: HistoryItem) => {
   if (item.author_handle) return `@${item.author_handle.replace(/^@/, "")}`;
@@ -1285,24 +1521,24 @@ const buildActivityTweet = (item: HistoryItem) => {
     });
   }
   const verb = item.type === "withdraw" || item.type === "withdraw_balance" ? "withdrew" : item.type === "tip_received" ? "received" : "recorded";
-  return `I ${verb} ${formatUSDC(item.amount || "0")} on Teep.\n\nReceipt: ${getActivityReceiptUrl(item)}\nSupport creators directly.`;
+  return `I ${verb} ${formatUSDC(item.amount || "0")} on Teep.\n\nReceipt: ${getActivityReceiptUrl(item)}\nSupport creators directly via @teepxyz.`;
 };
 const shareActivityOnX = (item: HistoryItem) => {
   const url = `https://twitter.com/intent/tweet?text=${encodeURIComponent(buildActivityTweet(item))}`;
   chrome.tabs?.create ? chrome.tabs.create({ url }) : window.open(url, "_blank", "noopener,noreferrer");
 };
-const generateActivityReceipt = (item: HistoryItem) => {
+const generateActivityReceipt = async (item: HistoryItem) => {
   const amount = formatUSDC(item.amount || "0").replace(/^\$/, "");
   const counterparty = getActivityCounterparty(item);
   const title = getTeepActivityTypeLabel(item.type);
-  const imageUrl = generateReceiptImage({
+  const imageUrl = await generateReceiptImage({
     amount,
     title,
     subtitle: formatActivityTitle(item),
     from: safeAddress(item.from_addr || item.fromAddress) || (item.type === "tip_sent" ? "You" : "Teep user"),
     to: counterparty,
     txHash: item.tx_hash,
-    txUrl: getActivityTxUrl(item),
+    txUrl: getActivityReceiptUrl(item),
     date: formatActivityTime(item.timestamp),
     kind: item.type.replace(/_/g, " "),
   });
@@ -1383,13 +1619,31 @@ if (!ready) {
 
 if (!authenticated || screen === "connect") {
   return (
-    <div style={{ ...S.app, background: T.bg, color: T.text }}>
-      <main style={{ ...S.main, minHeight: "520px", display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <div style={{ ...S.card, ...cardTheme, textAlign: "center" as const }}>
-          <div style={{ fontSize: "36px", marginBottom: "8px" }}>$</div>
-          <div style={{ ...S.title, color: T.text }}>Teep</div>
-          <p style={{ ...S.subtitle, color: T.muted }}>Sign up with email. Tip creators without thinking about wallets.</p>
-          <button onClick={() => login()} style={S.primaryBtn}>Sign up / Log in</button>
+    <div style={{ ...S.app, background: "#000", color: T.text }}>
+      <main style={{ ...S.main, minHeight: "520px", display: "flex", alignItems: "center", justifyContent: "center", background: "#000" }}>
+        <div style={{ ...S.card, ...S.authCard, ...cardTheme, textAlign: "center" as const }}>
+          <img src="logo.svg" alt="" width={54} height={54} style={S.authLogo} />
+          <div style={{ ...S.title, ...S.authTitle, color: T.text }}>Welcome to Teep</div>
+          <p style={{ ...S.subtitle, ...S.authSubtitle, color: T.muted }}>Tip creators and manage your Teep beta balance from one place.</p>
+          <div style={{
+            margin: "12px 0",
+            padding: "10px 12px",
+            border: "1px solid rgba(159,122,234,0.35)",
+            borderRadius: "10px",
+            background: "rgba(109,40,217,0.10)",
+            color: T.muted,
+            fontSize: "11px",
+            lineHeight: 1.45,
+          }}>
+            Arc testnet beta. Teep currently uses test funds only. They have no real-world value.
+          </div>
+          <button onClick={() => login()} style={S.primaryBtn}>Continue to Teep</button>
+          <p style={{ color: T.muted, fontSize: "10px", lineHeight: 1.4, margin: "12px 0 0" }}>
+            By continuing, you agree to the{" "}
+            <a href={`${CONFIG.WEB_APP_URL}/terms`} target="_blank" rel="noopener noreferrer" style={{ color: T.primary }}>Terms</a>
+            {" "}and acknowledge the{" "}
+            <a href={`${CONFIG.WEB_APP_URL}/privacy`} target="_blank" rel="noopener noreferrer" style={{ color: T.primary }}>Privacy Policy</a>.
+          </p>
           {error && <p style={S.error}>{error}</p>}
         </div>
       </main>
@@ -1447,8 +1701,11 @@ return (
     <main style={{ ...S.main, background: T.bg }}>
       {showTestnetWarning && (
         <div style={{ ...S.card, ...cardTheme, borderColor: "rgba(246,166,35,0.35)", marginBottom: "12px" }}>
-          <p style={{ color: T.text, fontSize: "13px", marginBottom: "10px" }}>Teep is running on Arc testnet.</p>
-          <button onClick={() => { chrome.storage.local.set({ teepTestnetWarningSeen: true }); setTestnetWarningSeen(true); setShowTestnetWarning(false); }} style={S.smallBtn}>Got it</button>
+          <strong style={{ color: T.text, display: "block", fontSize: "13px", marginBottom: "5px" }}>Testnet beta</strong>
+          <p style={{ color: T.muted, fontSize: "12px", lineHeight: 1.45, margin: "0 0 10px" }}>
+            Teep currently uses test funds on Arc testnet. They have no real-world value and cannot be withdrawn to a bank.
+          </p>
+          <button onClick={() => { chrome.storage.local.set({ teepTestnetWarningSeen: true }); setTestnetWarningSeen(true); setShowTestnetWarning(false); }} style={S.smallBtn}>I understand</button>
         </div>
       )}
 
@@ -1569,57 +1826,6 @@ return (
         </SubPage>
       )}
 
-      {screen === "withdraw" && (
-        <SubPage title="Withdraw" onBack={() => setScreen("dashboard")} T={T} Icon={Icon}>
-          <div style={{ ...S.heroBalance, background: appTone.hero, borderColor: appTone.heroBorder, boxShadow: appTone.heroShadow }}><div style={{ ...S.balanceLabel, color: T.muted }}>Tips Received</div><div style={{ ...S.balanceHero, color: T.text }}>{formatUSDC(claimWalletBalance)}</div></div>
-          {!claimedUsername ? (
-            <div style={{ ...S.card, ...cardTheme, ...S.verifyNoticeCard }}>
-              <div>
-                <div style={{ ...S.cardLabel, color: T.muted, marginBottom: "6px" }}>Creator payouts</div>
-                <p style={{ color: T.text, fontSize: "13px", lineHeight: 1.45, margin: 0 }}>Verify X to unlock withdrawals for tips sent to your posts.</p>
-              </div>
-              <button onClick={() => setScreen("claim")} style={{ ...S.primaryBtn, marginTop: "14px" }}>Verify X</button>
-            </div>
-          ) : !claimWalletDeployed ? (
-            <div style={{ ...S.card, ...cardTheme, ...S.withdrawSetupCard }}>
-              <div style={S.withdrawSetupIconWrap}>
-                <Icon name="wallet" size={19} color={T.primary} />
-              </div>
-              <div style={S.withdrawSetupCopy}>
-                <div style={{ ...S.cardLabel, color: T.muted }}>Payout setup</div>
-                <h3 style={{ ...S.withdrawSetupTitle, color: T.text }}>Create your payout account</h3>
-                <p style={{ ...S.withdrawSetupText, color: T.muted }}>
-                  Set this up once to receive and withdraw tips sent to your verified creator posts.
-                </p>
-              </div>
-              <button
-                onClick={handleDeployClaimWallet}
-                disabled={deployLoading}
-                style={{ ...S.primaryBtn, ...S.withdrawSetupBtn, opacity: deployLoading ? 0.75 : 1 }}
-              >
-                {deployLoading ? "Setting up..." : "Set up payout account"}
-              </button>
-            </div>
-          ) : (
-            <div style={{ ...S.card, ...cardTheme, ...S.withdrawFormCard }}>
-              <div style={S.withdrawFormHeader}>
-                <div>
-                  <div style={{ ...S.cardLabel, color: T.muted }}>Cash out</div>
-                  <p style={{ ...S.withdrawSetupText, color: T.text, marginTop: "6px" }}>Withdraw your available creator tips.</p>
-                </div>
-                <button type="button" onClick={() => setWithdrawAmount(formatUSDC(claimWalletBalance).replace("$", ""))} style={{ ...S.smallBtn, ...S.withdrawMaxBtn }}>
-                  Max
-                </button>
-              </div>
-              <input value={withdrawTo} onChange={(e) => setWithdrawTo(e.target.value)} placeholder="Destination wallet" style={{ ...S.input, ...inputTheme, marginBottom: "10px" }} />
-              <input value={withdrawAmount} onChange={(e) => setWithdrawAmount(e.target.value)} placeholder="Amount" style={{ ...S.input, ...inputTheme, marginBottom: "14px" }} />
-              <button onClick={handleWithdraw} disabled={withdrawLoading} style={S.primaryBtn}>{withdrawLoading ? "Withdrawing..." : "Withdraw"}</button>
-            </div>
-          )}
-          {withdrawMsg && <p style={{ color: T.muted, fontSize: "12px" }}>{withdrawMsg}</p>}
-        </SubPage>
-      )}
-
       {screen === "send" && (
         <SubPage title="Send Tip" onBack={() => setScreen("dashboard")} T={T} Icon={Icon}>
           <div style={{ ...S.card, ...cardTheme }}>
@@ -1643,10 +1849,10 @@ return (
       {screen === "grow" && (
         <SubPage title="Grow Tips" onBack={() => setScreen("dashboard")} T={T} Icon={Icon}>
           <div style={{ ...S.card, ...cardTheme }}>
-            <div style={{ ...S.cardLabel, color: T.muted }}>Social DeFi</div>
-            <h3 style={{ color: T.text, fontSize: "18px", margin: "0 0 8px" }}>Put idle tips to work.</h3>
+            <div style={{ ...S.cardLabel, color: T.muted }}>Preview only</div>
+            <h3 style={{ color: T.text, fontSize: "18px", margin: "0 0 8px" }}>Grow idle tips.</h3>
             <p style={{ color: T.muted, fontSize: "13px", lineHeight: 1.5, margin: 0 }}>
-              Grow tips you are not using yet while keeping the tipping experience simple.
+              Strategy discovery is visible in beta. Deposit and withdrawal transactions stay locked until provider routes are verified.
             </p>
           </div>
           <div style={{ ...S.card, ...cardTheme }}>
@@ -1655,14 +1861,43 @@ return (
               <strong style={{ color: T.text }}>{formatUSDC(usdcBalance)}</strong>
             </div>
             <div style={{ ...S.growMetricRow }}>
-              <span style={{ color: T.muted }}>Estimated yield</span>
-              <strong style={{ color: T.success }}>Coming soon</strong>
+              <span style={{ color: T.muted }}>Strategies</span>
+              <strong style={{ color: T.text }}>{defiLoading ? "Loading..." : defiStrategies.length}</strong>
             </div>
             <div style={{ ...S.growMetricRow }}>
-              <span style={{ color: T.muted }}>Strategy</span>
-              <strong style={{ color: T.text }}>Arc testnet vault</strong>
+              <span style={{ color: T.muted }}>Transactions</span>
+              <strong style={{ color: "#f59e0b" }}>Disabled</strong>
             </div>
-            <button type="button" disabled style={{ ...S.primaryBtn, marginTop: "14px", opacity: 0.55, cursor: "not-allowed" }}>Grow Tips soon</button>
+            <button type="button" disabled style={{ ...S.primaryBtn, marginTop: "14px", opacity: 0.55, cursor: "not-allowed" }}>Preview only</button>
+          </div>
+          {(defiStrategies.length > 0 ? defiStrategies : []).slice(0, 2).map((strategy) => (
+            <div key={strategy.id} style={{ ...S.card, ...cardTheme }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "flex-start" }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ ...S.cardLabel, color: T.muted }}>{strategy.provider}</div>
+                  <h3 style={{ color: T.text, fontSize: "15px", margin: "0 0 6px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{strategy.name}</h3>
+                  <p style={{ color: T.muted, fontSize: "12px", lineHeight: 1.45, margin: 0 }}>
+                    {strategy.assetSymbol} on {strategy.sourceChainName}
+                    {strategy.destinationChainName ? ` -> ${strategy.destinationChainName}` : ""}
+                  </p>
+                </div>
+                <strong style={{ color: T.success, fontSize: "13px", flexShrink: 0 }}>{strategy.estimatedApy.toFixed(1)}%</strong>
+              </div>
+              <div style={{ ...S.growMetricRow }}>
+                <span style={{ color: T.muted }}>Status</span>
+                <strong style={{ color: strategy.status === "ready" ? T.success : "#f59e0b" }}>{strategy.status === "pending_provider" ? "Provider pending" : strategy.status}</strong>
+              </div>
+              <div style={{ ...S.growMetricRow, borderBottom: "none" }}>
+                <span style={{ color: T.muted }}>Risk</span>
+                <strong style={{ color: T.text }}>{strategy.riskLevel}</strong>
+              </div>
+            </div>
+          ))}
+          <div style={{ ...S.card, ...cardTheme }}>
+            <button type="button" onClick={() => window.open(`${CONFIG.WEB_APP_URL}/creator/grow/earn`, "_blank")} style={S.outlineBtn}>
+              Open full Grow Tips dashboard
+            </button>
+            {defiNotice && <p style={{ color: "#f59e0b", fontSize: "12px", margin: "8px 0 0" }}>{defiNotice}</p>}
           </div>
         </SubPage>
       )}
@@ -1695,30 +1930,6 @@ return (
               <button type="button" onClick={() => setScreen("claim")} style={{ ...S.primaryBtn, marginTop: "12px" }}>Verify X</button>
             )}
             {error && <p style={S.error}>{error}</p>}
-          </div>
-          <div style={{ ...S.card, ...cardTheme }}>
-            <div style={{ ...S.cardLabel, color: T.muted }}>Public social handle</div>
-            <p style={{ color: T.muted, fontSize: "12px", lineHeight: 1.45, margin: "0 0 10px" }}>
-              Used when creators thank you from their supporter list. Leave empty if you prefer wallet-only privacy.
-            </p>
-            <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-              <span style={{ color: T.muted, fontSize: "13px", fontWeight: 900 }}>@</span>
-              <input
-                value={socialXHandle}
-                onChange={(e) => setSocialXHandle(e.target.value)}
-                placeholder="x_handle"
-                style={{ ...S.input, ...inputTheme, marginBottom: 0 }}
-              />
-            </div>
-            <button
-              type="button"
-              onClick={handleSaveSocialXHandle}
-              disabled={socialXHandleSaving || socialXHandle.trim().replace(/^@/, "").toLowerCase() === socialXHandleSaved}
-              style={{ ...S.primaryBtn, marginTop: "10px", opacity: socialXHandleSaving ? 0.72 : 1 }}
-            >
-              {socialXHandleSaving ? "Saving..." : "Save social handle"}
-            </button>
-            {socialXHandleMsg && <p style={{ color: socialXHandleMsg.includes("Could not") || socialXHandleMsg.includes("valid") ? "#f4212e" : T.success, fontSize: "12px", margin: "8px 0 0" }}>{socialXHandleMsg}</p>}
           </div>
           <div style={{ ...S.card, ...cardTheme }}>
             <button type="button" onClick={() => setReferralExpanded((open) => !open)} style={{ ...S.submenuHeader, color: T.text }}>
@@ -1755,7 +1966,7 @@ return (
       <footer style={{ ...S.popupFooter, background: appTone.footer, borderTop: `1px solid ${appTone.border}` }}>
         <div style={S.footerGrid}>
           <FooterButton label="Dashboard" icon="grid" href={`${CONFIG.WEB_APP_URL}/dashboard`} T={T} Icon={Icon} dark={!isLight} />
-          <FooterButton label="Withdraw" icon="wallet" onClick={openWithdrawFlow} T={T} Icon={Icon} dark={!isLight} />
+          <FooterButton label="Withdraw" icon="wallet" href={`${CONFIG.WEB_APP_URL}/creator/withdraw`} T={T} Icon={Icon} dark={!isLight} />
           <FooterButton label="Grow Tips" icon="leaf" onClick={() => setScreen("grow")} T={T} Icon={Icon} accent dark={!isLight} />
           <FooterButton label="Support" icon="help" href={`${CONFIG.WEB_APP_URL}/support`} T={T} Icon={Icon} dark={!isLight} />
         </div>
@@ -1830,6 +2041,10 @@ const S: Record<string, React.CSSProperties> = {
   activityActionBtn: { border: "none", background: "transparent", padding: "0", display: "flex", alignItems: "center", gap: "2px", fontSize: "9px", fontWeight: 800, cursor: "pointer", fontFamily: font, opacity: 0.9, transition: "color 140ms ease, opacity 140ms ease" },
   historyList: { display: "flex", flexDirection: "column", gap: "8px" },
   card: { padding: "16px", background: "#111", borderRadius: "14px", border: "1px solid #1a1a2e", marginBottom: "0" },
+  authCard: { width: "100%", padding: "28px 16px 16px", boxSizing: "border-box" },
+  authLogo: { display: "block", margin: "0 auto 16px", objectFit: "contain" },
+  authTitle: { marginBottom: "8px" },
+  authSubtitle: { maxWidth: "270px", margin: "0 auto 20px" },
   withdrawSetupCard: { display: "flex", flexDirection: "column" as const, gap: "16px", padding: "18px 16px 16px" },
   withdrawSetupIconWrap: { width: "42px", height: "42px", borderRadius: "14px", display: "grid", placeItems: "center", background: "rgba(99,36,235,0.16)", border: "1px solid rgba(99,36,235,0.30)" },
   withdrawSetupCopy: { display: "flex", flexDirection: "column" as const, gap: "7px" },

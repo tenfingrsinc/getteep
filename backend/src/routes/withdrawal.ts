@@ -49,6 +49,13 @@ function hashCode(code: string): string {
   return crypto.createHash("sha256").update(code).digest("hex");
 }
 
+function verifyRecordToken(token: unknown, expectedHash: string | null | undefined): boolean {
+  if (typeof token !== "string" || !/^[a-f0-9]{64}$/.test(token) || !expectedHash) return false;
+  const actual = Buffer.from(hashCode(token), "hex");
+  const expected = Buffer.from(expectedHash, "hex");
+  return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+}
+
 function requestNonce(requestId: string): string {
   return keccak256(toUtf8Bytes(`teep-withdrawal:${requestId}`));
 }
@@ -115,16 +122,16 @@ function sumRows(rows: Array<{ amount_raw?: string; amount?: string }>): bigint 
   }, 0n);
 }
 
-function getDailyUsage(ownerAddress: string, db = getDb()) {
+async function getDailyUsage(ownerAddress: string, db = getDb()) {
   const dayStart = getUtcDayStartMs();
   const dayEnd = dayStart + 24 * 60 * 60 * 1000;
-  const recorded = db.prepare(
+  const recorded = await db.prepare(
     "SELECT amount_raw FROM withdrawal_records WHERE owner_address = ? AND created_at >= ? AND created_at < ?"
   ).all(ownerAddress, dayStart, dayEnd) as Array<{ amount_raw: string }>;
-  const legacy = db.prepare(
+  const legacy = await db.prepare(
     "SELECT amount FROM user_activity WHERE from_address = ? AND type IN ('withdraw', 'withdraw_balance') AND timestamp >= ? AND timestamp < ?"
   ).all(ownerAddress, Math.floor(dayStart / 1000), Math.floor(dayEnd / 1000)) as Array<{ amount: string }>;
-  const pending = db.prepare(
+  const pending = await db.prepare(
     "SELECT amount_raw FROM withdrawal_confirmations WHERE owner_address = ? AND status IN ('pending', 'confirmed') AND expires_at >= ? AND created_at >= ? AND created_at < ?"
   ).all(ownerAddress, Date.now(), dayStart, dayEnd) as Array<{ amount_raw: string }>;
   const used = sumRows(recorded) + sumRows(legacy) + sumRows(pending);
@@ -132,10 +139,10 @@ function getDailyUsage(ownerAddress: string, db = getDb()) {
   return { used, remaining, limit: DAILY_LIMIT_RAW, windowStart: dayStart, windowEnd: dayEnd };
 }
 
-function assertVerifiedCreator(ownerAddress: string, source: WithdrawalSource, res: Response): boolean {
+async function assertVerifiedCreator(ownerAddress: string, source: WithdrawalSource, res: Response): Promise<boolean> {
   if (source !== "tipsEarned") return true;
   const db = getDb();
-  const claim = db.prepare(
+  const claim = await db.prepare(
     "SELECT author_id FROM verified_claims WHERE owner_address = ? LIMIT 1"
   ).get(ownerAddress) as { author_id: string } | undefined;
   if (claim) return true;
@@ -143,8 +150,8 @@ function assertVerifiedCreator(ownerAddress: string, source: WithdrawalSource, r
   return false;
 }
 
-function validateDailyLimit(ownerAddress: string, amount: bigint, res: Response): boolean {
-  const usage = getDailyUsage(ownerAddress);
+async function validateDailyLimit(ownerAddress: string, amount: bigint, res: Response): Promise<boolean> {
+  const usage = await getDailyUsage(ownerAddress);
   if (amount <= usage.remaining) return true;
   res.status(429).json({
     error: "This withdrawal exceeds your daily limit.",
@@ -188,7 +195,7 @@ async function maybeSendConfirmationEmail(email: string, code: string): Promise<
  * the contract performs the split in one tx (withdrawWithFee). For any offchain withdrawal path (e.g. to bank),
  * deduction and distribution (treasury + referrer) must be done on-chain first (withdrawWithFee or legacy multi-withdraw), then proceed with offchain.
  */
-router.get("/breakdown", (req: Request, res: Response) => {
+router.get("/breakdown", async (req: Request, res: Response) => {
   const ownerAddress = (req.query.ownerAddress as string)?.toLowerCase();
   const amountRaw = req.query.amountRaw as string;
   const source = normalizeSource(req.query.source || "tipsEarned");
@@ -203,8 +210,8 @@ router.get("/breakdown", (req: Request, res: Response) => {
     res.status(400).json({ error: "amount must be positive" });
     return;
   }
-  if (!assertVerifiedCreator(ownerAddress, source, res)) return;
-  if (!validateDailyLimit(ownerAddress, amount, res)) return;
+  if (!(await assertVerifiedCreator(ownerAddress, source, res))) return;
+  if (!(await validateDailyLimit(ownerAddress, amount, res))) return;
 
   const feeBps = BigInt(FEE_BPS);
   const referrerShareBps = BigInt(REFERRER_SHARE_BPS);
@@ -218,13 +225,13 @@ router.get("/breakdown", (req: Request, res: Response) => {
   const db = getDb();
 
   // Check if this user was referred and referral is active (e.g. has sent at least 1 tip)
-  const tipCount = db.prepare(
+  const tipCount = await db.prepare(
     "SELECT COUNT(*) as c FROM tips WHERE from_address = ?"
-  ).get(ownerAddress) as { c: number } | undefined;
-  const hasActiveReferral = (tipCount?.c ?? 0) >= REFERRAL_ACTIVATION_MIN_TIPS;
+  ).get(ownerAddress) as { c: number | string } | undefined;
+  const hasActiveReferral = Number(tipCount?.c ?? 0) >= REFERRAL_ACTIVATION_MIN_TIPS;
 
   if (hasActiveReferral && feeAmount > 0n) {
-    const refRow = db.prepare(
+    const refRow = await db.prepare(
       "SELECT referrer_address FROM user_referrals WHERE user_address = ?"
     ).get(ownerAddress) as { referrer_address: string } | undefined;
 
@@ -232,10 +239,10 @@ router.get("/breakdown", (req: Request, res: Response) => {
       const refAddr = refRow.referrer_address.toLowerCase();
       // No self-referral (withdrawer is claim wallet owner; referrer must be different)
       if (refAddr !== ownerAddress) {
-        const refCount = db.prepare(
+        const refCount = await db.prepare(
           "SELECT COUNT(*) as c FROM user_referrals WHERE referrer_address = ?"
-        ).get(refAddr) as { c: number } | undefined;
-        if ((refCount?.c ?? 0) <= REFERRAL_CAP_PER_REFERRER) {
+        ).get(refAddr) as { c: number | string } | undefined;
+        if (Number(refCount?.c ?? 0) <= REFERRAL_CAP_PER_REFERRER) {
           referrerAddress = refAddr;
           referrerAmount = (feeAmount * referrerShareBps) / 10000n;
           protocolAmount = feeAmount - referrerAmount;
@@ -245,6 +252,8 @@ router.get("/breakdown", (req: Request, res: Response) => {
   }
 
   const treasury = PROTOCOL_TREASURY || "0x0000000000000000000000000000000000000000";
+
+  const dailyUsage = await getDailyUsage(ownerAddress);
 
   res.json({
     amountRaw: amount.toString(),
@@ -258,8 +267,8 @@ router.get("/breakdown", (req: Request, res: Response) => {
     safeguards: {
       emailConfirmationRequired: REQUIRE_EMAIL_CONFIRMATION,
       dailyLimitRaw: DAILY_LIMIT_RAW.toString(),
-      dailyUsedRaw: getDailyUsage(ownerAddress).used.toString(),
-      dailyRemainingRaw: getDailyUsage(ownerAddress).remaining.toString(),
+      dailyUsedRaw: dailyUsage.used.toString(),
+      dailyRemainingRaw: dailyUsage.remaining.toString(),
       source,
     },
   });
@@ -283,7 +292,7 @@ router.post("/request", async (req: Request, res: Response) => {
 
   const verified = await verifyWalletProof(ownerAddress, "withdrawal", req.body?.walletProof);
   if (!verified) {
-    recordSecurityEvent({
+    await recordSecurityEvent({
       eventType: "withdrawal_signature_failed",
       actorAddress: ownerAddress,
       route: "/withdrawal/request",
@@ -293,8 +302,8 @@ router.post("/request", async (req: Request, res: Response) => {
     res.status(401).json({ error: "Valid wallet signature required." });
     return;
   }
-  if (!assertVerifiedCreator(ownerAddress, source, res)) return;
-  if (!validateDailyLimit(ownerAddress, amount, res)) return;
+  if (!(await assertVerifiedCreator(ownerAddress, source, res))) return;
+  if (!(await validateDailyLimit(ownerAddress, amount, res))) return;
 
   const code = String(crypto.randomInt(100000, 1_000_000));
   const id = crypto.randomUUID();
@@ -306,7 +315,7 @@ router.post("/request", async (req: Request, res: Response) => {
       ? await maybeSendConfirmationEmail(email, code)
       : { delivered: false, devCode: code };
 
-    getDb().prepare(`
+    await getDb().prepare(`
       INSERT INTO withdrawal_confirmations (
         id, owner_address, destination_address, source, amount_raw, email, code_hash, status, created_at, expires_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
@@ -335,7 +344,7 @@ router.post("/confirm", async (req: Request, res: Response) => {
   }
 
   const db = getDb();
-  const row = db.prepare(
+  const row = await db.prepare(
     "SELECT id, owner_address, destination_address, source, amount_raw, status, expires_at, code_hash FROM withdrawal_confirmations WHERE id = ?"
   ).get(requestId) as {
     id: string;
@@ -357,7 +366,7 @@ router.post("/confirm", async (req: Request, res: Response) => {
     return;
   }
   if (row.expires_at < Date.now()) {
-    db.prepare("UPDATE withdrawal_confirmations SET status = 'expired' WHERE id = ?").run(requestId);
+    await db.prepare("UPDATE withdrawal_confirmations SET status = 'expired' WHERE id = ?").run(requestId);
     res.status(410).json({ error: "Withdrawal confirmation expired." });
     return;
   }
@@ -367,28 +376,47 @@ router.post("/confirm", async (req: Request, res: Response) => {
   }
 
   let withdrawalAuthorization: Awaited<ReturnType<typeof signWithdrawalAuthorization>> | undefined;
-  if (row.source === "tipsEarned" && row.destination_address !== row.owner_address) {
+  if (row.source === "tipsEarned") {
     if (!isAddress(claimWalletAddress)) {
-      res.status(400).json({ error: "claimWalletAddress is required for non-owner withdrawal destinations." });
+      res.status(400).json({ error: "claimWalletAddress is required for Tips Earned withdrawals." });
       return;
     }
-    try {
-      withdrawalAuthorization = await signWithdrawalAuthorization({
-        requestId: row.id,
-        ownerAddress: row.owner_address,
-        claimWalletAddress,
-        destinationAddress: row.destination_address,
-        amountRaw: row.amount_raw,
-        expiresAtMs: row.expires_at,
-      });
-    } catch (err: any) {
-      res.status(503).json({ error: err.message || "Could not sign withdrawal authorization." });
+    const selectedSource = await db.prepare(
+      `SELECT wallet_address
+       FROM claim_wallets
+       WHERE LOWER(owner_address) = ? AND LOWER(wallet_address) = ?
+       LIMIT 1`
+    ).get(row.owner_address, claimWalletAddress) as { wallet_address: string } | undefined;
+    if (!selectedSource) {
+      res.status(403).json({ error: "The selected Tips Earned source does not belong to this account." });
       return;
+    }
+    if (row.destination_address !== row.owner_address) {
+      try {
+        withdrawalAuthorization = await signWithdrawalAuthorization({
+          requestId: row.id,
+          ownerAddress: row.owner_address,
+          claimWalletAddress,
+          destinationAddress: row.destination_address,
+          amountRaw: row.amount_raw,
+          expiresAtMs: row.expires_at,
+        });
+      } catch (err: any) {
+        res.status(503).json({ error: err.message || "Could not sign withdrawal authorization." });
+        return;
+      }
     }
   }
 
-  db.prepare("UPDATE withdrawal_confirmations SET status = 'confirmed', confirmed_at = ? WHERE id = ?").run(Date.now(), requestId);
-  res.json(withdrawalAuthorization ? { confirmed: true, withdrawalAuthorization } : { confirmed: true });
+  const recordToken = crypto.randomBytes(32).toString("hex");
+  await db.prepare(
+    "UPDATE withdrawal_confirmations SET status = 'confirmed', confirmed_at = ?, record_token_hash = ? WHERE id = ?"
+  ).run(Date.now(), hashCode(recordToken), requestId);
+  res.json(
+    withdrawalAuthorization
+      ? { confirmed: true, recordToken, withdrawalAuthorization }
+      : { confirmed: true, recordToken }
+  );
 });
 
 router.post("/record", async (req: Request, res: Response) => {
@@ -399,21 +427,8 @@ router.post("/record", async (req: Request, res: Response) => {
     res.status(400).json({ error: "Valid requestId, ownerAddress, and txHash required." });
     return;
   }
-  const verified = await verifyWalletProof(ownerAddress, "withdrawal", req.body?.walletProof);
-  if (!verified) {
-    recordSecurityEvent({
-      eventType: "withdrawal_record_signature_failed",
-      actorAddress: ownerAddress,
-      route: "/withdrawal/record",
-      ip: req.ip,
-      reason: "Valid wallet signature required.",
-    });
-    res.status(401).json({ error: "Valid wallet signature required." });
-    return;
-  }
-
   const db = getDb();
-  const row = db.prepare(
+  const row = await db.prepare(
     "SELECT * FROM withdrawal_confirmations WHERE id = ? AND owner_address = ?"
   ).get(requestId, ownerAddress) as {
     id: string;
@@ -423,6 +438,7 @@ router.post("/record", async (req: Request, res: Response) => {
     amount_raw: string;
     status: string;
     expires_at: number;
+    record_token_hash: string | null;
   } | undefined;
 
   if (!row) {
@@ -434,8 +450,23 @@ router.post("/record", async (req: Request, res: Response) => {
     return;
   }
   if (row.expires_at < Date.now()) {
-    db.prepare("UPDATE withdrawal_confirmations SET status = 'expired' WHERE id = ?").run(requestId);
+    await db.prepare("UPDATE withdrawal_confirmations SET status = 'expired' WHERE id = ?").run(requestId);
     res.status(410).json({ error: "Withdrawal confirmation expired." });
+    return;
+  }
+  const tokenVerified = verifyRecordToken(req.body?.recordToken, row.record_token_hash);
+  const walletVerified = tokenVerified
+    ? false
+    : await verifyWalletProof(ownerAddress, "withdrawal", req.body?.walletProof);
+  if (!tokenVerified && !walletVerified) {
+    await recordSecurityEvent({
+      eventType: "withdrawal_record_authorization_failed",
+      actorAddress: ownerAddress,
+      route: "/withdrawal/record",
+      ip: req.ip,
+      reason: "Valid withdrawal record authorization required.",
+    });
+    res.status(401).json({ error: "Valid withdrawal record authorization required." });
     return;
   }
 
@@ -444,12 +475,14 @@ router.post("/record", async (req: Request, res: Response) => {
     let referrerAddress: string | null = null;
     let referrerAmount = 0n;
     const feeAmount = (BigInt(row.amount_raw) * BigInt(FEE_BPS)) / 10000n;
-    const hasActiveReferral = ((db.prepare("SELECT COUNT(*) as c FROM tips WHERE from_address = ?").get(ownerAddress) as { c: number } | undefined)?.c ?? 0) >= REFERRAL_ACTIVATION_MIN_TIPS;
+    const activeTipCount = await db.prepare("SELECT COUNT(*) as c FROM tips WHERE from_address = ?").get(ownerAddress) as { c: number | string } | undefined;
+    const hasActiveReferral = Number(activeTipCount?.c ?? 0) >= REFERRAL_ACTIVATION_MIN_TIPS;
     if (hasActiveReferral && feeAmount > 0n) {
-      const refRow = db.prepare("SELECT referrer_address FROM user_referrals WHERE user_address = ?").get(ownerAddress) as { referrer_address: string } | undefined;
+      const refRow = await db.prepare("SELECT referrer_address FROM user_referrals WHERE user_address = ?").get(ownerAddress) as { referrer_address: string } | undefined;
       const refAddr = refRow?.referrer_address?.toLowerCase();
       if (refAddr && refAddr !== ownerAddress) {
-        const refCount = (db.prepare("SELECT COUNT(*) as c FROM user_referrals WHERE referrer_address = ?").get(refAddr) as { c: number } | undefined)?.c ?? 0;
+        const refCountRow = await db.prepare("SELECT COUNT(*) as c FROM user_referrals WHERE referrer_address = ?").get(refAddr) as { c: number | string } | undefined;
+        const refCount = Number(refCountRow?.c ?? 0);
         if (refCount <= REFERRAL_CAP_PER_REFERRER) {
           referrerAddress = refAddr;
           referrerAmount = (feeAmount * BigInt(REFERRER_SHARE_BPS)) / 10000n;
@@ -457,16 +490,16 @@ router.post("/record", async (req: Request, res: Response) => {
       }
     }
 
-    const tx = db.transaction(() => {
-      db.prepare(`
+    await db.transaction(async (txDb) => {
+      await txDb.prepare(`
         INSERT INTO withdrawal_records (
           owner_address, destination_address, source, amount_raw, tx_hash, confirmation_id, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?)
       `).run(row.owner_address, row.destination_address, row.source, row.amount_raw, txHash, row.id, now);
-      db.prepare("UPDATE withdrawal_confirmations SET status = 'used', tx_hash = ?, used_at = ? WHERE id = ?")
+      await txDb.prepare("UPDATE withdrawal_confirmations SET status = 'used', tx_hash = ?, used_at = ? WHERE id = ?")
         .run(txHash, now, row.id);
       if (referrerAddress && referrerAmount > 0n) {
-        db.prepare(
+        await txDb.prepare(
           `INSERT INTO user_activity (type, from_address, to_address, amount, tx_hash, detail, author_handle, tweet_id, timestamp)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).run(
@@ -481,11 +514,10 @@ router.post("/record", async (req: Request, res: Response) => {
           Math.floor(now / 1000)
         );
       }
-    });
-    tx();
-    createWithdrawalConfirmedNotification({ userAddress: ownerAddress, amountRaw: row.amount_raw, txHash });
+    })();
+    await createWithdrawalConfirmedNotification({ userAddress: ownerAddress, amountRaw: row.amount_raw, txHash });
     if (referrerAddress && referrerAmount > 0n) {
-      createReferralEarnedNotification({ userAddress: referrerAddress, amountRaw: referrerAmount.toString(), txHash, referredAddress: ownerAddress });
+      await createReferralEarnedNotification({ userAddress: referrerAddress, amountRaw: referrerAmount.toString(), txHash, referredAddress: ownerAddress });
     }
     res.json({ recorded: true });
   } catch (err: any) {

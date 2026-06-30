@@ -5,6 +5,10 @@ export default function Terms() {
     <div className="page-section" style={{ paddingTop: "var(--space-4)" }}>
       <h1 style={{ fontSize: "var(--text-title)", marginBottom: "var(--space-4)" }}>Terms of Service</h1>
       <p style={{ color: "var(--text-primary)", lineHeight: "var(--line-relaxed)", marginBottom: "var(--space-4)" }}>
+        <strong>Teep is currently a testnet beta.</strong> Balances and transactions use test funds on Arc testnet.
+        Test funds have no real-world monetary value and cannot be withdrawn to a bank.
+      </p>
+      <p style={{ color: "var(--text-primary)", lineHeight: "var(--line-relaxed)", marginBottom: "var(--space-4)" }}>
         <strong>Tips are final.</strong> Once you send money to a creator, we cannot reverse or refund it.
         Only tip people you trust.
       </p>

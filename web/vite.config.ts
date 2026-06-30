@@ -28,7 +28,24 @@ export default defineConfig(({ mode }) => {
 
   return {
   plugins: [react()],
-  server: { port: 5174 },
+  server: {
+    port: 5174,
+    allowedHosts: ["435a-102-88-112-142.ngrok-free.app"],
+    proxy: {
+      "/api": "http://127.0.0.1:3001",
+      "/auth": "http://127.0.0.1:3001",
+      "/defi": "http://127.0.0.1:3001",
+      "/faucet": "http://127.0.0.1:3001",
+      "/health": "http://127.0.0.1:3001",
+      "/leaderboard": "http://127.0.0.1:3001",
+      "/milestones": "http://127.0.0.1:3001",
+      "/api/ops": "http://127.0.0.1:3001",
+      "/referral": "http://127.0.0.1:3001",
+      "/stats": "http://127.0.0.1:3001",
+      "/tips": "http://127.0.0.1:3001",
+      "/withdrawal": "http://127.0.0.1:3001",
+    },
+  },
   build: {
     sourcemap: false,
   },

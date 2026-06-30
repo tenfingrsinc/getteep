@@ -23,7 +23,7 @@ function contentIdFromDirectCreator(authorId: string): string {
  * GET /tips/post/:handle/:tweetId
  * Returns tip data for a post by handle and tweet ID (for CTA links).
  */
-router.get("/post/:handle/:tweetId", (req: Request, res: Response) => {
+router.get("/post/:handle/:tweetId", async (req: Request, res: Response) => {
   const handle = String(req.params.handle || "").replace(/^@/, "");
   const tweetId = String(req.params.tweetId || "");
   if (!handle || !tweetId) {
@@ -33,13 +33,13 @@ router.get("/post/:handle/:tweetId", (req: Request, res: Response) => {
   const contentId = contentIdFromPost(handle, tweetId);
   const db = getDb();
 
-  const total = db
+  const total = await db
     .prepare(
-      "SELECT COALESCE(SUM(CAST(amount AS REAL)), 0) as total, COUNT(*) as count FROM tips WHERE content_id = ?"
+      "SELECT COALESCE(SUM(CAST(amount AS NUMERIC)), 0) as total, COUNT(*) as count FROM tips WHERE content_id = ?"
     )
     .get(contentId) as { total: number; count: number } | undefined;
 
-  const recentTips = db
+  const recentTips = await db
     .prepare(
       "SELECT from_address, amount, tx_hash, timestamp FROM tips WHERE content_id = ? ORDER BY block_number DESC LIMIT 20"
     )
@@ -48,7 +48,7 @@ router.get("/post/:handle/:tweetId", (req: Request, res: Response) => {
   res.json({
     contentId,
     totalAmount: total?.total?.toString() || "0",
-    tipCount: total?.count || 0,
+    tipCount: Number(total?.count || 0),
     recentTips,
     handle,
     tweetId,
@@ -59,17 +59,17 @@ router.get("/post/:handle/:tweetId", (req: Request, res: Response) => {
  * GET /tips/:contentId
  * Returns aggregated tip total and recent tips for a specific post
  */
-router.get("/:contentId", (req: Request, res: Response) => {
+router.get("/:contentId", async (req: Request, res: Response) => {
   const { contentId } = req.params;
   const db = getDb();
 
-  const total = db
+  const total = await db
     .prepare(
-      "SELECT COALESCE(SUM(CAST(amount AS REAL)), 0) as total, COUNT(*) as count FROM tips WHERE content_id = ?"
+      "SELECT COALESCE(SUM(CAST(amount AS NUMERIC)), 0) as total, COUNT(*) as count FROM tips WHERE content_id = ?"
     )
     .get(contentId) as { total: number; count: number } | undefined;
 
-  const recentTips = db
+  const recentTips = await db
     .prepare(
       "SELECT from_address, amount, tx_hash, timestamp FROM tips WHERE content_id = ? ORDER BY block_number DESC LIMIT 20"
     )
@@ -78,7 +78,7 @@ router.get("/:contentId", (req: Request, res: Response) => {
   res.json({
     contentId,
     totalAmount: total?.total?.toString() || "0",
-    tipCount: total?.count || 0,
+    tipCount: Number(total?.count || 0),
     recentTips,
   });
 });
@@ -87,22 +87,22 @@ router.get("/:contentId", (req: Request, res: Response) => {
  * GET /tips/author/:authorId
  * Returns total tips received by an author across all posts
  */
-router.get("/author/:authorId", (req: Request, res: Response) => {
+router.get("/author/:authorId", async (req: Request, res: Response) => {
   const { authorId } = req.params;
   const db = getDb();
 
-  const total = db
+  const total = await db
     .prepare(
-      "SELECT COALESCE(SUM(CAST(amount AS REAL)), 0) as total, COUNT(*) as count FROM tips WHERE author_id = ?"
+      "SELECT COALESCE(SUM(CAST(amount AS NUMERIC)), 0) as total, COUNT(*) as count FROM tips WHERE author_id = ?"
     )
     .get(authorId) as { total: number; count: number } | undefined;
 
-  const topPosts = db
+  const topPosts = await db
     .prepare(
-      `SELECT content_id, SUM(CAST(amount AS REAL)) as total, COUNT(*) as count 
-       FROM tips WHERE author_id = ? 
-       GROUP BY content_id 
-       ORDER BY total DESC 
+      `SELECT content_id, SUM(CAST(amount AS NUMERIC)) as total, COUNT(*) as count
+       FROM tips WHERE author_id = ?
+       GROUP BY content_id
+       ORDER BY total DESC
        LIMIT 10`
     )
     .all(authorId);
@@ -110,8 +110,93 @@ router.get("/author/:authorId", (req: Request, res: Response) => {
   res.json({
     authorId,
     totalReceived: total?.total?.toString() || "0",
-    tipCount: total?.count || 0,
+    tipCount: Number(total?.count || 0),
     topPosts,
+  });
+});
+
+/**
+ * GET /tips/receipt/x/:receiptId
+ * Returns an internal X-bot tip receipt (Mode A ledger tip).
+ */
+router.get("/receipt/x/:receiptId", async (req: Request, res: Response) => {
+  const receiptId = String(req.params.receiptId || "").trim();
+  if (!receiptId || !/^[a-f0-9]{16}$/i.test(receiptId)) {
+    res.status(400).json({ error: "Valid receipt id required" });
+    return;
+  }
+  const db = getDb();
+  const row = await db
+    .prepare(
+      `SELECT id, sender_address, recipient_address, recipient_x_username, amount_raw, source_tweet_id, created_at
+       FROM x_bot_tips WHERE receipt_id = ?`
+    )
+    .get(receiptId) as
+    | {
+        id: string;
+        sender_address: string;
+        recipient_address: string | null;
+        recipient_x_username: string | null;
+        amount_raw: string;
+        source_tweet_id: string;
+        created_at: number;
+      }
+    | undefined;
+
+  if (row) {
+    const senderSettings = await getUserSettings(row.sender_address);
+    res.json({
+      kind: "x_bot",
+      receiptId,
+      fromAddress: row.sender_address,
+      toAddress: row.recipient_address,
+      amount: row.amount_raw,
+      displayAmount: senderSettings.receipts.shareAmountEnabled,
+      timestamp: Math.floor(row.created_at / 1000),
+      authorHandle: row.recipient_x_username,
+      tweetId: row.source_tweet_id,
+      source: "x_bot",
+      status: "completed",
+    });
+    return;
+  }
+
+  const claimable = await db
+    .prepare(
+      `SELECT sender_address, recipient_x_username, amount_raw, source_tweet_id, status, created_at, expires_at
+       FROM claimable_tips WHERE receipt_id = ?`
+    )
+    .get(receiptId) as
+    | {
+        sender_address: string;
+        recipient_x_username: string;
+        amount_raw: string;
+        source_tweet_id: string;
+        status: string;
+        created_at: number;
+        expires_at: number | null;
+      }
+    | undefined;
+
+  if (!claimable) {
+    res.status(404).json({ error: "Receipt not found" });
+    return;
+  }
+
+  const senderSettings = await getUserSettings(claimable.sender_address);
+  res.json({
+    kind: "x_bot",
+    receiptId,
+    fromAddress: claimable.sender_address,
+    toAddress: null,
+    amount: claimable.amount_raw,
+    displayAmount: senderSettings.receipts.shareAmountEnabled,
+    timestamp: Math.floor(claimable.created_at / 1000),
+    authorHandle: claimable.recipient_x_username,
+    tweetId: claimable.source_tweet_id,
+    source: "x_bot",
+    status: claimable.status === "unclaimed" ? "reserved" : claimable.status,
+    expiresAt: claimable.expires_at ? Math.floor(claimable.expires_at / 1000) : null,
   });
 });
 
@@ -119,7 +204,7 @@ router.get("/author/:authorId", (req: Request, res: Response) => {
  * GET /tips/receipt/:txHash
  * Returns a single tip by transaction hash for the receipt page.
  */
-router.get("/receipt/:txHash", (req: Request, res: Response) => {
+router.get("/receipt/:txHash", async (req: Request, res: Response) => {
   const txHash = String(req.params.txHash || "").trim().toLowerCase();
   if (!txHash || !txHash.startsWith("0x")) {
     res.status(400).json({ error: "Valid tx hash required" });
@@ -127,7 +212,7 @@ router.get("/receipt/:txHash", (req: Request, res: Response) => {
   }
   const db = getDb();
 
-  const row = db
+  const row = await db
     .prepare(
       `SELECT t.from_address, t.to_address, t.amount, t.tx_hash, t.timestamp, t.author_id, t.content_id,
               m.author_handle, m.tweet_id, COALESCE(m.kind, 'post_tip') as kind
@@ -149,11 +234,11 @@ router.get("/receipt/:txHash", (req: Request, res: Response) => {
   } | undefined;
 
   if (!row) {
-    const funding = db
+    const funding = await db
       .prepare(
         `SELECT user_address, metadata_json, created_at
          FROM funding_provider_sessions
-         WHERE LOWER(COALESCE(json_extract(metadata_json, '$.txHash'), json_extract(metadata_json, '$.hash'), provider_session_id)) = ?
+         WHERE LOWER(COALESCE(metadata_json::jsonb ->> 'txHash', metadata_json::jsonb ->> 'hash', provider_session_id)) = ?
          LIMIT 1`
       )
       .get(txHash) as { user_address: string; metadata_json: string | null; created_at: number } | undefined;
@@ -167,7 +252,8 @@ router.get("/receipt/:txHash", (req: Request, res: Response) => {
       const amountRaw = metadata.amountRaw && String(metadata.amountRaw).length <= 18
         ? String(metadata.amountRaw)
         : String(Math.round(Number(metadata.amount || 0) * 1e6));
-      const identity = publicIdentity(funding.user_address);
+      const identity = await publicIdentity(funding.user_address);
+      const settings = await getUserSettings(funding.user_address);
       res.json({
         fromAddress: null,
         fromIdentity: "Funding source",
@@ -181,13 +267,13 @@ router.get("/receipt/:txHash", (req: Request, res: Response) => {
         authorHandle: null,
         tweetId: null,
         kind: "deposit",
-        receiptPreferences: getUserSettings(funding.user_address).receipts,
+        receiptPreferences: settings.receipts,
         accountIdentity: identity.label,
       });
       return;
     }
 
-    const withdrawal = db
+    const withdrawal = await db
       .prepare(
         `SELECT owner_address, destination_address, amount_raw, created_at
          FROM withdrawal_records
@@ -196,8 +282,8 @@ router.get("/receipt/:txHash", (req: Request, res: Response) => {
       )
       .get(txHash) as { owner_address: string; destination_address: string; amount_raw: string; created_at: number } | undefined;
     if (withdrawal) {
-      const senderSettings = getUserSettings(withdrawal.owner_address);
-      const senderIdentity = publicIdentity(withdrawal.owner_address);
+      const senderSettings = await getUserSettings(withdrawal.owner_address);
+      const senderIdentity = await publicIdentity(withdrawal.owner_address);
       res.json({
         fromAddress: senderSettings.privacy.hideAddress ? null : withdrawal.owner_address,
         fromIdentity: senderIdentity.label,
@@ -216,7 +302,7 @@ router.get("/receipt/:txHash", (req: Request, res: Response) => {
       return;
     }
 
-    const referral = db
+    const referral = await db
       .prepare(
         `SELECT from_address, to_address, amount, timestamp
          FROM user_activity
@@ -225,8 +311,8 @@ router.get("/receipt/:txHash", (req: Request, res: Response) => {
       )
       .get(txHash) as { from_address: string; to_address: string; amount: string; timestamp: number } | undefined;
     if (referral) {
-      const settings = getUserSettings(referral.to_address);
-      const identity = publicIdentity(referral.to_address);
+      const settings = await getUserSettings(referral.to_address);
+      const identity = await publicIdentity(referral.to_address);
       res.json({
         fromAddress: null,
         fromIdentity: "Referral network",
@@ -250,12 +336,27 @@ router.get("/receipt/:txHash", (req: Request, res: Response) => {
     return;
   }
 
-  const creatorUsername =
-    (db.prepare("SELECT username FROM verified_claims WHERE author_id = ? LIMIT 1").get(row.author_id) as { username: string } | undefined)?.username ||
-    row.author_handle ||
-    null;
-  const senderSettings = getUserSettings(row.from_address);
-  const senderIdentity = publicIdentity(row.from_address);
+  const verifiedCreator = row.author_handle
+    ? await db
+        .prepare(
+          `SELECT username, owner_address
+           FROM verified_claims
+           WHERE author_id = ? OR LOWER(username) = LOWER(?)
+           ORDER BY CASE WHEN author_id = ? THEN 0 ELSE 1 END
+           LIMIT 1`
+        )
+        .get(row.author_id, row.author_handle, row.author_id) as { username: string; owner_address: string } | undefined
+    : await db
+        .prepare(
+          `SELECT username, owner_address
+           FROM verified_claims
+           WHERE author_id = ?
+           LIMIT 1`
+        )
+        .get(row.author_id) as { username: string; owner_address: string } | undefined;
+  const creatorUsername = verifiedCreator?.username || row.author_handle || null;
+  const senderSettings = await getUserSettings(row.from_address);
+  const senderIdentity = await publicIdentity(row.from_address);
 
   res.json({
     fromAddress: senderSettings.privacy.hideAddress ? null : row.from_address,
@@ -270,6 +371,9 @@ router.get("/receipt/:txHash", (req: Request, res: Response) => {
     authorHandle: creatorUsername || row.author_handle,
     tweetId: row.tweet_id,
     kind: row.kind || "post_tip",
+    creatorClaimStatus: verifiedCreator ? "verified" : "unclaimed",
+    creatorVerified: Boolean(verifiedCreator),
+    creatorOwnerAddress: verifiedCreator?.owner_address || null,
     receiptPreferences: senderSettings.receipts,
   });
 });
@@ -281,7 +385,7 @@ const RECEIPT_BASE_URL = process.env.RECEIPT_BASE_URL || "https://tipcoin.xyz";
  * Returns HTML with Open Graph (and Twitter card) meta tags for link previews.
  * Use when serving receipt URL to crawlers (e.g. reverse proxy or serverless).
  */
-router.get("/receipt/:txHash/og", (req: Request, res: Response) => {
+router.get("/receipt/:txHash/og", async (req: Request, res: Response) => {
   const txHash = String(req.params.txHash || "").trim().toLowerCase();
   if (!txHash || !txHash.startsWith("0x")) {
     res.status(400).send("Invalid tx hash");
@@ -289,7 +393,7 @@ router.get("/receipt/:txHash/og", (req: Request, res: Response) => {
   }
   const db = getDb();
 
-  const row = db
+  const row = await db
     .prepare(
       `SELECT t.amount, t.tx_hash, t.author_id, t.from_address, m.author_handle
        FROM tips t
@@ -304,13 +408,13 @@ router.get("/receipt/:txHash/og", (req: Request, res: Response) => {
   }
 
   const creatorUsername =
-    (db.prepare("SELECT username FROM verified_claims WHERE author_id = ? LIMIT 1").get(row.author_id) as { username: string } | undefined)?.username ||
+    (await db.prepare("SELECT username FROM verified_claims WHERE author_id = ? LIMIT 1").get(row.author_id) as { username: string } | undefined)?.username ||
     row.author_handle ||
     null;
   const creatorLabel = creatorUsername ? `@${creatorUsername}` : "Creator";
   const amountUsd = (Number(row.amount) / 1e6).toFixed(2);
   const receiptUrl = `${RECEIPT_BASE_URL}/tx/${row.tx_hash}`;
-  const senderSettings = getUserSettings(row.from_address);
+  const senderSettings = await getUserSettings(row.from_address);
   const title = senderSettings.receipts.shareAmountEnabled
     ? `${creatorLabel} received a $${amountUsd} tip on Teep`
     : `${creatorLabel} received a tip on Teep`;
@@ -348,13 +452,13 @@ function escapeHtml(s: string): string {
  * GET /tips/wallet/:address
  * Returns tip history for a wallet address (sent tips), joined with metadata
  */
-router.get("/wallet/:address", (req: Request, res: Response) => {
+router.get("/wallet/:address", async (req: Request, res: Response) => {
   const address = (req.params.address as string).toLowerCase();
   const limit = Math.min(parseInt(req.query.limit as string) || 50, 100);
   const offset = parseInt(req.query.offset as string) || 0;
   const db = getDb();
 
-  const tips = db
+  const tips = await db
     .prepare(
       `SELECT t.content_id, t.author_id, t.amount, t.tx_hash, t.timestamp,
               m.author_handle, m.tweet_id
@@ -366,7 +470,7 @@ router.get("/wallet/:address", (req: Request, res: Response) => {
     )
     .all(address, limit, offset);
 
-  const stats = getUnifiedTipperStats(address);
+  const stats = await getUnifiedTipperStats(address);
 
   res.json({
     address,
@@ -381,7 +485,7 @@ router.get("/wallet/:address", (req: Request, res: Response) => {
  * POST /tips/metadata
  * Store metadata for a tip's content ID.
  */
-router.post("/metadata", (req: Request, res: Response) => {
+router.post("/metadata", async (req: Request, res: Response) => {
   const { contentId, authorHandle, tweetId, authorId, kind } = req.body;
   const metadataKind = kind === "direct_creator_tip" ? "direct_creator_tip" : "post_tip";
   const handle = normalizeHandle(authorHandle);
@@ -414,8 +518,10 @@ router.post("/metadata", (req: Request, res: Response) => {
 
   const db = getDb();
   try {
-    db.prepare(
-      "INSERT OR IGNORE INTO tip_metadata (content_id, author_handle, tweet_id, kind) VALUES (?, ?, ?, ?)"
+    await db.prepare(
+      `INSERT INTO tip_metadata (content_id, author_handle, tweet_id, kind)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT (content_id) DO NOTHING`
     ).run(contentId.toLowerCase(), handle, normalizedTweetId || "", metadataKind);
     res.json({ success: true });
   } catch (err: any) {
@@ -435,7 +541,7 @@ router.post("/activity", async (req: Request, res: Response) => {
     return;
   }
 
-  const { type, fromAddress, toAddress, amount, txHash, detail, authorHandle, tweetId, walletProof } = req.body;
+  const { type, fromAddress, toAddress, amount, txHash, detail, authorHandle, tweetId, sourceMethod, walletProof } = req.body;
 
   const allowedTypes = new Set(["tip_sent", "direct_creator_tip", "send", "withdraw", "withdraw_balance", "referral_fee_received"]);
   if (
@@ -457,12 +563,16 @@ router.post("/activity", async (req: Request, res: Response) => {
   }
   const handle = authorHandle == null ? null : normalizeHandle(authorHandle);
   const normalizedTweetId = tweetId == null ? null : normalizeTweetId(tweetId);
+  const normalizedSourceMethod =
+    typeof sourceMethod === "string" && /^[a-z0-9_-]{2,40}$/i.test(sourceMethod)
+      ? sourceMethod.toLowerCase()
+      : null;
 
   const db = getDb();
   try {
     const timestamp = Math.floor(Date.now() / 1000);
-    db.prepare(
-      "INSERT INTO user_activity (type, from_address, to_address, amount, tx_hash, detail, author_handle, tweet_id, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    await db.prepare(
+      "INSERT INTO user_activity (type, from_address, to_address, amount, tx_hash, detail, author_handle, tweet_id, source_method, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     ).run(
       type,
       fromAddress.toLowerCase(),
@@ -472,9 +582,10 @@ router.post("/activity", async (req: Request, res: Response) => {
       typeof detail === "string" ? detail.slice(0, 200) : null,
       handle,
       normalizedTweetId,
+      normalizedSourceMethod,
       timestamp
     );
-    createReceiptReadyNotification({
+    await createReceiptReadyNotification({
       userAddress: fromAddress.toLowerCase(),
       txHash: txHash.toLowerCase(),
       amountRaw: amount,
@@ -492,7 +603,7 @@ router.post("/activity", async (req: Request, res: Response) => {
  * Combined history: tips sent, tips received, deposits, sends, withdrawals.
  * Only includes tips from the current TIP_CONTRACT_ADDRESS so "earned this week" resets after a new deploy.
  */
-router.get("/history/:address", (req: Request, res: Response) => {
+router.get("/history/:address", async (req: Request, res: Response) => {
   const address = (req.params.address as string).toLowerCase();
   const limit = Math.min(parseInt(req.query.limit as string) || 50, 100);
   if (!isAddress(address)) {
@@ -501,7 +612,7 @@ router.get("/history/:address", (req: Request, res: Response) => {
   }
 
   res.json({
-    history: getAccountActivity({
+    history: await getAccountActivity({
       address,
       limit,
       tipContractAddress: process.env.TIP_CONTRACT_ADDRESS,

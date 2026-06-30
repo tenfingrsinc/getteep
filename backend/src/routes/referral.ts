@@ -39,7 +39,7 @@ async function requireWalletProof(req: Request, res: Response, address: unknown,
  * GET /referral/code/:address
  * Get or create a referral code for the given address (owner of claim wallet or any user).
  */
-router.get("/code/:address", (req: Request, res: Response) => {
+router.get("/code/:address", async (req: Request, res: Response) => {
   const address = (req.params.address as string).toLowerCase();
   if (!isAddress(address)) {
     res.status(400).json({ error: "Valid address is required" });
@@ -47,7 +47,7 @@ router.get("/code/:address", (req: Request, res: Response) => {
   }
   const db = getDb();
 
-  let row = db.prepare(
+  let row = await db.prepare(
     "SELECT code FROM referral_codes WHERE referrer_address = ?"
   ).get(address) as { code: string } | undefined;
 
@@ -59,18 +59,40 @@ router.get("/code/:address", (req: Request, res: Response) => {
   res.json({ address, code: row.code });
 });
 
+router.get("/summary/:address", async (req: Request, res: Response) => {
+  const address = (req.params.address as string).toLowerCase();
+  if (!isAddress(address)) {
+    res.status(400).json({ error: "Valid address is required" });
+    return;
+  }
+  const db = getDb();
+  const codeRow = await db.prepare(
+    "SELECT code FROM referral_codes WHERE referrer_address = ?"
+  ).get(address) as { code: string } | undefined;
+  const statsRow = await db.prepare(
+    "SELECT COUNT(*) AS referred_count FROM user_referrals WHERE referrer_address = ?"
+  ).get(address) as { referred_count: number } | undefined;
+
+  res.set("Cache-Control", "private, max-age=30");
+  res.json({
+    address,
+    code: codeRow?.code || null,
+    referredCount: Number(statsRow?.referred_count ?? 0),
+  });
+});
+
 router.post("/code", async (req: Request, res: Response) => {
   const address = (req.body?.address as string | undefined)?.toLowerCase();
   if (!(await requireWalletProof(req, res, address, "referral-code"))) return;
   const db = getDb();
 
-  let row = db.prepare(
+  let row = await db.prepare(
     "SELECT code FROM referral_codes WHERE referrer_address = ?"
   ).get(address) as { code: string } | undefined;
 
   if (!row) {
     const code = crypto.randomBytes(4).toString("hex").toLowerCase();
-    db.prepare(
+    await db.prepare(
       "INSERT INTO referral_codes (code, referrer_address) VALUES (?, ?)"
     ).run(code, address);
     row = { code };
@@ -104,7 +126,7 @@ router.post("/link", async (req: Request, res: Response) => {
 
   const db = getDb();
 
-  const referrerRow = db.prepare(
+  const referrerRow = await db.prepare(
     "SELECT referrer_address FROM referral_codes WHERE code = ?"
   ).get(codeNorm) as { referrer_address: string } | undefined;
 
@@ -119,7 +141,7 @@ router.post("/link", async (req: Request, res: Response) => {
     return;
   }
 
-  const existing = db.prepare(
+  const existing = await db.prepare(
     "SELECT 1 FROM user_referrals WHERE user_address = ?"
   ).get(user);
 
@@ -128,10 +150,10 @@ router.post("/link", async (req: Request, res: Response) => {
     return;
   }
 
-  db.prepare(
+  await db.prepare(
     "INSERT INTO user_referrals (user_address, referrer_address, referral_code) VALUES (?, ?, ?)"
   ).run(user, referrer, codeNorm);
-  inspectReferralForAbuse(user, referrer, codeNorm);
+  await inspectReferralForAbuse(user, referrer, codeNorm);
 
   try {
     const { expiresAt, nonce, signature } = await referralSignerService.signSetReferrer(user, referrer);
@@ -165,7 +187,7 @@ router.post("/sign-set-referrer", async (req: Request, res: Response) => {
   }
   if (!(await requireWalletProof(req, res, userAddress, "referral-set-referrer"))) return;
   const db = getDb();
-  const row = db.prepare(
+  const row = await db.prepare(
     "SELECT referrer_address FROM user_referrals WHERE user_address = ?"
   ).get(userAddress) as { referrer_address: string } | undefined;
   if (!row) {
@@ -196,7 +218,7 @@ router.get("/status/:address", async (req: Request, res: Response) => {
   const address = (req.params.address as string).toLowerCase();
   const db = getDb();
 
-  const row = db.prepare(
+  const row = await db.prepare(
     "SELECT referrer_address, referral_code FROM user_referrals WHERE user_address = ?"
   ).get(address) as { referrer_address: string; referral_code: string } | undefined;
 
@@ -236,17 +258,17 @@ router.get("/status/:address", async (req: Request, res: Response) => {
  * GET /referral/stats/:address
  * Returns referrer stats: number of users referred (who used this address's code).
  */
-router.get("/stats/:address", (req: Request, res: Response) => {
+router.get("/stats/:address", async (req: Request, res: Response) => {
   const address = (req.params.address as string).toLowerCase();
   const db = getDb();
 
-  const row = db.prepare(
+  const row = await db.prepare(
     "SELECT COUNT(*) AS referred_count FROM user_referrals WHERE referrer_address = ?"
   ).get(address) as { referred_count: number };
 
   res.json({
     address,
-    referredCount: row?.referred_count ?? 0,
+    referredCount: Number(row?.referred_count ?? 0),
   });
 });
 

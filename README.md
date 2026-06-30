@@ -171,6 +171,8 @@ The production extension build removes localhost permissions, blocks debug flags
 Required production env includes:
 
 - `CORS_ORIGIN`
+- `WEB_APP_URL`
+- `RECEIPT_BASE_URL`
 - `RPC_URL` or `ARC_RPC_URL`
 - `ATTESTATION_PRIVATE_KEY`
 - `USDC_ADDRESS`
@@ -182,6 +184,9 @@ Required production env includes:
 - `FACTORY_ADDRESS`
 - `INDEXER_START_BLOCK`
 - `OPS_TOKEN`
+
+Set `WEB_DIST_DIR` to the built web app directory, for example `../web/dist`, when the backend should serve creator profile URLs with crawler-visible OpenGraph/Twitter metadata.
+In production, route top-level creator profile URLs such as `/:username` to this backend renderer, or serve the built web app from the backend, so crawlers receive the injected metadata before React hydrates.
 
 Build and start:
 

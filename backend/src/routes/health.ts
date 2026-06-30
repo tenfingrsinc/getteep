@@ -19,7 +19,7 @@ router.get("/live", (_req: Request, res: Response) => {
 router.get("/", async (_req: Request, res: Response) => {
   try {
     const db = getDb();
-    const state = db
+    const state = await db
       .prepare("SELECT last_block, current_block, updated_at, last_success_at, last_error, last_error_at FROM indexer_state WHERE id = 1")
       .get() as {
         last_block: number;
@@ -30,9 +30,9 @@ router.get("/", async (_req: Request, res: Response) => {
         last_error_at: number | null;
       } | undefined;
 
-    const tipCount = db
+    const tipCount = await db
       .prepare("SELECT COUNT(*) as count FROM tips")
-      .get() as { count: number };
+      .get() as { count: string };
 
     let rpcBlock: string | null = null;
     try {
@@ -49,7 +49,7 @@ router.get("/", async (_req: Request, res: Response) => {
     const lastSuccessAt = state?.last_success_at || null;
     const staleMs = lastSuccessAt ? Date.now() - lastSuccessAt : null;
     const indexerHealthy = lagBlocks <= INDEXER_MAX_LAG_BLOCKS && (staleMs == null || staleMs <= INDEXER_MAX_STALE_MS) && !state?.last_error;
-    const abuse = summarizeOpenAbuseEvents(5);
+    const abuse = await summarizeOpenAbuseEvents(5);
 
     res.json({
       status: indexerHealthy ? "ok" : "degraded",
@@ -67,7 +67,7 @@ router.get("/", async (_req: Request, res: Response) => {
         indexerMaxLagBlocks: INDEXER_MAX_LAG_BLOCKS,
         indexerMaxStaleMs: INDEXER_MAX_STALE_MS,
       },
-      totalTipsIndexed: tipCount.count,
+      totalTipsIndexed: Number(tipCount.count),
       abuse,
       timestamp: new Date().toISOString(),
     });
@@ -79,7 +79,7 @@ router.get("/", async (_req: Request, res: Response) => {
 router.get("/ready", async (_req: Request, res: Response) => {
   try {
     const db = getDb();
-    const state = db
+    const state = await db
       .prepare("SELECT last_block, current_block, last_success_at, last_error FROM indexer_state WHERE id = 1")
       .get() as { last_block: number; current_block: number | null; last_success_at: number | null; last_error: string | null } | undefined;
     const indexedBlock = Number(state?.last_block || 0);

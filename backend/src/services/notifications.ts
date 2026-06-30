@@ -1,25 +1,34 @@
-import { getDb } from "../db/database";
+import { one, query, run } from "../db/database";
 import { getUserSettings } from "./userSettings";
 
 export type NotificationType =
   | "creator_claimed_funds"
   | "low_balance"
   | "receipt_ready"
+  | "new_tip_received"
+  | "repeat_supporter"
+  | "claim_wallet_activity"
   | "deposit_confirmed"
   | "withdrawal_confirmed"
+  | "grow_tips_status"
   | "referral_earned"
   | "message";
 
-function isEnabled(userAddress: string, type: NotificationType) {
-  const settings = getUserSettings(userAddress);
+async function isEnabled(userAddress: string, type: NotificationType) {
+  const settings = await getUserSettings(userAddress);
   if (type === "creator_claimed_funds") return settings.notifications.creatorClaimed;
   if (type === "low_balance") return settings.notifications.lowBalance;
   if (type === "receipt_ready") return settings.notifications.receiptReady;
-  if (type === "deposit_confirmed" || type === "withdrawal_confirmed" || type === "referral_earned" || type === "message") return true;
+  if (type === "new_tip_received") return settings.notifications.newTip;
+  if (type === "repeat_supporter") return settings.notifications.repeatSupporter;
+  if (type === "claim_wallet_activity") return settings.notifications.claimWalletActivity;
+  if (type === "withdrawal_confirmed") return settings.notifications.withdrawalCompleted && settings.payout.notifications;
+  if (type === "grow_tips_status") return settings.notifications.growTipsStatus;
+  if (type === "deposit_confirmed" || type === "referral_earned" || type === "message") return true;
   return false;
 }
 
-export function createNotification(params: {
+export async function createNotification(params: {
   userAddress: string;
   type: NotificationType;
   title: string;
@@ -27,53 +36,46 @@ export function createNotification(params: {
   metadata?: Record<string, unknown>;
 }) {
   const userAddress = params.userAddress.toLowerCase();
-  if (!isEnabled(userAddress, params.type)) return null;
+  if (!(await isEnabled(userAddress, params.type))) return null;
 
-  const db = getDb();
   const now = Date.now();
   const txHash = typeof params.metadata?.txHash === "string" ? params.metadata.txHash.toLowerCase() : "";
   const messageKey = typeof params.metadata?.messageKey === "string" ? params.metadata.messageKey : "";
   const recent = txHash
-    ? db
-        .prepare(
+    ? await one<{ id: string }>(
           `SELECT id FROM user_notifications
-           WHERE user_address = ? AND type = ? AND LOWER(json_extract(metadata_json, '$.txHash')) = ?
+           WHERE user_address = ? AND type = ? AND LOWER(metadata_json::jsonb ->> 'txHash') = ?
            LIMIT 1`
-        )
-        .get(userAddress, params.type, txHash)
+        , [userAddress, params.type, txHash])
     : messageKey
-    ? db
-        .prepare(
+    ? await one<{ id: string }>(
           `SELECT id FROM user_notifications
-           WHERE user_address = ? AND type = ? AND json_extract(metadata_json, '$.messageKey') = ?
+           WHERE user_address = ? AND type = ? AND metadata_json::jsonb ->> 'messageKey' = ?
            LIMIT 1`
-        )
-        .get(userAddress, params.type, messageKey)
-    : db
-        .prepare(
+        , [userAddress, params.type, messageKey])
+    : await one<{ id: string }>(
           `SELECT id FROM user_notifications
            WHERE user_address = ? AND type = ? AND status = 'unread' AND created_at >= ?
            LIMIT 1`
-        )
-        .get(userAddress, params.type, now - 24 * 60 * 60 * 1000);
+        , [userAddress, params.type, now - 24 * 60 * 60 * 1000]);
   if (recent) return null;
-  const result = db
-    .prepare(
-      `INSERT INTO user_notifications (user_address, type, title, body, metadata_json, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`
-    )
-    .run(
+  const inserted = await one<{ id: string }>(
+    `INSERT INTO user_notifications (user_address, type, title, body, metadata_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     RETURNING id`,
+    [
       userAddress,
       params.type,
       params.title,
       params.body,
       params.metadata ? JSON.stringify(params.metadata) : null,
       now
-    );
-  return result.lastInsertRowid;
+    ]
+  );
+  return inserted?.id ?? null;
 }
 
-export function createDepositConfirmedNotification(params: { userAddress: string; amountRaw: string; txHash: string }) {
+export async function createDepositConfirmedNotification(params: { userAddress: string; amountRaw: string; txHash: string }) {
   const amount = (Number(params.amountRaw) / 1e6).toFixed(2);
   return createNotification({
     userAddress: params.userAddress,
@@ -84,7 +86,7 @@ export function createDepositConfirmedNotification(params: { userAddress: string
   });
 }
 
-export function createWithdrawalConfirmedNotification(params: { userAddress: string; amountRaw: string; txHash: string }) {
+export async function createWithdrawalConfirmedNotification(params: { userAddress: string; amountRaw: string; txHash: string }) {
   const amount = (Number(params.amountRaw) / 1e6).toFixed(2);
   return createNotification({
     userAddress: params.userAddress,
@@ -95,7 +97,7 @@ export function createWithdrawalConfirmedNotification(params: { userAddress: str
   });
 }
 
-export function createReferralEarnedNotification(params: { userAddress: string; amountRaw: string; txHash: string; referredAddress: string }) {
+export async function createReferralEarnedNotification(params: { userAddress: string; amountRaw: string; txHash: string; referredAddress: string }) {
   const amount = (Number(params.amountRaw) / 1e6).toFixed(2);
   return createNotification({
     userAddress: params.userAddress,
@@ -110,21 +112,23 @@ export function createReferralEarnedNotification(params: { userAddress: string; 
   });
 }
 
-export function createThankYouMessageNotification(params: {
+export async function createThankYouMessageNotification(params: {
   userAddress: string;
   creatorUsername: string;
   creatorDisplayName?: string | null;
   creatorOwnerAddress: string;
   totalRaw: string;
   tipCount: number;
+  message?: string | null;
 }) {
   const amount = (Number(params.totalRaw) / 1e6).toFixed(2);
   const creator = params.creatorDisplayName || `@${params.creatorUsername.replace(/^@/, "")}`;
+  const intro = params.message?.trim() || `${creator} sent you a thank you`;
   return createNotification({
     userAddress: params.userAddress,
     type: "message",
     title: "A creator says thanks",
-    body: `${creator} sent you a thank you for ${params.tipCount} support${params.tipCount === 1 ? "" : "s"} totaling $${amount}.`,
+    body: `${intro} for ${params.tipCount} support${params.tipCount === 1 ? "" : "s"} totaling $${amount}.`,
     metadata: {
       messageKind: "creator_thank_you",
       messageKey: `thanks:${params.creatorOwnerAddress.toLowerCase()}:${params.userAddress.toLowerCase()}`,
@@ -137,7 +141,7 @@ export function createThankYouMessageNotification(params: {
   });
 }
 
-export function createLowBalanceNotification(params: { userAddress: string; balanceRaw: string; thresholdUsd: string }) {
+export async function createLowBalanceNotification(params: { userAddress: string; balanceRaw: string; thresholdUsd: string }) {
   const balance = (Number(params.balanceRaw) / 1e6).toFixed(2);
   return createNotification({
     userAddress: params.userAddress,
@@ -148,7 +152,7 @@ export function createLowBalanceNotification(params: { userAddress: string; bala
   });
 }
 
-export function createReceiptReadyNotification(params: {
+export async function createReceiptReadyNotification(params: {
   userAddress: string;
   txHash: string;
   amountRaw: string;
@@ -165,24 +169,85 @@ export function createReceiptReadyNotification(params: {
   });
 }
 
-export function createCreatorClaimedNotifications(params: {
+export async function createNewTipReceivedNotification(params: {
+  creatorOwnerAddress: string;
+  fromAddress: string;
+  amountRaw: string;
+  txHash: string;
+  authorHandle?: string | null;
+}) {
+  const amount = (Number(params.amountRaw) / 1e6).toFixed(2);
+  const creator = params.authorHandle ? `@${params.authorHandle.replace(/^@/, "")}` : "your creator account";
+  return createNotification({
+    userAddress: params.creatorOwnerAddress,
+    type: "new_tip_received",
+    title: "New tip received",
+    body: `$${amount} was sent to ${creator}.`,
+    metadata: {
+      txHash: params.txHash.toLowerCase(),
+      amountRaw: params.amountRaw,
+      fromAddress: params.fromAddress.toLowerCase(),
+      authorHandle: params.authorHandle ?? null,
+    },
+  });
+}
+
+export async function createRepeatSupporterNotification(params: {
+  creatorOwnerAddress: string;
+  supporterAddress: string;
+  tipCount: number;
+  totalRaw: string;
+}) {
+  const amount = (Number(params.totalRaw) / 1e6).toFixed(2);
+  return createNotification({
+    userAddress: params.creatorOwnerAddress,
+    type: "repeat_supporter",
+    title: "Repeat supporter",
+    body: `A supporter has tipped ${params.tipCount} times, totaling $${amount}.`,
+    metadata: {
+      messageKey: `repeat:${params.creatorOwnerAddress.toLowerCase()}:${params.supporterAddress.toLowerCase()}`,
+      supporterAddress: params.supporterAddress.toLowerCase(),
+      tipCount: params.tipCount,
+      totalRaw: params.totalRaw,
+    },
+  });
+}
+
+export async function createClaimWalletActivityNotification(params: {
+  creatorOwnerAddress: string;
+  authorId: string;
+  walletAddress: string;
+  txHash: string;
+}) {
+  return createNotification({
+    userAddress: params.creatorOwnerAddress,
+    type: "claim_wallet_activity",
+    title: "Claim wallet active",
+    body: "Your creator claim wallet has been recorded and can be used for creator earnings.",
+    metadata: {
+      authorId: params.authorId,
+      walletAddress: params.walletAddress.toLowerCase(),
+      txHash: params.txHash.toLowerCase(),
+    },
+  });
+}
+
+export async function createCreatorClaimedNotifications(params: {
   authorId: string;
   username: string;
   ownerAddress: string;
 }) {
-  const db = getDb();
-  const tippers = db
-    .prepare(
-      `SELECT from_address, COUNT(*) as tipCount, COALESCE(SUM(CAST(amount AS REAL)), 0) as total
-       FROM tips
-       WHERE author_id = ? AND LOWER(from_address) <> ?
-       GROUP BY from_address`
-    )
-    .all(params.authorId, params.ownerAddress.toLowerCase()) as Array<{ from_address: string; tipCount: number; total: number }>;
+  const tippers = await query<{ from_address: string; tipCount: string; total: string }>(
+    `SELECT from_address, COUNT(*) as "tipCount", COALESCE(SUM(CAST(amount AS NUMERIC)), 0) as total
+     FROM tips
+     WHERE author_id = ? AND LOWER(from_address) <> ?
+     GROUP BY from_address`,
+    [params.authorId, params.ownerAddress.toLowerCase()]
+  );
 
   for (const tipper of tippers) {
     const amount = (Number(tipper.total) / 1e6).toFixed(2);
-    createNotification({
+    await createNotification({
       userAddress: tipper.from_address,
       type: "creator_claimed_funds",
       title: "Creator claimed",
@@ -191,7 +256,7 @@ export function createCreatorClaimedNotifications(params: {
         authorId: params.authorId,
         username: params.username,
         ownerAddress: params.ownerAddress.toLowerCase(),
-        tipCount: tipper.tipCount,
+        tipCount: Number(tipper.tipCount),
         amountRaw: String(tipper.total),
       },
     });

@@ -1,0 +1,21 @@
+{
+  "name": "@teep/x-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Teep X bot listener - command layer for Mode A tipping",
+  "scripts": {
+    "dev": "ts-node-dev --respawn --transpile-only src/main.ts",
+    "simulate": "ts-node src/dev/simulateCommand.ts",
+    "build": "tsc",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.0",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.4.0"
+  }
+}

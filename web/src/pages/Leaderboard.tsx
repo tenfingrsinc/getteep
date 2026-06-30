@@ -31,8 +31,8 @@ function money(value: string | number | null | undefined) {
   return `$${Number.isFinite(amount) ? amount.toFixed(2) : "0.00"}`;
 }
 
-function shortAddress(address: string) {
-  return `${address.slice(0, 6)}...${address.slice(-4)}`;
+function supporterRankLabel(rank: number) {
+  return `Teep supporter #${rank}`;
 }
 
 function creatorName(creator: CreatorRow) {
@@ -107,7 +107,7 @@ export default function Leaderboard() {
               <p>{leadingCreator ? `${money(leadingCreator.totalReceivedUsd)} received on Teep` : "Leaderboard spots appear as tips are indexed."}</p>
             </div>
           </div>
-          <Link to={leadingCreator?.username ? `/${leadingCreator.username}` : "/leaderboard"} className="btn-secondary">View profile</Link>
+          <Link to={leadingCreator?.username ? `/creator/${leadingCreator.username}` : "/leaderboard"} className="btn-secondary">View profile</Link>
         </aside>
       </section>
 
@@ -153,7 +153,7 @@ export default function Leaderboard() {
             <div className="creator-section-head public-rank-head">
               <div>
                 <h3>{tab === "creators" ? "Most tipped creators" : tab === "supporters" ? "Top supporters" : "Trending creator posts"}</h3>
-                <p>{tab === "creators" ? "Ranked by confirmed support received." : tab === "supporters" ? "Ranked by total support sent." : "A discovery mock using current creator activity until post-level leaderboard data is exposed."}</p>
+                <p>{tab === "creators" ? "Ranked by confirmed support received." : tab === "supporters" ? "Ranked by total support sent." : "Post rankings will use indexed post-level activity as the beta feed expands."}</p>
               </div>
               <button type="button" className="public-rank-info">
                 <span className="material-symbols-outlined" aria-hidden>info</span>
@@ -170,7 +170,7 @@ export default function Leaderboard() {
                   {creators.map((creator, index) => (
                     <div key={creator.authorId} className="public-rank-table-row">
                       <b>{String(creator.rank).padStart(2, "0")}</b>
-                      <Link to={creator.username ? `/${creator.username}` : "/leaderboard"} className="public-rank-person">
+                      <Link to={creator.username ? `/creator/${creator.username}` : "/leaderboard"} className="public-rank-person">
                         <span className="public-avatar">{(creator.username || "CR").slice(0, 2).toUpperCase()}</span>
                         <span><strong>{creatorName(creator)}</strong><small>{creator.displayName || "Verified creator"}</small></span>
                       </Link>
@@ -181,7 +181,7 @@ export default function Leaderboard() {
                         <button type="button" aria-label="Share rank" onClick={() => shareText(`${creatorName(creator)} is #${creator.rank} on Teep with ${money(creator.totalReceivedUsd)} in direct support.`)}>
                           <span className="material-symbols-outlined" aria-hidden>share</span>
                         </button>
-                        <Link to={creator.username ? `/${creator.username}` : "/leaderboard"}>View profile</Link>
+                        <Link to={creator.username ? `/creator/${creator.username}` : "/leaderboard"}>View profile</Link>
                       </span>
                     </div>
                   ))}
@@ -198,18 +198,18 @@ export default function Leaderboard() {
                   {tippers.map((tipper, index) => (
                     <div key={tipper.address} className="public-rank-table-row">
                       <b>{String(tipper.rank).padStart(2, "0")}</b>
-                      <Link to={`/profile/tipper/${tipper.address}`} className="public-rank-person">
-                        <span className="public-avatar">{tipper.address.slice(2, 4).toUpperCase()}</span>
-                        <span><strong>{shortAddress(tipper.address)}</strong><small>Anonymous supporter</small></span>
+                      <Link to={`/tipper/${tipper.address}`} className="public-rank-person">
+                        <span className="public-avatar">TS</span>
+                        <span><strong>{supporterRankLabel(tipper.rank)}</strong><small>Anonymous supporter</small></span>
                       </Link>
                       <strong>{money(tipper.totalSentUsd)}</strong>
                       <span>{Math.max(1, index + 1)}</span>
                       <em>{index === 0 ? "top backer" : "active"}</em>
                       <span className="public-rank-actions">
-                        <button type="button" aria-label="Share supporter rank" onClick={() => shareText(`${shortAddress(tipper.address)} is #${tipper.rank} among Teep supporters with ${money(tipper.totalSentUsd)} backed.`)}>
+                        <button type="button" aria-label="Share supporter rank" onClick={() => shareText(`${supporterRankLabel(tipper.rank)} has backed ${money(tipper.totalSentUsd)} on Teep.`)}>
                           <span className="material-symbols-outlined" aria-hidden>share</span>
                         </button>
-                        <Link to={`/profile/tipper/${tipper.address}`}>View activity</Link>
+                        <Link to={`/tipper/${tipper.address}`}>View activity</Link>
                       </span>
                     </div>
                   ))}
@@ -226,9 +226,9 @@ export default function Leaderboard() {
                   {trendPosts.map((creator, index) => (
                     <div key={creator.authorId} className="public-rank-table-row">
                       <b>{String(index + 1).padStart(2, "0")}</b>
-                      <Link to={creator.username ? `/${creator.username}` : "/leaderboard"} className="public-rank-person">
+                      <Link to={creator.username ? `/creator/${creator.username}` : "/leaderboard"} className="public-rank-person">
                         <span className="public-avatar"><span className="material-symbols-outlined" aria-hidden>tag</span></span>
-                        <span><strong>{creatorName(creator)} has momentum</strong><small>Post-level data mock until leaderboard/posts ships</small></span>
+                        <span><strong>{creatorName(creator)} has momentum</strong><small>Based on current creator activity</small></span>
                       </Link>
                       <strong>{money(creator.totalReceivedUsd)}</strong>
                       <span>{Math.max(1, Math.round(Number(creator.totalReceivedUsd || 0) * 2)).toLocaleString()}</span>
@@ -237,7 +237,7 @@ export default function Leaderboard() {
                         <button type="button" aria-label="Share post rank" onClick={() => shareText(`${creatorName(creator)} has a trending Teep-supported post with ${money(creator.totalReceivedUsd)} received.`)}>
                           <span className="material-symbols-outlined" aria-hidden>share</span>
                         </button>
-                        <Link to={creator.username ? `/${creator.username}` : "/leaderboard"}>View profile</Link>
+                        <Link to={creator.username ? `/creator/${creator.username}` : "/leaderboard"}>View profile</Link>
                       </span>
                     </div>
                   ))}
@@ -260,7 +260,7 @@ export default function Leaderboard() {
               <h3>Start receiving tips</h3>
               <p>Create your profile and give your audience a link worth sharing after every milestone.</p>
               <Link to="/" className="btn-primary">Create profile</Link>
-              {leadingSupporter && <small>Top supporter right now: {shortAddress(leadingSupporter.address)}</small>}
+              {leadingSupporter && <small>Top supporter right now: {supporterRankLabel(leadingSupporter.rank)}</small>}
             </div>
           </aside>
         </section>

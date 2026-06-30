@@ -15,6 +15,7 @@ const allowedPurposes = new Set([
   "activity-write",
   "supporter-thank",
   "withdrawal",
+  "x-tipping-link",
 ]);
 
 type ChallengeRecord = {
@@ -119,28 +120,11 @@ async function verifySignature(address: string, message: string, signature: stri
 
   try {
     const client = createBackendPublicClient();
-    const contractAddress = address as Address;
-    const code = await client.getCode({ address: contractAddress });
-    if (!code || code === "0x") return false;
-
-    const magicValue = await client.readContract({
-      address: contractAddress,
-      abi: [
-        {
-          name: "isValidSignature",
-          type: "function",
-          stateMutability: "view",
-          inputs: [
-            { name: "hash", type: "bytes32" },
-            { name: "signature", type: "bytes" },
-          ],
-          outputs: [{ name: "magicValue", type: "bytes4" }],
-        },
-      ],
-      functionName: "isValidSignature",
-      args: [ethers.hashMessage(message) as Hex, signature as Hex],
+    return await client.verifyMessage({
+      address: address as Address,
+      message,
+      signature: signature as Hex,
     });
-    return String(magicValue).toLowerCase() === "0x1626ba7e";
   } catch {
     return false;
   }

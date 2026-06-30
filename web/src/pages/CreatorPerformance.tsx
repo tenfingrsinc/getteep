@@ -132,19 +132,30 @@ function postLabel(post: PerformanceData["topPosts"][number]) {
   return "Direct support";
 }
 
+function compactExcerpt(value: string | null | undefined, fallback: string) {
+  const text = (value || fallback).replace(/\s+/g, " ").trim();
+  return text.length > 82 ? `${text.slice(0, 79)}...` : text;
+}
+
 function openXIntent(text: string) {
   window.open(`https://x.com/intent/tweet?text=${encodeURIComponent(text)}`, "_blank", "noopener,noreferrer");
 }
 
-function buildThanksCopy(supporter: Supporter) {
-  const handle = supporter.socialXHandle ? `@${supporter.socialXHandle}` : supporter.displayName;
-  return `Thank you ${handle} for supporting my work on Teep ${supporter.tipCount} time${supporter.tipCount === 1 ? "" : "s"} with ${money(supporter.totalUsd)}.\n\nCreator support should feel direct.`;
-}
+type EngagementPrefs = {
+  defaultThankYouMessage: string;
+  autoSuggestXThankYou: boolean;
+  repeatSupporterReminders: boolean;
+};
 
-function supporterEmptyText(tab: SupporterTab) {
-  if (tab === "repeat") return "Repeat supporters will appear after someone tips more than once in this period.";
-  if (tab === "recent") return "Recent supporters will appear after tips are indexed.";
-  return "Supporters will appear here after tips are indexed.";
+const DEFAULT_ENGAGEMENT_PREFS: EngagementPrefs = {
+  defaultThankYouMessage: "Thank you for supporting my work on Teep.",
+  autoSuggestXThankYou: true,
+  repeatSupporterReminders: true,
+};
+
+function buildThanksCopy(supporter: Supporter, message: string) {
+  const handle = supporter.socialXHandle ? `@${supporter.socialXHandle}` : supporter.displayName;
+  return `${message} ${handle} supported ${supporter.tipCount} time${supporter.tipCount === 1 ? "" : "s"} with ${money(supporter.totalUsd)}.`;
 }
 
 export default function CreatorPerformance() {
@@ -158,10 +169,10 @@ export default function CreatorPerformance() {
   const [error, setError] = useState("");
   const [overlayOpen, setOverlayOpen] = useState(false);
   const [activeSupporter, setActiveSupporter] = useState<Supporter | null>(null);
-  const [supporterTab, setSupporterTab] = useState<SupporterTab>("top");
   const [overlaySupporterTab, setOverlaySupporterTab] = useState<SupporterTab>("repeat");
   const [thanksStatus, setThanksStatus] = useState("");
   const [postPreviews, setPostPreviews] = useState<Record<string, PostPreview>>({});
+  const [engagementPrefs, setEngagementPrefs] = useState<EngagementPrefs>(DEFAULT_ENGAGEMENT_PREFS);
 
   useEffect(() => {
     if (!address) {
@@ -217,6 +228,26 @@ export default function CreatorPerformance() {
   }, [claim, period]);
 
   useEffect(() => {
+    if (!address) return;
+    let cancelled = false;
+    fetch(`${API_BASE}/api/v1/wallet/${address}/settings`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((payload) => {
+        if (cancelled) return;
+        setEngagementPrefs({
+          ...DEFAULT_ENGAGEMENT_PREFS,
+          ...(payload?.engagement || {}),
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setEngagementPrefs(DEFAULT_ENGAGEMENT_PREFS);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [address]);
+
+  useEffect(() => {
     if (!data?.topPosts.length) {
       setPostPreviews({});
       return;
@@ -268,9 +299,9 @@ export default function CreatorPerformance() {
   }, [maxDaily]);
 
   const supportersToThank = useMemo(() => {
-    if (!data) return [];
+    if (!data || !engagementPrefs.repeatSupporterReminders) return [];
     return data.supporters.top;
-  }, [data]);
+  }, [data, engagementPrefs.repeatSupporterReminders]);
 
   const getSupportersForTab = useCallback((tab: SupporterTab) => {
     if (!data) return [];
@@ -279,10 +310,13 @@ export default function CreatorPerformance() {
     return data.supporters.top || [];
   }, [data]);
 
-  const visibleSupporters = getSupportersForTab(supporterTab);
   const overlaySupporters = getSupportersForTab(overlaySupporterTab);
   const selectedRepeatSupporter = activeSupporter || overlaySupporters[0] || data?.supporters.repeat[0] || data?.supporters.top.find((supporter) => supporter.isRepeat) || data?.supporters.top[0] || null;
   const latestDecision = data?.decisions.find((decision) => decision.type === "post_to_x");
+  const topPost = data?.topPosts[0] || null;
+  const totalSupportUsd = Number(data?.summary.totalUsd || 0);
+  const topPostShare = topPost && totalSupportUsd > 0 ? Math.round((Number(topPost.totalUsd || 0) / totalSupportUsd) * 100) : 0;
+  const directShare = totalSupportUsd > 0 ? Math.round((Number(data?.supportMix.directTipsUsd || 0) / totalSupportUsd) * 100) : 0;
 
   const requestWalletProof = useCallback(async () => {
     if (!address || !smartWalletClient?.account) throw new Error("Connect your creator account first.");
@@ -301,11 +335,11 @@ export default function CreatorPerformance() {
   }, [address, smartWalletClient]);
 
   const openSupporterOverlay = useCallback((supporter?: Supporter | null) => {
-    setOverlaySupporterTab(supporter?.isRepeat ? "repeat" : supporterTab);
+    setOverlaySupporterTab(supporter?.isRepeat ? "repeat" : "top");
     setActiveSupporter(supporter || null);
     setThanksStatus("");
     setOverlayOpen(true);
-  }, [supporterTab]);
+  }, []);
 
   const selectOverlaySupporterTab = useCallback((tab: SupporterTab) => {
     const nextSupporters = getSupportersForTab(tab);
@@ -324,8 +358,12 @@ export default function CreatorPerformance() {
   }, [data, latestDecision]);
 
   const handleSayThanksOnX = useCallback((supporter: Supporter) => {
-    openXIntent(buildThanksCopy(supporter));
-  }, []);
+    if (!engagementPrefs.autoSuggestXThankYou) {
+      window.open("https://x.com/intent/tweet", "_blank", "noopener,noreferrer");
+      return;
+    }
+    openXIntent(buildThanksCopy(supporter, engagementPrefs.defaultThankYouMessage));
+  }, [engagementPrefs]);
 
   const handleSayThanksWithTeep = useCallback(async (supporter: Supporter) => {
     if (!claim || !address) return;
@@ -348,23 +386,18 @@ export default function CreatorPerformance() {
   return (
     <CreatorDashboardShell title="Performance">
       <main className="dashboard-body-inner creator-performance">
-        <section className="dashboard-page-heading creator-performance-heading">
-          <div>
-            <div className="dashboard-metric-label">Performance</div>
-            <h1>Your support, post by post.</h1>
-            <p>See which posts people tipped, who keeps supporting you, and what is worth sharing again.</p>
-          </div>
+        <section className="creator-performance-toolbar">
           <div className="creator-performance-controls" aria-label="Performance filters">
-            <div className="creator-tabs" role="tablist" aria-label="Period">
+            <div className="creator-tabs" role="group" aria-label="Performance period">
               {(["7d", "30d", "90d", "all"] as Period[]).map((value) => (
-                <button key={value} type="button" className={period === value ? "is-active" : ""} onClick={() => setPeriod(value)}>
+                <button key={value} type="button" className={period === value ? "is-active" : ""} aria-pressed={period === value} onClick={() => setPeriod(value)}>
                   {value.toUpperCase()}
                 </button>
               ))}
             </div>
-            <button type="button" className="btn-secondary" onClick={() => window.print()}>
+            <button type="button" className="btn-secondary creator-performance-export" onClick={() => window.print()} aria-label="Export performance" title="Export performance">
               <span className="material-symbols-outlined" aria-hidden>download</span>
-              Export
+              <span className="creator-performance-export-label">Export</span>
             </button>
           </div>
         </section>
@@ -402,47 +435,6 @@ export default function CreatorPerformance() {
 
             <section className="creator-performance-layout">
               <div className="creator-performance-main">
-                <section className="dashboard-card creator-performance-content-card">
-                  <div className="creator-section-head">
-                    <div>
-                      <h3>Content performance</h3>
-                      <p>Ranked by confirmed support in the selected period.</p>
-                    </div>
-                    <span className="creator-performance-note">Showing top 7</span>
-                  </div>
-                  <div className="creator-performance-posts">
-                    {data.topPosts.length === 0 ? (
-                      <div className="creator-performance-empty-inline">Supported posts will appear here after tips are indexed.</div>
-                    ) : data.topPosts.slice(0, 7).map((post) => {
-                      const preview = postPreviews[post.contentId];
-                      return (
-                      <article className="creator-performance-post" key={post.contentId}>
-                        <div className="creator-post-thumb">
-                          {preview?.thumbnailUrl ? (
-                            <img src={preview.thumbnailUrl} alt="" />
-                          ) : (
-                            <span className="material-symbols-outlined" aria-hidden>{post.hasOembedCandidate ? "tag" : "hide_image"}</span>
-                          )}
-                        </div>
-                        <div className="creator-performance-post-body">
-                          <strong>{preview?.excerpt || postLabel(post)}</strong>
-                          {preview?.authorName && <small>{preview.authorName}</small>}
-                          <span>{timeAgo(post.lastTipAt)} - Receipt ready {post.hasOembedCandidate ? "" : "- No thumbnail available"}</span>
-                        </div>
-                        <div className="creator-performance-post-money">
-                          <b>{money(post.totalUsd)}</b>
-                          <span>{post.tipCount} tips - {post.uniqueSupporterCount} supporters</span>
-                        </div>
-                        <div className="creator-row-actions">
-                          {post.xUrl && <a href={post.xUrl} target="_blank" rel="noreferrer">Open post</a>}
-                          <button type="button" onClick={() => openXIntent(`This post received ${money(post.totalUsd)} in support on Teep.\n\n${post.xUrl || ""}`)}>Share to X</button>
-                        </div>
-                      </article>
-                      );
-                    })}
-                  </div>
-                </section>
-
                 <section className="dashboard-card creator-trend-card">
                   <div className="creator-section-head">
                     <div>
@@ -460,12 +452,19 @@ export default function CreatorPerformance() {
                     <div className="creator-trend-axis" aria-hidden>
                       {dailyAxisTicks.map((tick) => <span key={tick}>{money(tick)}</span>)}
                     </div>
-                    <div className={`creator-trend-chart ${data.daily.length > 45 ? "creator-trend-chart--dense" : ""}`}>
+                    <div
+                      className={`creator-trend-chart ${data.daily.length > 45 ? "creator-trend-chart--dense" : ""}`}
+                      style={data.daily.length > 45 ? {
+                        gridTemplateColumns: `repeat(${data.daily.length}, minmax(5px, 1fr))`,
+                      } : undefined}
+                      role="img"
+                      aria-label={`Support momentum for ${period.toUpperCase()}. Total ${money(totalDaily)}. Best day ${money(maxDaily)}.`}
+                    >
                       {data.daily.map((day) => {
                         const value = Number(day.totalUsd || 0);
                         const height = maxDaily > 0 ? Math.max(3, Math.round((value / maxDaily) * 100)) : 3;
                         return (
-                          <div className="creator-trend-bar-wrap" key={day.date} title={`${day.date}: ${money(day.totalUsd)}`}>
+                          <div className="creator-trend-bar-wrap" key={day.date} title={`${day.date}: ${money(day.totalUsd)}`} aria-hidden>
                             <div className={day.directTipCount > day.postTipCount ? "creator-trend-bar is-direct" : "creator-trend-bar"} style={{ height: `${height}%` }} />
                           </div>
                         );
@@ -479,49 +478,126 @@ export default function CreatorPerformance() {
                   </div>
                 </section>
 
+                <section className="creator-performance-insights" aria-label="Performance insights">
+                  <article className="dashboard-card creator-performance-insight">
+                    <span>1</span>
+                    <div>
+                      <strong>{topPostShare > 0 ? "One post is carrying the period" : "Post support is still forming"}</strong>
+                      <p>{topPostShare > 0 ? `Your top post produced ${topPostShare}% of support. Consider a follow-up while attention is still warm.` : "Once posts receive support, Teep will show which one is pulling the most weight."}</p>
+                    </div>
+                  </article>
+                  <article className="dashboard-card creator-performance-insight is-green">
+                    <span>2</span>
+                    <div>
+                      <strong>{data.summary.repeatSupporterCount > 0 ? "Repeat supporters are forming" : "Repeat support is waiting to emerge"}</strong>
+                      <p>{data.summary.repeatSupporterCount > 0 ? `${data.summary.repeatSupporterCount} supporter${data.summary.repeatSupporterCount === 1 ? "" : "s"} returned this period. Thank-you prompts should prioritize these people first.` : "Repeat supporters appear after someone backs you more than once in this period."}</p>
+                    </div>
+                  </article>
+                  <article className="dashboard-card creator-performance-insight is-cyan">
+                    <span>3</span>
+                    <div>
+                      <strong>{directShare > 0 ? "Direct support is rising" : "Direct support has not started"}</strong>
+                      <p>{directShare > 0 ? `Direct tips reached ${directShare}% of earnings, which suggests your public profile is beginning to work.` : "Direct tips from your profile will appear here once supporters use that path."}</p>
+                    </div>
+                  </article>
+                </section>
+
+                <section className="dashboard-card creator-performance-content-card">
+                  <div className="creator-section-head">
+                    <div>
+                      <h3>Posts driving support</h3>
+                      <p>Ranked by confirmed support in the selected period.</p>
+                    </div>
+                    <span className="creator-performance-note">Showing top 5</span>
+                  </div>
+                  <div className="creator-performance-posts">
+                    {data.topPosts.length === 0 ? (
+                      <div className="creator-performance-empty-inline">Supported posts will appear here after tips are indexed.</div>
+                    ) : data.topPosts.slice(0, 5).map((post) => {
+                      const preview = postPreviews[post.contentId];
+                      return (
+                        <article className="creator-performance-post" key={post.contentId}>
+                          <div className="creator-post-thumb">
+                            {preview?.thumbnailUrl ? (
+                              <img src={preview.thumbnailUrl} alt="" />
+                            ) : (
+                              <span className="material-symbols-outlined" aria-hidden>{post.hasOembedCandidate ? "tag" : "hide_image"}</span>
+                            )}
+                          </div>
+                          <div className="creator-performance-post-body">
+                            <strong>{compactExcerpt(preview?.excerpt, postLabel(post))}</strong>
+                            {preview?.authorName && <small>{preview.authorName}</small>}
+                            <span>{timeAgo(post.lastTipAt)} - Receipt ready{post.hasOembedCandidate ? "" : " - No thumbnail available"}</span>
+                          </div>
+                          <div className="creator-performance-post-meta">
+                            <div className="creator-performance-post-money">
+                              <b>{money(post.totalUsd)}</b>
+                              <span>{post.tipCount} tips - {post.uniqueSupporterCount} supporters</span>
+                            </div>
+                            <div className="creator-row-actions">
+                              {post.xUrl && <a href={post.xUrl} target="_blank" rel="noreferrer">Open post</a>}
+                              <button type="button" onClick={() => openXIntent(`This post received ${money(post.totalUsd)} in support on Teep.\n\n${post.xUrl || ""}`)}>Share to X</button>
+                            </div>
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                </section>
               </div>
 
               <aside className="creator-performance-side">
-                <section className="dashboard-card creator-performance-decision">
+                <section className="dashboard-card creator-performance-behavior-card">
                   <div className="creator-section-head">
                     <div>
-                      <h3>Creator decisions</h3>
-                      <p>Actions backed by current support activity.</p>
+                      <h3>Supporter pulse</h3>
+                      <p>Who is returning and driving momentum.</p>
                     </div>
                   </div>
-                  {latestDecision ? (
-                    <div className="creator-performance-callout">
-                      <span className="material-symbols-outlined" aria-hidden>auto_awesome</span>
-                      <strong>{latestDecision.title}</strong>
-                      <p>{latestDecision.body}</p>
-                      <button type="button" className="btn-primary" onClick={handlePostTopToX}>Share to X</button>
+                  <div className="creator-performance-pulse-list">
+                    <div className="creator-performance-pulse-row">
+                      <span className="material-symbols-outlined" aria-hidden>restart_alt</span>
+                      <div><strong>Returned to support</strong><small>People who tipped again this period</small></div>
+                      <b>{data.summary.repeatSupporterCount}</b>
                     </div>
-                  ) : (
-                    <div className="creator-performance-empty-inline">Share prompts appear after a post receives support.</div>
-                  )}
-                  {supportersToThank.length > 0 && (
-                    <button type="button" className="creator-performance-secondary-callout" onClick={() => openSupporterOverlay(selectedRepeatSupporter)}>
-                      <span className="material-symbols-outlined" aria-hidden>favorite</span>
-                      <strong>Thank supporters</strong>
-                      <small>
-                        {supportersToThank.length} supporter{supportersToThank.length === 1 ? "" : "s"} backed you in this period. Open the list and thank them without turning this into a manual chore.
-                      </small>
-                      <em>View supporters</em>
-                    </button>
-                  )}
+                    <div className="creator-performance-pulse-row">
+                      <span className="material-symbols-outlined" aria-hidden>view_carousel</span>
+                      <div><strong>Backed multiple posts</strong><small>Support across more than one post</small></div>
+                      <b>{data.supporters.repeat.filter((supporter) => supporter.tipCount > 1).length}</b>
+                    </div>
+                    <div className="creator-performance-pulse-row">
+                      <span className="material-symbols-outlined" aria-hidden>person_add</span>
+                      <div><strong>Active supporters</strong><small>Unique supporters this period</small></div>
+                      <b>{data.summary.uniqueSupporterCount}</b>
+                    </div>
+                  </div>
+                  <button type="button" className="creator-performance-supporter-link" onClick={() => openSupporterOverlay(selectedRepeatSupporter)}>
+                    View supporter details
+                  </button>
                 </section>
+
+                {supportersToThank.length > 0 && (
+                  <button type="button" className="dashboard-card creator-performance-thank-card" onClick={() => openSupporterOverlay(selectedRepeatSupporter)}>
+                    <span className="material-symbols-outlined" aria-hidden>favorite</span>
+                    <div>
+                      <strong>Thank-you queue</strong>
+                      <small>{supportersToThank.length} supporter{supportersToThank.length === 1 ? "" : "s"} backed you in this period. Prioritize the people most likely to return.</small>
+                    </div>
+                    <em>Open</em>
+                  </button>
+                )}
 
                 <section className="dashboard-card">
                   <div className="creator-section-head">
                     <div>
-                      <h3>Latest signals</h3>
+                      <h3>What changed</h3>
                       <p>Recent support events worth noticing.</p>
                     </div>
                   </div>
                   <div className="creator-side-stack">
                     {data.latestSignals.length === 0 ? (
                       <div className="creator-performance-empty-inline">Signals appear when new tips are indexed.</div>
-                    ) : data.latestSignals.map((signal) => (
+                    ) : data.latestSignals.slice(0, 3).map((signal) => (
                       <div className="creator-performance-signal" key={`${signal.txHash}-${signal.contentId}`}>
                         <div className="creator-readiness-icon is-complete">
                           <span className="material-symbols-outlined" aria-hidden>{signal.type === "direct_tip_received" ? "trending_up" : "bolt"}</span>
@@ -539,28 +615,23 @@ export default function CreatorPerformance() {
                   </div>
                 </section>
 
-                <section className="dashboard-card creator-performance-behavior-card">
-                  <div className="creator-supporter-panel-tabs" aria-label="Supporter views">
-                    {(["top", "recent", "repeat"] as SupporterTab[]).map((tab) => (
-                      <button key={tab} type="button" className={supporterTab === tab ? "is-active" : ""} onClick={() => setSupporterTab(tab)}>
-                        {tab[0].toUpperCase() + tab.slice(1)}
-                      </button>
-                    ))}
+                <section className="dashboard-card creator-performance-decision">
+                  <div className="creator-section-head">
+                    <div>
+                      <h3>Next action</h3>
+                      <p>Actions backed by current support activity.</p>
+                    </div>
                   </div>
-                  <div className="creator-performance-behavior-list">
-                    {visibleSupporters.length === 0 ? (
-                      <div className="creator-performance-empty-inline">{supporterEmptyText(supporterTab)}</div>
-                    ) : visibleSupporters.slice(0, 3).map((supporter) => (
-                      <button type="button" className="creator-performance-supporter-row" key={supporter.address} onClick={() => openSupporterOverlay(supporter)}>
-                        <div className="creator-supporter-avatar">{supporter.displayName.slice(0, 2).replace("@", "").toUpperCase()}</div>
-                        <div>
-                          <strong>{supporter.displayName}</strong>
-                          <span>{supporterTab === "recent" ? `${timeAgo(supporter.lastTipAt)} latest tip` : `${supporter.tipCount} tips total`}</span>
-                        </div>
-                        <b>{money(supporter.totalUsd)}</b>
-                      </button>
-                    ))}
-                  </div>
+                  {latestDecision ? (
+                    <div className="creator-performance-callout">
+                      <span className="material-symbols-outlined" aria-hidden>auto_awesome</span>
+                      <strong>{latestDecision.title}</strong>
+                      <p>{latestDecision.body}</p>
+                      <button type="button" className="btn-primary" onClick={handlePostTopToX}>Share to X</button>
+                    </div>
+                  ) : (
+                    <div className="creator-performance-empty-inline">Share prompts appear after a post receives support.</div>
+                  )}
                 </section>
               </aside>
             </section>
@@ -609,7 +680,7 @@ export default function CreatorPerformance() {
                 <div className="creator-supporter-panel-avatar">{selectedRepeatSupporter.displayName.slice(0, 2).replace("@", "").toUpperCase()}</div>
                 <div>
                   <h3>{selectedRepeatSupporter.displayName}</h3>
-                  <p>{selectedRepeatSupporter.socialXHandle ? `@${selectedRepeatSupporter.socialXHandle}` : "No social handle saved"} - {selectedRepeatSupporter.truncatedAddress}</p>
+                  <p>{selectedRepeatSupporter.socialXHandle ? `@${selectedRepeatSupporter.socialXHandle}` : "No social handle saved"}</p>
                 </div>
                 <div className="creator-supporter-panel-stats">
                   <div><span>Total amount</span><b>{money(selectedRepeatSupporter.totalUsd)}</b></div>

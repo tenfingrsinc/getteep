@@ -9,10 +9,22 @@
 
 import "../utils/process-polyfill";
 
-import { createPublicClient, http, encodeFunctionData, parseUnits } from "viem";
+import { createPublicClient, http, encodeFunctionData, isAddress } from "viem";
 import { CONFIG, TIP_CONTRACT_ABI, USDC_ABI, FACTORY_ABI } from "../utils/config";
+import { parseTipAmount } from "../utils/tipAmount";
+import {
+  createTipIntentKey,
+  getTipIntent,
+  listTipIntents,
+  pruneTipIntents,
+  saveTipIntent,
+  tipIntentComposite,
+  TipIntentRecord,
+  updateTipIntent,
+} from "../utils/tipIntent";
 
 const DEBUG = typeof process !== "undefined" && (process.env?.DEBUG_TEEP === "true" || process.env?.DEBUG_TIPCOIN === "true");
+const WALLET_LAB_ENABLED = process.env.ENABLE_WALLET_LAB === "true";
 function bgLog(tag: string, msg: string, data?: unknown) {
   if (DEBUG) console.log(`[Teep:BG:${tag}]`, msg, data ?? "");
 }
@@ -83,7 +95,7 @@ type ActiveTipRequest = {
 };
 
 const activeTipRequests = new Map<string, ActiveTipRequest>();
-const TIP_REQUEST_TTL_MS = 2 * 60 * 1000;
+const ACTIVE_TIP_TTL_MS = 30 * 60 * 1000;
 
 function newRequestId() {
   return typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -91,15 +103,60 @@ function newRequestId() {
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function tipInstanceKey(params: { from: string; contentId: string; amount: number }) {
-  return `${params.from.toLowerCase()}:${params.contentId.toLowerCase()}:${params.amount}`;
+async function reconcileSubmittedTipIntent(record: TipIntentRecord) {
+  if (record.status !== "submitted" || !record.txHash) return record;
+  try {
+    const receipt = await publicClient.getTransactionReceipt({
+      hash: record.txHash as `0x${string}`,
+    });
+    const updated = await updateTipIntent(record.intentKey, record.attemptId, {
+      status: receipt.status === "success" ? "confirmed" : "failed",
+      error: receipt.status === "success" ? undefined : "Transaction reverted",
+    }) || record;
+    if (updated.originTabId) {
+      await chrome.tabs.sendMessage(updated.originTabId, {
+        type: "TIP_TX_RESULT",
+        payload: {
+          requestId: updated.attemptId,
+          contentId: updated.contentId,
+          success: updated.status === "confirmed",
+          pending: false,
+          txHash: updated.txHash,
+          amount: updated.rawAmount,
+          amountIsRaw: true,
+          error: updated.status === "failed" ? updated.error : undefined,
+        },
+      }).catch(() => {});
+    }
+    return updated;
+  } catch (err: any) {
+    const message = String(err?.shortMessage || err?.message || "").toLowerCase();
+    if (!message.includes("not found") && !message.includes("could not be found")) {
+      bgLog("TipIntent", "Receipt reconciliation deferred", {
+        intentKey: record.intentKey,
+        txHash: record.txHash,
+        error: err?.message,
+      });
+    }
+    return record;
+  }
 }
 
-function pruneActiveTipRequests() {
-  const cutoff = Date.now() - TIP_REQUEST_TTL_MS;
-  for (const [key, active] of activeTipRequests.entries()) {
-    if (active.startedAt < cutoff) activeTipRequests.delete(key);
-  }
+async function maintainTipIntents() {
+  await pruneTipIntents();
+  const submitted = (await listTipIntents()).filter(
+    (record) => record.status === "submitted" && record.txHash
+  );
+  await Promise.allSettled(submitted.map(reconcileSubmittedTipIntent));
+}
+
+let lastIntentMaintenanceAt = 0;
+function maintainTipIntentsSoon() {
+  if (Date.now() - lastIntentMaintenanceAt < 15_000) return;
+  lastIntentMaintenanceAt = Date.now();
+  void maintainTipIntents().catch((err) => {
+    bgLog("TipIntent", "Deferred maintenance failed", err?.message ?? err);
+  });
 }
 
 chrome.storage.local.get(["walletState"], (result) => {
@@ -107,6 +164,12 @@ chrome.storage.local.get(["walletState"], (result) => {
     walletState = result.walletState;
     bgLog("Wallet", "Wallet loaded", { address: walletState.address });
   }
+});
+void chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" }).catch((err) => {
+  bgLog("Storage", "Could not restrict local storage access", err?.message ?? err);
+});
+void maintainTipIntents().catch((err) => {
+  bgLog("TipIntent", "Startup maintenance failed", err?.message ?? err);
 });
 
 // --- OAuth callback watcher ---
@@ -127,10 +190,158 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 });
 
 // --- Message handler ---
+type RuntimeMessage = {
+  type?: unknown;
+  payload?: unknown;
+};
+
+const CONTENT_MESSAGE_TYPES = new Set([
+  "GET_CURRENT_USER_USDC_BALANCE",
+  "GET_CURRENT_USER_TIPPER_SETTINGS",
+]);
+
+const EXTENSION_MESSAGE_TYPES = new Set([
+  ...(WALLET_LAB_ENABLED ? ["TIP_REQUEST_LAB"] : []),
+  "TIP_TX_COMPLETE",
+  "WALLET_CONNECTED",
+  "WALLET_DISCONNECTED",
+  "GET_WALLET_STATE",
+  "GET_USDC_BALANCE",
+  "COMPUTE_CLAIM_WALLET",
+  "IS_CLAIM_WALLET_DEPLOYED",
+  "GET_CLAIM_WALLET_BALANCE",
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function isExtensionPageSender(sender: chrome.runtime.MessageSender) {
+  return sender.id === chrome.runtime.id &&
+    typeof sender.url === "string" &&
+    sender.url.startsWith(chrome.runtime.getURL(""));
+}
+
+function isSupportedContentSender(sender: chrome.runtime.MessageSender) {
+  if (sender.id !== chrome.runtime.id || !sender.tab?.id || !sender.url) return false;
+  try {
+    const url = new URL(sender.url);
+    return url.protocol === "https:" && (url.hostname === "x.com" || url.hostname === "twitter.com");
+  } catch {
+    return false;
+  }
+}
+
+function isHex32(value: unknown): value is string {
+  return typeof value === "string" && /^0x[0-9a-fA-F]{64}$/.test(value);
+}
+
+function isXHandle(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9_]{1,15}$/.test(value.replace(/^@/, ""));
+}
+
+function isTipRequestPayload(value: unknown): value is {
+  contentId: string;
+  authorId?: string;
+  amount: string;
+  tweetId: string;
+  authorHandle: string;
+} {
+  if (!isRecord(value)) return false;
+  if (
+    !isHex32(value.contentId) ||
+    typeof value.amount !== "string" ||
+    !/^\d{1,24}$/.test(String(value.tweetId || "")) ||
+    !isXHandle(value.authorHandle)
+  ) {
+    return false;
+  }
+  if (value.authorId !== undefined && !/^\d+$/.test(String(value.authorId))) return false;
+  try {
+    parseTipAmount(value.amount);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isTipCompletionPayload(value: unknown): value is {
+  success: boolean;
+  pending?: boolean;
+  intentStatus: "submitted" | "confirmed" | "failed" | "cancelled";
+  txHash?: string;
+  requestId: string;
+  intentKey: string;
+  error?: string;
+} {
+  if (!isRecord(value)) return false;
+  const statuses = new Set(["submitted", "confirmed", "failed", "cancelled"]);
+  return typeof value.success === "boolean" &&
+    (value.pending === undefined || typeof value.pending === "boolean") &&
+    typeof value.intentStatus === "string" &&
+    statuses.has(value.intentStatus) &&
+    typeof value.requestId === "string" &&
+    /^[a-zA-Z0-9-]{8,128}$/.test(value.requestId) &&
+    typeof value.intentKey === "string" &&
+    /^[0-9a-f]{64}$/.test(value.intentKey) &&
+    (value.txHash === undefined || (typeof value.txHash === "string" && /^0x[0-9a-fA-F]{64}$/.test(value.txHash))) &&
+    (value.error === undefined || (typeof value.error === "string" && value.error.length <= 300));
+}
+
+function validateRuntimeMessage(message: RuntimeMessage, sender: chrome.runtime.MessageSender): string | null {
+  if (!message || typeof message.type !== "string") return "Invalid extension request";
+  if (message.type === "TIP_REQUEST") {
+    if (!isSupportedContentSender(sender) && !isExtensionPageSender(sender)) {
+      return "Untrusted tip request";
+    }
+  } else if (CONTENT_MESSAGE_TYPES.has(message.type)) {
+    if (!isSupportedContentSender(sender)) return "Untrusted page request";
+  } else if (EXTENSION_MESSAGE_TYPES.has(message.type)) {
+    if (!isExtensionPageSender(sender)) return "Untrusted extension request";
+  } else {
+    return "Unsupported extension request";
+  }
+
+  if (message.type === "TIP_REQUEST" || (WALLET_LAB_ENABLED && message.type === "TIP_REQUEST_LAB")) {
+    return isTipRequestPayload(message.payload) ? null : "Invalid tip details";
+  }
+  if (message.type === "TIP_TX_COMPLETE") {
+    return isTipCompletionPayload(message.payload) ? null : "Invalid transaction result";
+  }
+  if (message.type === "WALLET_CONNECTED") {
+    return isRecord(message.payload) && typeof message.payload.address === "string" && isAddress(message.payload.address)
+      ? null
+      : "Invalid wallet address";
+  }
+  if (message.type === "GET_USDC_BALANCE" || message.type === "GET_CLAIM_WALLET_BALANCE") {
+    return isRecord(message.payload) && typeof message.payload.address === "string" && isAddress(message.payload.address)
+      ? null
+      : "Invalid wallet address";
+  }
+  if (message.type === "COMPUTE_CLAIM_WALLET" || message.type === "IS_CLAIM_WALLET_DEPLOYED") {
+    return isRecord(message.payload) && /^\d+$/.test(String(message.payload.authorIdHash || ""))
+      ? null
+      : "Invalid creator identity";
+  }
+  return null;
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  const validationError = validateRuntimeMessage(message, sender);
+  if (validationError) {
+    bgLog("Message", validationError, { type: message?.type, senderUrl: sender.url });
+    sendResponse({ pending: false, success: false, error: validationError });
+    return false;
+  }
+  maintainTipIntentsSoon();
+
   if (message.type === "TIP_REQUEST") {
     bgLog("Tip", "TIP_REQUEST received", { payload: message.payload, walletState });
-    handleTipRequest(message.payload, { signerPage: "popup.html?sign=tip", source: "popup-signer" })
+    handleTipRequest(message.payload, {
+      signerPage: "popup.html?sign=tip",
+      source: "popup-signer",
+      originTabId: sender.tab?.id,
+    })
       .then((result) => {
         bgLog("Tip", "handleTipRequest result", result);
         sendResponse(result);
@@ -142,9 +353,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  if (message.type === "TIP_REQUEST_LAB") {
+  if (WALLET_LAB_ENABLED && message.type === "TIP_REQUEST_LAB") {
     bgLog("TipLab", "TIP_REQUEST_LAB received", { payload: message.payload, walletState });
-    handleTipRequest(message.payload, { signerPage: "wallet-lab-sign.html", source: "wallet-lab-signer" })
+    handleTipRequest(message.payload, { signerPage: "wallet-lab-sign.html", source: "diagnostic-signer" })
       .then((result) => {
         bgLog("Tip", "handleTipRequest result", result);
         sendResponse(result);
@@ -157,12 +368,43 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "TIP_TX_COMPLETE") {
-    // Signing window reports completion — relay to content scripts via storage
-    // (already stored by the signing window itself)
-    const requestKey = message.payload?.requestKey as string | undefined;
-    if (requestKey) activeTipRequests.delete(requestKey);
-    bgLog("Tip", "TIP_TX_COMPLETE received", { success: message.payload?.success, requestKey });
-    sendResponse({ ok: true });
+    const intentKey = message.payload?.intentKey as string | undefined;
+    const attemptId = message.payload?.requestId as string | undefined;
+    const txHash = message.payload?.txHash as string | undefined;
+    if (!intentKey || !attemptId) {
+      sendResponse({ ok: false, error: "Missing tip intent identity" });
+      return false;
+    }
+
+    const status = message.payload.intentStatus;
+    updateTipIntent(intentKey, attemptId, {
+      status,
+      txHash,
+      error: status === "failed" || status === "cancelled"
+        ? message.payload?.error || "Tip failed"
+        : undefined,
+    })
+      .then(async (record) => {
+        activeTipRequests.delete(intentKey);
+        if (record?.originTabId) {
+          await chrome.tabs.sendMessage(record.originTabId, {
+            type: "TIP_TX_RESULT",
+            payload: {
+              requestId: attemptId,
+              contentId: record.contentId,
+              success: Boolean(message.payload?.success),
+              pending: Boolean(message.payload?.pending),
+              txHash,
+              amount: record.rawAmount,
+              amountIsRaw: true,
+              error: message.payload?.error,
+            },
+          }).catch(() => {});
+        }
+        bgLog("Tip", "TIP_TX_COMPLETE received", { status, intentKey, attemptId, txHash });
+        sendResponse({ ok: true });
+      })
+      .catch((err) => sendResponse({ ok: false, error: err?.message || "Could not update tip intent" }));
     return true;
   }
 
@@ -242,12 +484,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function handleTipRequest(payload: {
   contentId: string;
   authorId?: string;
-  amount: number;
+  amount: string;
   tweetId: string;
   authorHandle: string;
 }, options: {
   signerPage: string;
-  source: "popup-signer" | "wallet-lab-signer";
+  source: "popup-signer" | "diagnostic-signer";
+  originTabId?: number;
 }): Promise<{
   pending: boolean;
   error?: string;
@@ -259,7 +502,7 @@ async function handleTipRequest(payload: {
     authorHandle: string;
     legacyProvidedAuthorId?: string;
     verifiedAuthorId?: string;
-    amount: number;
+    amount: string;
     rawAmount?: string;
     from?: string;
     needsApproval?: boolean;
@@ -272,13 +515,120 @@ async function handleTipRequest(payload: {
   }
 
   const { contentId, authorId, amount, tweetId, authorHandle } = payload;
+  let rawAmount: bigint;
+  try {
+    rawAmount = parseTipAmount(amount).raw;
+  } catch {
+    return { pending: false, error: "Enter a valid tip amount." };
+  }
+
+  const from = walletState.address;
+  const composite = tipIntentComposite({
+    chainId: CONFIG.CHAIN_ID,
+    from,
+    contentId,
+    authorHandle,
+    rawAmount: rawAmount.toString(),
+  });
+  const inProcess = activeTipRequests.get(composite);
+  if (inProcess && Date.now() - inProcess.startedAt <= ACTIVE_TIP_TTL_MS) {
+    return {
+      pending: false,
+      duplicate: true,
+      requestId: inProcess.requestId,
+      error: "This tip is already being prepared.",
+    };
+  }
+  if (inProcess) activeTipRequests.delete(composite);
+
+  const requestId = newRequestId();
+  activeTipRequests.set(composite, { requestId, startedAt: Date.now() });
+
+  let intentKey: string;
+  try {
+    intentKey = await createTipIntentKey(composite);
+  } catch {
+    activeTipRequests.delete(composite);
+    return { pending: false, error: "Could not prepare this tip. Please try again." };
+  }
+
+  let existing = await getTipIntent(intentKey);
+  if (existing?.status === "submitted") {
+    existing = await reconcileSubmittedTipIntent(existing);
+  }
+
+  if (existing?.status === "submitted") {
+    activeTipRequests.delete(composite);
+    return {
+      pending: false,
+      duplicate: true,
+      requestId: existing.attemptId,
+      error: "This tip was already submitted and is awaiting confirmation.",
+    };
+  }
+
+  if (existing?.status === "signing" && existing.windowId) {
+    try {
+      await chrome.windows.get(existing.windowId);
+      activeTipRequests.delete(composite);
+      activeTipRequests.set(intentKey, {
+        requestId: existing.attemptId,
+        windowId: existing.windowId,
+        startedAt: existing.updatedAt,
+      });
+      await chrome.windows.update(existing.windowId, { focused: true });
+      return {
+        pending: true,
+        duplicate: true,
+        requestId: existing.attemptId,
+        signerPage: options.signerPage,
+      };
+    } catch {
+      await updateTipIntent(intentKey, existing.attemptId, {
+        status: "cancelled",
+        error: "Signing window is no longer open",
+        windowId: undefined,
+      });
+    }
+  } else if (existing?.status === "created" || existing?.status === "signing") {
+    await updateTipIntent(intentKey, existing.attemptId, {
+      status: "failed",
+      error: "Tip preparation was interrupted",
+      windowId: undefined,
+    });
+  }
+
+  const now = Date.now();
+  await saveTipIntent({
+    intentKey,
+    attemptId: requestId,
+    status: "created",
+    chainId: CONFIG.CHAIN_ID,
+    from: from.toLowerCase(),
+    contentId: contentId.toLowerCase(),
+    authorHandle: authorHandle.replace(/^@/, "").toLowerCase(),
+    rawAmount: rawAmount.toString(),
+    originTabId: options.originTabId,
+    createdAt: now,
+    updatedAt: now,
+  });
+  activeTipRequests.delete(composite);
+  activeTipRequests.set(intentKey, { requestId, startedAt: now });
+
+  const failIntent = async (error: string) => {
+    activeTipRequests.delete(intentKey);
+    await updateTipIntent(intentKey, requestId, { status: "failed", error });
+  };
+
   let verifiedAuthorId: string;
   try {
     verifiedAuthorId = await resolveXAuthorId(authorHandle);
   } catch (err: any) {
+    const error = err?.message || "Could not verify this X creator.";
+    await failIntent(error);
     return {
       pending: false,
-      error: err?.message || "Could not verify this X creator.",
+      error,
       diagnostic: {
         contentId,
         authorHandle,
@@ -289,31 +639,8 @@ async function handleTipRequest(payload: {
       },
     };
   }
-  const rawAmount = parseUnits(amount.toString(), CONFIG.USDC_DECIMALS);
-  pruneActiveTipRequests();
-  const requestKey = tipInstanceKey({ from: walletState.address, contentId, amount });
-  const active = activeTipRequests.get(requestKey);
-  if (active) {
-    if (active.windowId) {
-      chrome.windows.update(active.windowId, { focused: true }).catch(() => {});
-    }
-    return {
-      pending: true,
-      duplicate: true,
-      requestId: active.requestId,
-      signerPage: options.signerPage,
-      diagnostic: {
-        contentId,
-        authorHandle,
-        legacyProvidedAuthorId: authorId,
-        verifiedAuthorId,
-        amount,
-        rawAmount: rawAmount.toString(),
-        from: walletState.address,
-        signerSource: options.source,
-      },
-    };
-  }
+  await updateTipIntent(intentKey, requestId, { authorId: verifiedAuthorId });
+
   const diagnosticBase = {
     contentId,
     authorHandle,
@@ -329,9 +656,11 @@ async function handleTipRequest(payload: {
   try {
     const balance = await getUSDCBalance(walletState.address);
     if (BigInt(balance) < rawAmount) {
+      await failIntent("Insufficient funds to tip");
       return { pending: false, error: "Insufficient funds to tip", diagnostic: diagnosticBase };
     }
   } catch (e) {
+    await failIntent("Could not check balance");
     return { pending: false, error: "Could not check balance. Try again.", diagnostic: diagnosticBase };
   }
 
@@ -367,16 +696,18 @@ async function handleTipRequest(payload: {
       };
     }
   } catch (err: any) {
+    await failIntent("Failed to check allowance");
     return { pending: false, error: "Failed to check allowance: " + err.message, diagnostic: diagnosticBase };
   }
+  await updateTipIntent(intentKey, requestId, { needsApproval });
 
   // Store pending tip for the signing window to pick up
-  const requestId = newRequestId();
   const pendingKey = `pendingTip:${requestId}`;
   const resultKey = `tipResult:${requestId}`;
   const pendingTip = {
     requestId,
-    requestKey,
+    intentKey,
+    requestKey: intentKey,
     contentId,
     authorId: verifiedAuthorId,
     authorHandle,
@@ -398,7 +729,7 @@ async function handleTipRequest(payload: {
   // Clear any stale result and store the new pending tip
   await chrome.storage.local.remove([resultKey, "tipResult"]);
   await chrome.storage.local.set({ [pendingKey]: pendingTip, pendingTip });
-  activeTipRequests.set(requestKey, { requestId, startedAt: Date.now() });
+  await updateTipIntent(intentKey, requestId, { status: "signing" });
 
   // Open signing popup window
   try {
@@ -407,22 +738,23 @@ async function handleTipRequest(payload: {
     const signingWindow = await chrome.windows.create({
       url: chrome.runtime.getURL(signerUrl),
       type: "popup",
-      width: options.source === "wallet-lab-signer" ? 980 : 380,
-      height: options.source === "wallet-lab-signer" ? 760 : 480,
+      width: options.source === "diagnostic-signer" ? 980 : 380,
+      height: options.source === "diagnostic-signer" ? 760 : 480,
       focused: true,
     });
 
     // If the user closes the window without completing, store a cancellation
     if (signingWindow.id) {
       const windowId = signingWindow.id;
-      activeTipRequests.set(requestKey, { requestId, windowId, startedAt: Date.now() });
+      activeTipRequests.set(intentKey, { requestId, windowId, startedAt: Date.now() });
+      await updateTipIntent(intentKey, requestId, { status: "signing", windowId });
       const closeListener = (closedId: number) => {
         if (closedId !== windowId) return;
         chrome.windows.onRemoved.removeListener(closeListener);
-        if (!activeTipRequests.has(requestKey)) return;
-        // Check if a result was stored (success or explicit failure)
-        chrome.storage.local.get([resultKey], (result) => {
-          if (!result[resultKey]) {
+        void (async () => {
+          const current = await getTipIntent(intentKey);
+          if (!current || current.attemptId !== requestId) return;
+          if (current.status === "created" || current.status === "signing") {
             const cancellation = {
               requestId,
               contentId,
@@ -430,25 +762,29 @@ async function handleTipRequest(payload: {
               error: "Cancelled",
               timestamp: Date.now(),
             };
-            chrome.storage.local.set({
+            await chrome.storage.local.set({
               [resultKey]: cancellation,
               tipResult: cancellation,
             });
-            chrome.storage.local.get(["pendingTip"], (stored) => {
-              const legacy = stored.pendingTip as { requestId?: string } | undefined;
-              const keys = [pendingKey];
-              if (legacy?.requestId === requestId) keys.push("pendingTip");
-              chrome.storage.local.remove(keys);
+            await updateTipIntent(intentKey, requestId, {
+              status: "cancelled",
+              error: "Cancelled",
+              windowId: undefined,
             });
+            const stored = await chrome.storage.local.get(["pendingTip"]);
+            const legacy = stored.pendingTip as { requestId?: string } | undefined;
+            const keys = [pendingKey];
+            if (legacy?.requestId === requestId) keys.push("pendingTip");
+            await chrome.storage.local.remove(keys);
           }
-          activeTipRequests.delete(requestKey);
-        });
+          activeTipRequests.delete(intentKey);
+        })().catch((err) => bgLog("TipIntent", "Window close handling failed", err?.message ?? err));
       };
       chrome.windows.onRemoved.addListener(closeListener);
     }
   } catch (err: any) {
     bgLog("Tip", "Failed to open signing window", err?.message ?? err);
-    activeTipRequests.delete(requestKey);
+    await failIntent("Failed to open signing window");
     await chrome.storage.local.remove([pendingKey, "pendingTip"]);
     return {
       pending: false,

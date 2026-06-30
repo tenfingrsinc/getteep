@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Non-custodial X post tipping on Arc with USDC",
-  "workspaces": ["contracts", "backend", "extension", "web", "shared"],
+  "workspaces": ["contracts", "backend", "extension", "web", "shared", "x-agent"],
   "scripts": {
     "contracts:compile": "npm run compile --workspace=contracts",
     "contracts:test": "npm run test --workspace=contracts",
@@ -14,6 +14,8 @@
     "contracts:deploy:mainnet": "npm run deploy:mainnet --workspace=contracts",
     "backend:dev": "npm run dev --workspace=backend",
     "backend:build": "npm run build --workspace=backend",
+    "backend:db:migrate:prod": "npm run db:migrate:prod --workspace=backend",
+    "railway:build": "npm run backend:build && npm run web:build:prod",
     "extension:dev": "npm run dev --workspace=extension",
     "extension:build": "npm run build --workspace=extension",
     "extension:build:prod": "npm run build:prod --workspace=extension",
@@ -21,8 +23,11 @@
     "extension:build:debug": "npm run build:debug --workspace=extension",
     "extension:build:demo": "npm run build:demo --workspace=extension",
     "web:dev": "npm run dev --workspace=web",
+    "web:dev:local": "npm run dev:local --workspace=web",
     "web:build": "npm run build --workspace=web",
     "web:build:prod": "npm run build:prod --workspace=web",
+    "x-agent:dev": "npm run dev --workspace=x-agent",
+    "x-agent:build": "npm run build --workspace=x-agent",
     "security:audit:runtime": "npm audit --omit=dev --audit-level=high --workspaces"
   },
   "dependencies": {

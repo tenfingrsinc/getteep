@@ -21,6 +21,7 @@ export interface XUserProfile {
 
 export class XOAuthService {
   private usernameCache = new Map<string, { profile: XUserProfile; expiresAt: number }>();
+  private usernameRequests = new Map<string, Promise<XUserProfile>>();
 
   /**
    * Generate the X OAuth 2.0 authorization URL
@@ -104,41 +105,62 @@ export class XOAuthService {
     const cached = this.usernameCache.get(handle);
     if (cached && cached.expiresAt > Date.now()) return cached.profile;
 
+    const existingRequest = this.usernameRequests.get(handle);
+    if (existingRequest) return existingRequest;
+
+    const request = this.fetchUserByUsername(handle);
+    this.usernameRequests.set(handle, request);
+    try {
+      const profile = await request;
+      this.usernameCache.set(handle, { profile, expiresAt: Date.now() + 10 * 60 * 1000 });
+      return profile;
+    } finally {
+      this.usernameRequests.delete(handle);
+    }
+  }
+
+  private async fetchUserByUsername(handle: string): Promise<XUserProfile> {
     const urlPath = `/2/users/by/username/${encodeURIComponent(handle)}?user.fields=profile_image_url`;
-    let userResponse = await fetch(`https://api.twitter.com${urlPath}`, {
-      headers: {
-        Authorization: `Bearer ${X_BEARER_TOKEN}`,
-      },
-    });
+    const hosts = ["api.x.com", "api.twitter.com"];
+    const failures: string[] = [];
 
-    if (!userResponse.ok && userResponse.status >= 500) {
-      userResponse = await fetch(`https://api.x.com${urlPath}`, {
-        headers: {
-          Authorization: `Bearer ${X_BEARER_TOKEN}`,
-        },
-      });
+    for (const host of hosts) {
+      try {
+        const response = await fetch(`https://${host}${urlPath}`, {
+          headers: {
+            Authorization: `Bearer ${X_BEARER_TOKEN}`,
+          },
+          signal: AbortSignal.timeout(10_000),
+        });
+
+        if (!response.ok) {
+          const errorBody = (await response.text()).slice(0, 500);
+          failures.push(`${host}: HTTP ${response.status}${errorBody ? ` ${errorBody}` : ""}`);
+          if (response.status < 500 && response.status !== 429) break;
+          continue;
+        }
+
+        const userData = (await response.json()) as {
+          data?: { id: string; username: string; name: string; profile_image_url?: string };
+        };
+        if (!userData.data?.id || !/^[0-9]+$/.test(userData.data.id)) {
+          failures.push(`${host}: response contained no numeric user ID`);
+          continue;
+        }
+
+        return {
+          id: userData.data.id,
+          username: userData.data.username,
+          name: userData.data.name,
+          profile_image_url: userData.data.profile_image_url,
+        };
+      } catch (err: any) {
+        const cause = err?.cause;
+        const detail = cause?.code || cause?.message || err?.message || String(err);
+        failures.push(`${host}: ${detail}`);
+      }
     }
 
-    if (!userResponse.ok) {
-      const errorBody = await userResponse.text();
-      throw new Error(`X username lookup failed: ${userResponse.status} ${errorBody || ""}`);
-    }
-
-    const userData = (await userResponse.json()) as {
-      data?: { id: string; username: string; name: string; profile_image_url?: string };
-    };
-
-    if (!userData.data?.id || !/^[0-9]+$/.test(userData.data.id)) {
-      throw new Error("X username lookup returned no numeric user ID");
-    }
-
-    const profile = {
-      id: userData.data.id,
-      username: userData.data.username,
-      name: userData.data.name,
-      profile_image_url: userData.data.profile_image_url,
-    };
-    this.usernameCache.set(handle, { profile, expiresAt: Date.now() + 10 * 60 * 1000 });
-    return profile;
+    throw new Error(`X username lookup failed (${failures.join("; ")})`);
   }
 }

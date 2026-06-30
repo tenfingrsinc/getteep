@@ -21,7 +21,7 @@ export default function Fees() {
       </p>
       <p style={{ color: "var(--text-muted)", fontSize: "var(--text-small)", marginTop: "var(--space-5)" }}>
         Example: if you withdraw $100, the fee is $5; you receive $95. Questions? See{" "}
-        <a href="/support">Support</a> or contact support@teep.xyz
+        <a href="/support">Support</a> or contact support@getteep.xyz
       </p>
     </div>
   );

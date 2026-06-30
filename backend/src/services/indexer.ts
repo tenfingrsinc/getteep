@@ -3,7 +3,7 @@ import { getDb } from "../db/database";
 import { getConfiguredChain, getRpcUrl } from "../config/chain";
 import { inspectTipForAbuse } from "./abuse";
 import { recordOpsEvent } from "./ops";
-import { createReceiptReadyNotification } from "./notifications";
+import { createClaimWalletActivityNotification, createNewTipReceivedNotification, createReceiptReadyNotification, createRepeatSupporterNotification } from "./notifications";
 import { createBackendPublicClient, isInsecureRpcTlsEnabled, warnIfInsecureRpcTlsEnabled } from "./rpcClient";
 
 // ABI for the Tipped event
@@ -20,7 +20,7 @@ const RPC_URL = getRpcUrl();
 const TIP_CONTRACT_ADDRESS = process.env.TIP_CONTRACT_ADDRESS as `0x${string}`;
 const FACTORY_ADDRESS = process.env.FACTORY_ADDRESS as `0x${string}`;
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL_MS || "5000");
-const BATCH_SIZE = BigInt(process.env.INDEXER_BATCH_SIZE || "9");
+const BATCH_SIZE = BigInt(process.env.INDEXER_BATCH_SIZE || "5000");
 const START_BLOCK = BigInt(process.env.INDEXER_START_BLOCK || process.env.DEPLOYMENT_BLOCK || "0");
 const CONFIRMATIONS = BigInt(process.env.INDEXER_CONFIRMATIONS || "2");
 const RESCAN_BLOCKS = BigInt(process.env.INDEXER_RESCAN_BLOCKS || "100");
@@ -51,7 +51,7 @@ export class Indexer {
     console.log(`[Indexer] Factory:     ${FACTORY_ADDRESS}`);
     console.log(`[Indexer] Start block: ${START_BLOCK}, confirmations: ${CONFIRMATIONS}, rescan blocks: ${RESCAN_BLOCKS}`);
 
-    this.prepareStartState();
+    await this.prepareStartState();
 
     this.poll();
   }
@@ -69,10 +69,10 @@ export class Indexer {
         console.error("[Indexer] Error processing blocks:", err);
         const message = err instanceof Error ? err.message : String(err);
         try {
-          getDb().prepare("UPDATE indexer_state SET last_error = ?, last_error_at = ? WHERE id = 1")
+          await getDb().prepare("UPDATE indexer_state SET last_error = ?, last_error_at = ? WHERE id = 1")
             .run(message.slice(0, 500), Date.now());
         } catch {}
-        recordOpsEvent({
+        await recordOpsEvent({
           level: "error",
           source: "indexer",
           eventType: "poll_error",
@@ -87,15 +87,17 @@ export class Indexer {
     const db = getDb();
     const currentBlock = await this.client.getBlockNumber();
     const confirmedBlock = currentBlock > CONFIRMATIONS ? currentBlock - CONFIRMATIONS : 0n;
-    db.prepare("UPDATE indexer_state SET current_block = ? WHERE id = 1").run(currentBlock.toString());
-    const stateRow = db.prepare("SELECT last_block FROM indexer_state WHERE id = 1").get() as any;
+    await db.prepare("UPDATE indexer_state SET current_block = ? WHERE id = 1").run(currentBlock.toString());
+    const stateRow = await db.prepare("SELECT last_block FROM indexer_state WHERE id = 1").get() as any;
     let lastIndexedBlock = BigInt(stateRow.last_block || "0");
 
     if (confirmedBlock === 0n) return;
 
-    // Re-scan a recent confirmed window each poll. INSERT OR IGNORE makes this cheap and
-    // recovers from transient RPC/indexer misses without relying on client-side activity.
-    if (RESCAN_BLOCKS > 0n && lastIndexedBlock > START_BLOCK) {
+    const lagBlocks = confirmedBlock > lastIndexedBlock ? confirmedBlock - lastIndexedBlock : 0n;
+
+    // Re-scan only when caught up. During recovery, replaying the recent window before every
+    // catch-up pass wastes RPC calls and delays newly confirmed tips.
+    if (RESCAN_BLOCKS > 0n && lagBlocks <= RESCAN_BLOCKS && lastIndexedBlock > START_BLOCK) {
       const rescanFrom = lastIndexedBlock > RESCAN_BLOCKS ? lastIndexedBlock - RESCAN_BLOCKS + 1n : START_BLOCK;
       const rescanTo = lastIndexedBlock < confirmedBlock ? lastIndexedBlock : confirmedBlock;
       if (rescanFrom <= rescanTo) {
@@ -134,17 +136,17 @@ export class Indexer {
       });
 
       if (tipLogs.length > 0) {
-        this.processTipLogs(tipLogs);
+        await this.processTipLogs(tipLogs);
       }
       if (claimLogs.length > 0) {
-        this.processClaimLogs(claimLogs);
+        await this.processClaimLogs(claimLogs);
       }
 
       if (advanceState) {
-        db.prepare("UPDATE indexer_state SET last_block = ?, current_block = ?, last_success_at = ?, last_error = NULL, updated_at = datetime('now') WHERE id = 1")
+        await db.prepare("UPDATE indexer_state SET last_block = ?, current_block = ?, last_success_at = ?, last_error = NULL, updated_at = now() WHERE id = 1")
           .run(batchTo.toString(), currentBlock.toString(), Date.now());
       } else {
-        db.prepare("UPDATE indexer_state SET current_block = ?, last_success_at = ?, last_error = NULL, updated_at = datetime('now') WHERE id = 1")
+        await db.prepare("UPDATE indexer_state SET current_block = ?, last_success_at = ?, last_error = NULL, updated_at = now() WHERE id = 1")
           .run(currentBlock.toString(), Date.now());
       }
 
@@ -157,15 +159,11 @@ export class Indexer {
     }
   }
 
-  private processTipLogs(logs: Log[]): void {
+  private async processTipLogs(logs: Log[]): Promise<void> {
     const db = getDb();
     const contractAddr = (TIP_CONTRACT_ADDRESS || "").toLowerCase();
-    const insert = db.prepare(`
-      INSERT OR IGNORE INTO tips (content_id, author_id, from_address, to_address, amount, tx_hash, block_number, log_index, timestamp, tip_contract_address)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
 
-    const tx = db.transaction(() => {
+    const tx = db.transaction(async (txDb) => {
       for (const log of logs) {
         const args = (log as any).args;
         const from = args.from.toLowerCase();
@@ -174,7 +172,11 @@ export class Indexer {
         const contentId = args.contentId;
         const amount = args.amount.toString();
         const txHash = String(log.transactionHash).toLowerCase();
-        const result = insert.run(
+        const result = await txDb.prepare(`
+          INSERT INTO tips (content_id, author_id, from_address, to_address, amount, tx_hash, block_number, log_index, timestamp, tip_contract_address)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT (tx_hash) DO NOTHING
+        `).run(
           contentId,
           authorId,
           from,
@@ -187,7 +189,7 @@ export class Indexer {
           contractAddr || null
         );
         if (result.changes > 0) {
-          inspectTipForAbuse({
+          await inspectTipForAbuse({
             fromAddress: from,
             toAddress: to,
             authorId,
@@ -195,52 +197,90 @@ export class Indexer {
             amountRaw: amount,
             txHash,
           });
-          const metadata = db.prepare("SELECT author_handle FROM tip_metadata WHERE content_id = ? LIMIT 1").get(contentId) as { author_handle: string | null } | undefined;
-          createReceiptReadyNotification({
+          const metadata = await txDb.prepare("SELECT author_handle FROM tip_metadata WHERE content_id = ? LIMIT 1").get(contentId) as { author_handle: string | null } | undefined;
+          await createReceiptReadyNotification({
             userAddress: from,
             authorHandle: metadata?.author_handle || null,
             amountRaw: amount,
             txHash,
           });
+          const creatorClaim = await txDb
+            .prepare("SELECT owner_address, username FROM verified_claims WHERE author_id = ? ORDER BY verified_at DESC LIMIT 1")
+            .get(authorId) as { owner_address: string; username: string | null } | undefined;
+          if (creatorClaim?.owner_address && creatorClaim.owner_address.toLowerCase() !== from) {
+            await createNewTipReceivedNotification({
+              creatorOwnerAddress: creatorClaim.owner_address,
+              fromAddress: from,
+              amountRaw: amount,
+              txHash,
+              authorHandle: metadata?.author_handle || creatorClaim.username || null,
+            });
+            const supporterStats = await txDb
+              .prepare(
+                `SELECT COUNT(*) as "tipCount", COALESCE(SUM(CAST(amount AS NUMERIC)), 0) as "totalRaw"
+                 FROM tips
+                 WHERE author_id = ? AND LOWER(from_address) = ?`
+              )
+              .get(authorId, from) as { tipCount: string; totalRaw: string } | undefined;
+            if (Number(supporterStats?.tipCount || 0) > 1) {
+              await createRepeatSupporterNotification({
+                creatorOwnerAddress: creatorClaim.owner_address,
+                supporterAddress: from,
+                tipCount: Number(supporterStats?.tipCount || 0),
+                totalRaw: String(Math.trunc(Number(supporterStats?.totalRaw || 0))),
+              });
+            }
+          }
         }
       }
     });
 
-    tx();
+    await tx();
   }
 
-  private processClaimLogs(logs: Log[]): void {
+  private async processClaimLogs(logs: Log[]): Promise<void> {
     const db = getDb();
-    const insert = db.prepare(`
-      INSERT OR IGNORE INTO claim_wallets (author_id, wallet_address, owner_address, deployed_at_block, tx_hash)
-      VALUES (?, ?, ?, ?, ?)
-    `);
 
-    const tx = db.transaction(() => {
+    const tx = db.transaction(async (txDb) => {
       for (const log of logs) {
         const args = (log as any).args;
-        insert.run(
-          args.authorId.toString(),
-          args.wallet.toLowerCase(),
-          args.owner.toLowerCase(),
+        const authorId = args.authorId.toString();
+        const walletAddress = args.wallet.toLowerCase();
+        const ownerAddress = args.owner.toLowerCase();
+        const result = await txDb.prepare(`
+          INSERT INTO claim_wallets (author_id, wallet_address, owner_address, deployed_at_block, tx_hash)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT (author_id) DO NOTHING
+        `).run(
+          authorId,
+          walletAddress,
+          ownerAddress,
           Number(log.blockNumber),
           log.transactionHash
         );
+        if (result.changes > 0) {
+          await createClaimWalletActivityNotification({
+            creatorOwnerAddress: ownerAddress,
+            authorId,
+            walletAddress,
+            txHash: String(log.transactionHash),
+          });
+        }
       }
     });
 
-    tx();
+    await tx();
   }
 
-  private prepareStartState(): void {
+  private async prepareStartState(): Promise<void> {
     const db = getDb();
-    const stateRow = db.prepare("SELECT last_block FROM indexer_state WHERE id = 1").get() as any;
+    const stateRow = await db.prepare("SELECT last_block FROM indexer_state WHERE id = 1").get() as any;
     const lastBlock = BigInt(stateRow?.last_block || "0");
     if (RESET_TO_START_ON_BOOT || (lastBlock === 0n && START_BLOCK > 0n)) {
       const newLastBlock = START_BLOCK > 0n ? START_BLOCK - 1n : 0n;
-      db.prepare("UPDATE indexer_state SET last_block = ?, last_error = NULL, updated_at = datetime('now') WHERE id = 1")
+      await db.prepare("UPDATE indexer_state SET last_block = ?, last_error = NULL, updated_at = now() WHERE id = 1")
         .run(newLastBlock.toString());
-      recordOpsEvent({
+      await recordOpsEvent({
         level: "info",
         source: "indexer",
         eventType: "start_block_set",

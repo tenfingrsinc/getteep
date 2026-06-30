@@ -3,6 +3,7 @@ node_modules/
 
 # Build outputs
 dist/
+extension/release/
 contracts/artifacts/
 contracts/cache/
 contracts/typechain-types/
@@ -34,6 +35,18 @@ contracts/deployed-addresses.json
 # Logs
 *.log
 npm-debug.log*
+
+# Local QA/browser artifacts
+/.tmp-*/
+/teep-receipt-*-preview.png
+/playwright-report/
+/test-results/
+
+# Local source backups / mock snapshots
+*.bak
+*.orig
+extension/src/popup/*backup*.tsx
+extension/src/popup/*.before-*.tsx
 
 # Generated wallet / gas sponsorship artifacts
 gasstation/output/
