@@ -1,7 +1,6 @@
 import { Link } from "react-router-dom";
 import { usePrivy } from "@privy-io/react-auth";
 import DashboardShell from "./DashboardShell";
-import { CHROME_STORE_URL } from "../config";
 
 type DashboardConnectCardProps = {
   message?: string;
@@ -41,11 +40,8 @@ export function DashboardConnectCard({
           Connect
         </button>
         <p style={{ fontSize: "var(--text-small)", color: "var(--text-muted)", marginBottom: "var(--space-2)" }}>
-          New here? Install the Teep extension to tip on X, then return here to manage your funds.
+          New here? You can tip, claim, withdraw, and manage your Teep balance from the web app. The extension is optional.
         </p>
-        <a href={CHROME_STORE_URL} target="_blank" rel="noopener noreferrer" style={{ fontSize: "var(--text-small)", color: "var(--link)", display: "block", marginBottom: "var(--space-4)" }}>
-          Get Teep extension -&gt;
-        </a>
         <Link to="/" style={{ fontSize: "var(--text-small)", fontWeight: 600, color: "var(--accent)", display: "inline-flex", alignItems: "center", gap: 6 }}>
           <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
             home

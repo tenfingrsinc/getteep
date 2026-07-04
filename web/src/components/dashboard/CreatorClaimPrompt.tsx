@@ -10,7 +10,6 @@ type CreatorClaimPromptProps = {
   status: CreatorClaimFlowStatus;
   message?: string | null;
   authUrl: string;
-  claimWalletAddress: string;
   claimEarnedUsd: string;
   onExpand: () => void;
   onMinimize: () => void;
@@ -40,7 +39,6 @@ export default function CreatorClaimPrompt({
   status,
   message,
   authUrl,
-  claimWalletAddress,
   claimEarnedUsd,
   onExpand,
   onMinimize,
@@ -81,7 +79,7 @@ export default function CreatorClaimPrompt({
         <div id="creator-claim-panel" className="dashboard-creator-claim-expanded">
           <ol>
             <ClaimStep number={1} title="Connect X">Verify the social account your audience tips.</ClaimStep>
-            <ClaimStep number={2} title="Teep links your claim wallet">Pending tips for that handle become available to your Teep account.</ClaimStep>
+            <ClaimStep number={2} title="Teep links your receiving account">Pending tips for that handle become available in your Teep account.</ClaimStep>
             <ClaimStep number={3} title="Use creator tools">Open the creator overview to withdraw, track support, or grow tips.</ClaimStep>
           </ol>
 
@@ -90,7 +88,7 @@ export default function CreatorClaimPrompt({
               {status === "success" ? (
                 <>
                   <strong>{message}</strong>
-                  <small>Claim wallet: {claimWalletAddress} - Tips found: ${claimEarnedUsd}</small>
+                  <small>Tips found: ${claimEarnedUsd}</small>
                 </>
               ) : (
                 <span>{message}</span>

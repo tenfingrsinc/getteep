@@ -406,6 +406,28 @@ export default function Home() {
     };
   }, []);
 
+  const revealHeroTipForm = useCallback(() => {
+    const stage = heroStageRef.current;
+    const runway = stage?.closest<HTMLElement>(".lp-hero-shell");
+    const isMobileDemo = window.matchMedia("(max-width: 767px)").matches &&
+      !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    if (stage && runway && isMobileDemo) {
+      const stageDocumentTop = stage.getBoundingClientRect().top + window.scrollY;
+      const runwayDocumentTop = runway.getBoundingClientRect().top + window.scrollY;
+      const scrollStart = stageDocumentTop - 82;
+      const scrollEnd = runwayDocumentTop + runway.offsetHeight - window.innerHeight;
+      const scrollDistance = Math.max(1, scrollEnd - scrollStart);
+      window.scrollTo({
+        top: scrollStart + scrollDistance * 0.78,
+        behavior: "smooth",
+      });
+      return;
+    }
+
+    tipAmountInputRef.current?.focus();
+  }, []);
+
   const amountNum = parseFloat(tipAmount) || 0;
   const amountUsd = amountNum > 0 ? amountNum.toFixed(2) : "0.00";
 
@@ -640,24 +662,20 @@ export default function Home() {
             </div>
             <div className="lp-hero-actions">
               <a href="/dashboard" target="_blank" rel="noopener noreferrer" className="lp-btn lp-btn--primary"><Icon name="wallet" /> Launch App</a>
-              <a href={CHROME_STORE_URL} target={HAS_CHROME_STORE_LISTING ? "_blank" : undefined} rel={HAS_CHROME_STORE_LISTING ? "noopener noreferrer" : undefined} className="lp-btn lp-btn--secondary">
+              <a href={CHROME_STORE_URL} target={HAS_CHROME_STORE_LISTING ? "_blank" : undefined} rel={HAS_CHROME_STORE_LISTING ? "noopener noreferrer" : undefined} className="lp-btn lp-btn--secondary lp-hero-extension-cta">
                 <Icon name="puzzle" /> Get Extension
               </a>
             </div>
             <p className="lp-hero-extension-note">Extension works best on desktop.</p>
-            <div className="lp-hero-flow-rail" aria-label="Post to tip to claim">
-              <span><XLogoIcon /> Post</span>
-              <Icon name="arrowRight" />
-              <span><Icon name="coin" /> Tip</span>
-              <Icon name="arrowRight" />
-              <span><Icon name="wallet" /> Claim</span>
-            </div>
           </div>
 
           <div className="lp-scroll-focus-backdrop" aria-hidden="true" />
           <div ref={heroStageRef} className="lp-product-stage" aria-label="Teep tipping experience">
             <div className="lp-scroll-story-status" aria-live="polite">
-              <span ref={heroStoryLabelRef}>01 - Post highlighted</span>
+              <span className="lp-scroll-story-copy">
+                <span className="lp-scroll-story-stamp">Tip demo</span>
+                <span ref={heroStoryLabelRef}>01 - Post highlighted</span>
+              </span>
               <span className="lp-scroll-story-track" aria-hidden="true" />
             </div>
             <div className="lp-stage-toolbar" aria-hidden="true"><span /><span /><span /><small>Connected social post · Teep active</small></div>
@@ -698,7 +716,7 @@ export default function Home() {
                 <div className="lp-post-actions">
                   <span aria-hidden>Reply</span><span aria-hidden>Repost</span>
                   <button type="button" className="lp-post-action-icon" aria-label="Like preview"><Icon name="heart" /></button>
-                  <button type="button" onClick={() => tipAmountInputRef.current?.focus()}><Icon name="send" /> Tip</button>
+                  <button type="button" onClick={revealHeroTipForm}><Icon name="send" /> Tip</button>
                   <a className="lp-post-action-icon" href={STATIC_HERO_POST.url} target="_blank" rel="noopener noreferrer" aria-label="Open original post on X"><Icon name="externalLink" /></a>
                 </div>
               </article>
@@ -802,7 +820,7 @@ export default function Home() {
                 <h3>Support where attention is</h3>
               </div>
               <p>Use the web app, extension, or a connected social prompt without sending people to a new feed.</p>
-              <button type="button" className="lp-flow-action" onClick={() => tipAmountInputRef.current?.focus()}>
+              <button type="button" className="lp-flow-action" onClick={revealHeroTipForm}>
                 Try the web tip flow <Icon name="arrowRight" />
               </button>
             </article>

@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { usePrivy } from "@privy-io/react-auth";
 import { useSmartWallets } from "@privy-io/react-auth/smart-wallets";
 import { buildFundingPolicy, getTeepActivityTypeLabel } from "@teep/shared";
@@ -697,6 +697,7 @@ function readCreatorClaimPromptDismissal(key: string): CreatorClaimPromptDismiss
 
 export default function Dashboard({ mode = "auto" }: { mode?: DashboardMode }) {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const accountRole = useAccountRole();
   const { ready, authenticated } = usePrivy();
   const { client: smartWalletClient } = useSmartWallets();
@@ -756,6 +757,7 @@ export default function Dashboard({ mode = "auto" }: { mode?: DashboardMode }) {
 
   const creatorPromptStorageKey = address ? `teep_creator_claim_prompt_dismissed_${address}` : "";
   const creatorClaimStartedStorageKey = address ? `teep_creator_claim_started_${address}` : "";
+  const explicitCreatorClaim = searchParams.get("claim") === "creator";
 
   useEffect(() => {
     activeAddressRef.current = address;
@@ -776,6 +778,11 @@ export default function Dashboard({ mode = "auto" }: { mode?: DashboardMode }) {
     }
     setCreatorClaimStarted(window.localStorage.getItem(creatorClaimStartedStorageKey) === "1");
   }, [creatorClaimStartedStorageKey]);
+
+  useEffect(() => {
+    if (!explicitCreatorClaim || !authenticated || accountRole.isCreator) return;
+    setCreatorClaimOpen(true);
+  }, [accountRole.isCreator, authenticated, explicitCreatorClaim]);
 
   const dismissCreatorPrompt = useCallback(() => {
     const dismissal = {
@@ -1316,7 +1323,12 @@ export default function Dashboard({ mode = "auto" }: { mode?: DashboardMode }) {
   }
 
   if (!authenticated) {
-    return <DashboardConnectPage title="Overview" />;
+    return (
+      <DashboardConnectPage
+        title="Overview"
+        message={explicitCreatorClaim ? "Sign in to claim tips sent to your creator account and connect your X profile." : undefined}
+      />
+    );
   }
 
   if (loading) {
@@ -1391,14 +1403,11 @@ export default function Dashboard({ mode = "auto" }: { mode?: DashboardMode }) {
       authenticated &&
       !accountRole.isCreator &&
       !isCreator &&
-      !creatorPromptDismissedInCooldown;
+      (explicitCreatorClaim || !creatorPromptDismissedInCooldown);
     const creatorClaimTitle = creatorClaimStarted ? "Finish connecting X" : "Claim creator tips";
     const creatorClaimBody = creatorClaimStarted
       ? "Complete X verification to unlock creator tools and tips sent to your handle."
       : "Connect your X account to become a creator and unlock tips sent to your handle.";
-    const claimWalletAddress = creatorClaimDetails?.claimWalletAddress
-      ? safeAddress(creatorClaimDetails.claimWalletAddress) || "Prepared after verification"
-      : "Prepared after verification";
     const claimEarnedUsd = creatorClaimDetails?.totalEarnedRaw
       ? formatUsdRaw(creatorClaimDetails.totalEarnedRaw)
       : "0.00";
@@ -1415,7 +1424,6 @@ export default function Dashboard({ mode = "auto" }: { mode?: DashboardMode }) {
                 status={creatorClaimStatus}
                 message={creatorClaimMessage}
                 authUrl={creatorClaimAuthUrl}
-                claimWalletAddress={claimWalletAddress}
                 claimEarnedUsd={claimEarnedUsd}
                 onExpand={() => setCreatorClaimOpen(true)}
                 onMinimize={() => setCreatorClaimOpen(false)}

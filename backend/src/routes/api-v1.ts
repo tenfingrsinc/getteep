@@ -80,6 +80,12 @@ function fallbackAvatarSvg(seed: string): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" viewBox="0 0 160 160" role="img" aria-label="Teep avatar"><rect width="160" height="160" rx="80" fill="#21143a"/><circle cx="80" cy="80" r="74" fill="none" stroke="#6d28d9" stroke-width="8"/><text x="50%" y="55%" dominant-baseline="middle" text-anchor="middle" fill="#f6f0ff" font-family="Inter, Arial, sans-serif" font-size="52" font-weight="800">${clean}</text></svg>`;
 }
 
+function setPublicImageHeaders(res: Response, cacheControl: string) {
+  res.set("Cache-Control", cacheControl);
+  res.set("Cross-Origin-Resource-Policy", "cross-origin");
+  res.set("X-Content-Type-Options", "nosniff");
+}
+
 async function fetchAvatarBuffer(handle: string) {
   const db = getDb();
   const cached = await db
@@ -1325,7 +1331,7 @@ router.get("/discover", async (req: Request, res: Response) => {
        FROM tips t
        LEFT JOIN tip_metadata m ON m.content_id = t.content_id
        WHERE COALESCE(m.kind, 'post_tip') = 'post_tip'
-       GROUP BY t.content_id
+       GROUP BY t.content_id, t.author_id, m.author_handle, m.tweet_id
        ORDER BY tips_today DESC, unique_tippers DESC, total DESC, last_tip_at DESC
        LIMIT 4`
     )
@@ -2124,15 +2130,14 @@ router.get("/avatar", async (req: Request, res: Response) => {
   const timeout = setTimeout(() => controller.abort(), 3500);
   try {
     const avatar = await fetchAvatarUrl(source, controller.signal, false);
-    res.set("Cache-Control", avatar ? "public, max-age=86400, stale-while-revalidate=604800" : "public, max-age=3600");
-    res.set("X-Content-Type-Options", "nosniff");
+    setPublicImageHeaders(res, avatar ? "public, max-age=86400, stale-while-revalidate=604800" : "public, max-age=3600");
     if (!avatar) {
       res.type("image/svg+xml").send(fallbackAvatarSvg(seed));
       return;
     }
     res.type(avatar.contentType).send(avatar.body);
   } catch {
-    res.set("Cache-Control", "public, max-age=3600");
+    setPublicImageHeaders(res, "public, max-age=3600");
     res.type("image/svg+xml").send(fallbackAvatarSvg(seed));
   } finally {
     clearTimeout(timeout);
@@ -2147,15 +2152,14 @@ router.get("/avatar/x/:handle", async (req: Request, res: Response) => {
   }
   try {
     const avatar = await fetchAvatarBuffer(handle);
-    res.set("Cache-Control", avatar ? "public, max-age=86400, stale-while-revalidate=604800" : "public, max-age=3600");
-    res.set("X-Content-Type-Options", "nosniff");
+    setPublicImageHeaders(res, avatar ? "public, max-age=86400, stale-while-revalidate=604800" : "public, max-age=3600");
     if (!avatar) {
       res.type("image/svg+xml").send(fallbackAvatarSvg(handle));
       return;
     }
     res.type(avatar.contentType).send(avatar.body);
   } catch (error) {
-    res.set("Cache-Control", "public, max-age=3600");
+    setPublicImageHeaders(res, "public, max-age=3600");
     res.type("image/svg+xml").send(fallbackAvatarSvg(handle));
   }
 });

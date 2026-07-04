@@ -146,7 +146,7 @@ export default function DashboardWithdraw() {
       confirmationResolverRef.current = resolve;
       setConfirmationDialog({
         requestId: confirmation.requestId,
-        sourceLabel: withdrawalSource === "tipsEarned" ? "Tips Earned claim wallet" : "Tip Balance wallet",
+        sourceLabel: withdrawalSource === "tipsEarned" ? "Tips Earned account" : "Tip Balance account",
         amountLabel: `$${formatUsd(rawAmount.toString())}`,
         destinationLabel: shortAddress(destination),
         emailLabel: user?.email?.address || "your email",
@@ -574,7 +574,7 @@ export default function DashboardWithdraw() {
         Withdraw Funds
       </h1>
       <p className="withdraw-subtitle" style={{ color: "var(--text-secondary)", marginBottom: "var(--space-8)", fontSize: "var(--text-body)", lineHeight: 1.5, maxWidth: "42rem" }}>
-        Transfer your accumulated earnings securely to your self-custodial wallet. Funds are routed through the Teep smart protocol.
+        Move your available Teep balance to your preferred destination. Review the source, amount, and destination before you confirm.
       </p>
 
       {(accountHydrating || (authenticated && loading)) && (
@@ -671,7 +671,7 @@ export default function DashboardWithdraw() {
                     <p style={{ fontSize: "var(--text-small)", color: "var(--text-secondary)", margin: "4px 0 0 0" }}>
                       Available balance of money earned from tips
                     </p>
-                    {!canUseTipsEarned && <p style={{ fontSize: "var(--text-caption)", color: "var(--text-muted)", marginTop: 4 }}>Verify your X account in the extension to withdraw tips earned.</p>}
+                    {!canUseTipsEarned && <p style={{ fontSize: "var(--text-caption)", color: "var(--text-muted)", marginTop: 4 }}>Verify your X account from the web app to withdraw tips earned.</p>}
                     <button type="button" style={{ marginTop: "var(--space-4)", display: "inline-flex", alignItems: "center", gap: 8, padding: "10px 20px", borderRadius: "var(--radius-sm)", fontSize: "var(--text-small)", fontWeight: 700, border: "none", cursor: canUseTipsEarned ? "pointer" : "default", background: withdrawalSource === "tipsEarned" ? primary : "var(--bg-elevated)", color: withdrawalSource === "tipsEarned" ? "#fff" : "var(--text-primary)" }}>
                       {withdrawalSource === "tipsEarned" ? <>Selected <span className="material-symbols-outlined" style={{ fontSize: 18 }}>check_circle</span></> : "Switch Source"}
                     </button>
@@ -725,7 +725,7 @@ export default function DashboardWithdraw() {
                 />
                 <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 8, display: "flex", alignItems: "center", gap: 4 }}>
                   <span className="material-symbols-outlined" style={{ fontSize: 14 }}>info</span>
-                  Make sure this address is correct. ERC-20 Network only.
+                  Make sure this destination is correct before continuing.
                 </p>
               </div>
 
@@ -776,7 +776,7 @@ export default function DashboardWithdraw() {
               <div style={{ marginTop: "var(--space-4)", padding: "var(--space-4)", borderRadius: "var(--radius-md)", background: "rgba(255,255,255,0.035)", border: "1px solid var(--border)", display: "grid", gap: "var(--space-3)" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", gap: "var(--space-3)", fontSize: "var(--text-small)" }}>
                   <span style={{ color: "var(--text-muted)" }}>Withdrawal source</span>
-                  <strong style={{ color: "var(--text-primary)" }}>{withdrawalSource === "tipsEarned" ? "Tips Earned claim wallet" : "Tip Balance wallet"}</strong>
+                  <strong style={{ color: "var(--text-primary)" }}>{withdrawalSource === "tipsEarned" ? "Tips Earned account" : "Tip Balance account"}</strong>
                 </div>
                 {withdrawalSource === "tipsEarned" && (
                   <>
@@ -796,7 +796,7 @@ export default function DashboardWithdraw() {
                 </div>
                 {withdrawalSource === "tipsEarned" && (
                   <p style={{ margin: 0, color: "var(--text-secondary)", fontSize: "var(--text-caption)", lineHeight: 1.45 }}>
-                    Privy may show your signing wallet in the approval dialog. The transfer itself is executed by the claim wallet above, so your Tip Balance is not the withdrawal source.
+                    The approval dialog may show the account used to confirm this action. Your selected Tips Earned balance remains the source for this withdrawal.
                   </p>
                 )}
               </div>
@@ -857,7 +857,7 @@ export default function DashboardWithdraw() {
               </div>
               <h4 style={{ fontSize: "var(--text-heading)", fontWeight: 700, margin: 0, color: "var(--text-primary)" }}>Before You Confirm</h4>
               <p style={{ fontSize: "var(--text-small)", color: "var(--text-secondary)", lineHeight: 1.6, margin: 0 }}>
-                Review the destination and selected source before signing. Wallet transfers are final once confirmed on-chain.
+                Review the destination and selected source before you continue. Completed withdrawals cannot be reversed.
               </p>
               <div style={{ display: "grid", gap: "var(--space-3)" }}>
                 {[
@@ -865,8 +865,8 @@ export default function DashboardWithdraw() {
                     icon: "account_balance_wallet",
                     title: withdrawalSource === "tipsEarned" ? "Funds come from Tips Earned" : "Funds come from Tip Balance",
                     body: withdrawalSource === "tipsEarned"
-                      ? "Your wallet signs the request, but the transfer is executed by your claim wallet."
-                      : "This transfer sends USDC directly from your connected wallet.",
+                      ? "Teep uses your verified creator balance for this withdrawal."
+                      : "Teep uses your available Tip Balance for this withdrawal.",
                   },
                   {
                     icon: "payments",
@@ -877,8 +877,8 @@ export default function DashboardWithdraw() {
                   },
                   {
                     icon: "travel_explore",
-                    title: "Use an ERC-20 compatible address",
-                    body: "Double-check the address. Teep cannot recover funds sent to the wrong wallet.",
+                    title: "Use a compatible destination",
+                    body: "Double-check the destination. Teep cannot recover money sent to the wrong place.",
                   },
                 ].map((item) => (
                   <div key={item.title} style={{ display: "grid", gridTemplateColumns: "32px minmax(0, 1fr)", gap: "var(--space-3)", alignItems: "start", padding: "var(--space-3)", borderRadius: "var(--radius-md)", background: "rgba(45,40,57,0.72)", border: "1px solid rgba(255,255,255,0.1)" }}>
@@ -899,14 +899,14 @@ export default function DashboardWithdraw() {
                   How long does it take?
                   <span className="material-symbols-outlined" style={{ fontSize: 18 }}>expand_more</span>
                 </summary>
-                <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8, lineHeight: 1.5 }}>Withdrawals are typically processed within 15–30 minutes, depending on network congestion.</p>
+                <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8, lineHeight: 1.5 }}>Most withdrawals finish within a few minutes. Some destinations may take longer.</p>
               </details>
               <details>
                 <summary style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", listStyle: "none", fontSize: "var(--text-small)", fontWeight: 500, color: "var(--text-secondary)" }}>
                   Can I cancel a withdrawal?
                   <span className="material-symbols-outlined" style={{ fontSize: 18 }}>expand_more</span>
                 </summary>
-                <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8, lineHeight: 1.5 }}>Once confirmed, transactions are irreversible. Double check your destination address.</p>
+                <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8, lineHeight: 1.5 }}>Once confirmed, a withdrawal cannot be cancelled. Double-check your destination before continuing.</p>
               </details>
             </div>
 
@@ -953,7 +953,7 @@ export default function DashboardWithdraw() {
               </button>
             </header>
             <h3 id="withdraw-confirmation-title">Confirm withdrawal</h3>
-            <p>Enter the code sent to {confirmationDialog.emailLabel} before Teep prepares the wallet transaction.</p>
+            <p>Enter the code sent to {confirmationDialog.emailLabel} before Teep prepares your withdrawal.</p>
             <div className="withdraw-confirmation-summary">
               <div><span>Source</span><strong>{confirmationDialog.sourceLabel}</strong></div>
               <div><span>Amount</span><strong>{confirmationDialog.amountLabel}</strong></div>

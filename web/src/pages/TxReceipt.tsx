@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import * as QRCode from "qrcode";
-import { API_BASE, CHROME_STORE_URL, RECEIPT_BASE_URL, DOCS_URL, CHAIN_NAME, EXPLORER_TX_URL, HAS_CHROME_STORE_LISTING } from "../config";
+import { API_BASE, CHROME_STORE_URL, RECEIPT_BASE_URL, DOCS_URL, CHAIN_NAME, EXPLORER_TX_URL } from "../config";
 import { avatarErrorFallback, xAvatarUrl } from "../lib/avatar";
 
 interface ReceiptData {
@@ -53,8 +53,8 @@ function XLogoIcon({ className }: { className?: string }) {
   );
 }
 
-const claimLabel = HAS_CHROME_STORE_LISTING ? "Claim My Tip Now" : "Get Teep";
 const appPath = "/dashboard";
+const claimPath = "/dashboard?claim=creator";
 
 function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
   ctx.beginPath();
@@ -494,11 +494,16 @@ export default function TxReceipt() {
             You received a tip
           </h3>
           <p className="tx-receipt-claim-desc">
-            Install the Teep extension to claim your funds instantly. All tips are held securely on-chain until you connect your wallet.
+            Connect your X account in the Teep web app to claim tips sent to this creator profile. It only takes a moment.
           </p>
-          <a href={CHROME_STORE_URL} target="_blank" rel="noopener noreferrer" className="tx-receipt-claim-cta">
-            {claimLabel}
-          </a>
+          <div className="tx-receipt-claim-actions">
+            <Link to={claimPath} className="tx-receipt-claim-cta">
+              Claim in web app
+            </Link>
+            <a href={CHROME_STORE_URL} target="_blank" rel="noopener noreferrer" className="tx-receipt-claim-secondary">
+              Prefer the extension?
+            </a>
+          </div>
         </div>}
 
         <div className="tx-receipt-actions">
@@ -540,7 +545,7 @@ export default function TxReceipt() {
             How Teep Works
           </h4>
           <p className="tx-receipt-how-p">
-            Teep lets fans tip creators directly from posts on X. Tips go directly from sender wallet to creator wallet. <strong>Teep never holds your funds.</strong> All transactions are transparent and verifiable on Arc.
+            Teep lets supporters tip creators directly from posts on X. Creators can connect their account, claim what they receive, and manage everything from one Teep dashboard. <strong>Teep does not take custody of creator funds.</strong>
           </p>
         </div>
       </main>

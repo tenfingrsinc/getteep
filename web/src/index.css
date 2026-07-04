@@ -14754,6 +14754,13 @@ a.creator-public-supporter-card:hover {
   margin-bottom: var(--space-8);
   line-height: 1.5;
 }
+.tx-receipt-claim-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
 .tx-receipt-claim-cta {
   display: inline-flex;
   align-items: center;
@@ -14772,6 +14779,15 @@ a.creator-public-supporter-card:hover {
 .tx-receipt-claim-cta:hover {
   transform: translateY(-2px);
   box-shadow: 0 12px 36px rgba(99, 36, 235, 0.4);
+}
+.tx-receipt-claim-secondary {
+  color: var(--text-secondary);
+  font-size: var(--text-small);
+  font-weight: 700;
+  text-decoration: none;
+}
+.tx-receipt-claim-secondary:hover {
+  color: var(--accent);
 }
 .tx-receipt-actions {
   display: grid;
