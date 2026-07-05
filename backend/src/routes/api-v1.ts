@@ -989,6 +989,7 @@ router.get("/creators/:username", async (req: Request, res: Response) => {
   const username = (req.params.username as string).replace(/^@/, "").toLowerCase();
   const db = getDb();
 
+  try {
   const claim = await db
     .prepare("SELECT author_id, username, display_name, profile_image_url FROM verified_claims WHERE LOWER(username) = ?")
     .get(username) as { author_id: string; username: string; display_name: string | null; profile_image_url: string | null } | undefined;
@@ -1008,7 +1009,8 @@ router.get("/creators/:username", async (req: Request, res: Response) => {
 
   const topPosts = await db
     .prepare(
-      `SELECT t.content_id, SUM(CAST(t.amount AS NUMERIC)) as total, COUNT(*) as count, m.tweet_id, m.author_handle
+      `SELECT t.content_id, SUM(CAST(t.amount AS NUMERIC)) as total, COUNT(*) as count,
+              MAX(m.tweet_id) as tweet_id, MAX(m.author_handle) as author_handle
        FROM tips t LEFT JOIN tip_metadata m ON t.content_id = m.content_id
        WHERE ${creatorTipPredicate("t")} GROUP BY t.content_id ORDER BY total DESC LIMIT 10`
     )
@@ -1069,6 +1071,10 @@ router.get("/creators/:username", async (req: Request, res: Response) => {
       fromIdentity: tip.from_addr ? supporterIdentities.get(String(tip.from_addr).toLowerCase()) ?? null : null,
     })),
   });
+  } catch (error) {
+    console.error("[API v1] Creator profile failed:", error instanceof Error ? error.message : error);
+    err(res, 500, "Creator profile unavailable", "CREATOR_PROFILE_FAILED");
+  }
 });
 
 // ─── GET /creators/:username/earnings-over-time ───────────────────────────

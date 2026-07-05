@@ -83,7 +83,7 @@ export async function getPublicCreatorProfileByUsername(usernameParam: string): 
   const topPosts = await db
     .prepare(
       `SELECT t.content_id, SUM(CAST(t.amount AS NUMERIC)) as total, COUNT(*) as count,
-              m.tweet_id, m.author_handle
+              MAX(m.tweet_id) as tweet_id, MAX(m.author_handle) as author_handle
        FROM tips t
        LEFT JOIN tip_metadata m ON t.content_id = m.content_id
        WHERE ${creatorTipPredicate("t")}

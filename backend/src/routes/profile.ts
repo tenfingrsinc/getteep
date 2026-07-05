@@ -11,14 +11,19 @@ const router = Router();
  * Returns creator stats: totalReceived, tipCount, topPosts.
  */
 router.get("/username/:username", async (req: Request, res: Response) => {
-  const profile = await getPublicCreatorProfileByUsername(req.params.username as string);
-  if (!profile) {
-    res.status(404).json({ error: "Creator not found or not verified" });
-    return;
-  }
+  try {
+    const profile = await getPublicCreatorProfileByUsername(req.params.username as string);
+    if (!profile) {
+      res.status(404).json({ error: "Creator not found or not verified" });
+      return;
+    }
 
-  res.set("Cache-Control", "public, max-age=60");
-  res.json(profile);
+    res.set("Cache-Control", "public, max-age=60");
+    res.json(profile);
+  } catch (error) {
+    console.error("[Profile] Public creator profile failed:", error instanceof Error ? error.message : error);
+    res.status(500).json({ error: "Creator profile unavailable" });
+  }
 });
 
 /**
@@ -26,38 +31,43 @@ router.get("/username/:username", async (req: Request, res: Response) => {
  * Public tipper profile: total sent, creators supported, etc.
  */
 router.get("/tipper/:address", async (req: Request, res: Response) => {
-  const address = await resolveTipperIdentifier(req.params.address as string);
-  if (!address) {
-    res.status(404).json({ error: "Tipper not found" });
-    return;
-  }
-  const settings = await getUserSettings(address);
-  const identity = await publicIdentity(address);
-  if (settings.privacy.privateActivity) {
+  try {
+    const address = await resolveTipperIdentifier(req.params.address as string);
+    if (!address) {
+      res.status(404).json({ error: "Tipper not found" });
+      return;
+    }
+    const settings = await getUserSettings(address);
+    const identity = await publicIdentity(address);
+    if (settings.privacy.privateActivity) {
+      res.json({
+        address: settings.privacy.hideAddress ? null : address,
+        identity: identity.label,
+        privateActivity: true,
+        totalSent: "0",
+        tipCount: 0,
+        thankYouReceivedCount: 0,
+        recentTips: [],
+        creatorsSupported: [],
+      });
+      return;
+    }
+    const stats = await getUnifiedTipperStats(address);
+
     res.json({
       address: settings.privacy.hideAddress ? null : address,
       identity: identity.label,
-      privateActivity: true,
-      totalSent: "0",
-      tipCount: 0,
-      thankYouReceivedCount: 0,
-      recentTips: [],
-      creatorsSupported: [],
+      privateActivity: false,
+      totalSent: stats.totalSent,
+      tipCount: stats.tipCount,
+      thankYouReceivedCount: stats.thankYouReceivedCount,
+      recentTips: stats.recentTips,
+      creatorsSupported: stats.creatorsSupported,
     });
-    return;
+  } catch (error) {
+    console.error("[Profile] Public tipper profile failed:", error instanceof Error ? error.message : error);
+    res.status(500).json({ error: "Tipper profile unavailable" });
   }
-  const stats = await getUnifiedTipperStats(address);
-
-  res.json({
-    address: settings.privacy.hideAddress ? null : address,
-    identity: identity.label,
-    privateActivity: false,
-    totalSent: stats.totalSent,
-    tipCount: stats.tipCount,
-    thankYouReceivedCount: stats.thankYouReceivedCount,
-    recentTips: stats.recentTips,
-    creatorsSupported: stats.creatorsSupported,
-  });
 });
 
 export default router;
