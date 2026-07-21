@@ -21,7 +21,14 @@ const TIP_CONTRACT_ADDRESS = process.env.TIP_CONTRACT_ADDRESS as `0x${string}`;
 const X_TIPPING_ROUTER_ADDRESS = process.env.X_TIPPING_ROUTER_ADDRESS as `0x${string}` | undefined;
 const FACTORY_ADDRESS = process.env.FACTORY_ADDRESS as `0x${string}`;
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL_MS || "5000");
-const BATCH_SIZE = BigInt(process.env.INDEXER_BATCH_SIZE || "5000");
+// Arc Testnet's Alchemy free tier accepts eth_getLogs over at most 10 inclusive
+// blocks. Keep the provider limit separate so paid/self-hosted RPCs can opt into
+// larger ranges without accidentally exceeding their own cap.
+const CONFIGURED_BATCH_SIZE = BigInt(process.env.INDEXER_BATCH_SIZE || "10");
+const RPC_MAX_LOG_BLOCK_RANGE = BigInt(process.env.RPC_MAX_LOG_BLOCK_RANGE || "10");
+const BATCH_SIZE = CONFIGURED_BATCH_SIZE < RPC_MAX_LOG_BLOCK_RANGE
+  ? CONFIGURED_BATCH_SIZE
+  : RPC_MAX_LOG_BLOCK_RANGE;
 const START_BLOCK = BigInt(process.env.INDEXER_START_BLOCK || process.env.DEPLOYMENT_BLOCK || "0");
 const CONFIRMATIONS = BigInt(process.env.INDEXER_CONFIRMATIONS || "2");
 const RESCAN_BLOCKS = BigInt(process.env.INDEXER_RESCAN_BLOCKS || "100");
@@ -127,7 +134,10 @@ export class Indexer {
     // Process in batches
     let batchFrom = fromBlock;
     while (batchFrom <= toBlock) {
-      const batchTo = batchFrom + BATCH_SIZE > toBlock ? toBlock : batchFrom + BATCH_SIZE;
+      // Both RPC providers and JSON-RPC interpret fromBlock/toBlock as inclusive.
+      // A 10-block limit therefore ends at batchFrom + 9, not batchFrom + 10.
+      const batchEnd = batchFrom + BATCH_SIZE - 1n;
+      const batchTo = batchEnd > toBlock ? toBlock : batchEnd;
 
       // Fetch tip events
       const tipLogs = await this.client.getLogs({
