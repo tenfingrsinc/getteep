@@ -18,6 +18,8 @@ interface RechargePromptProps {
   retryStatus?: "idle" | "checking" | "insufficient";
   /** Shown when retryStatus === "insufficient" after clicking "I've added funds" */
   retryMessage?: string | null;
+  /** Preserves the pending action when the funding page opens in a new tab. */
+  fundingQuery?: string;
 }
 
 export default function RechargePrompt({
@@ -30,6 +32,7 @@ export default function RechargePrompt({
   walletAddress,
   retryStatus = "idle",
   retryMessage,
+  fundingQuery,
 }: RechargePromptProps) {
   const [fundingDropdownOpen, setFundingDropdownOpen] = useState(false);
   const [faucetLoading, setFaucetLoading] = useState(false);
@@ -86,7 +89,9 @@ export default function RechargePrompt({
 
   if (!open) return null;
 
-  const fundLink = `/fund?intent=x-tip&recipient=${encodeURIComponent(handle)}&amount=${encodeURIComponent(amountUsd)}`;
+  const fundLink = fundingQuery
+    ? `/fund?${fundingQuery}`
+    : `/fund?intent=x-tip&recipient=${encodeURIComponent(handle)}&amount=${encodeURIComponent(amountUsd)}`;
 
   return (
     <div
@@ -121,9 +126,19 @@ export default function RechargePrompt({
               {fundingDropdownOpen && (
                 <div className="recharge-funding-menu" role="menu">
                   {fundingPolicy.providers.fiatOnramp.enabled ? (
-                    <Link to={fundLink} className="recharge-funding-item" role="menuitem" onClick={onClose}>
+                    <a
+                      href={fundLink}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="recharge-funding-item"
+                      role="menuitem"
+                      onClick={() => {
+                        setFundingDropdownOpen(false);
+                        setFaucetMsg("Funding opened in a new tab. Your tip is still waiting here.");
+                      }}
+                    >
                       {fundingPolicy.providers.fiatOnramp.label}
-                    </Link>
+                    </a>
                   ) : (
                     <button type="button" className="recharge-funding-item recharge-funding-item--btn" role="menuitem" disabled title={fundingPolicy.providers.fiatOnramp.disabledReason}>
                       {fundingPolicy.providers.fiatOnramp.label} - unavailable

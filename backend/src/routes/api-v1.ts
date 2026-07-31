@@ -2312,7 +2312,7 @@ router.get("/wallet/:address/usdc-balance", async (req: Request, res: Response) 
     if (settings.notifications.lowBalance && thresholdRaw > 0n && balanceRaw < thresholdRaw) {
       await createLowBalanceNotification({ userAddress: address, balanceRaw: rawStr, thresholdUsd: settings.defaultTipAmount });
     }
-    res.set("Cache-Control", "public, max-age=15");
+    res.set("Cache-Control", "private, no-store");
     res.json({ address, balanceRaw: rawStr, balanceUsd: usd });
   } catch (e) {
     console.error("[API v1] USDC balance fetch error:", e);

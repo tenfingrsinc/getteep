@@ -10,6 +10,9 @@ export type IntentReplyContext = {
   amount?: string;
   receiptId?: string;
   intent?: "x-tip" | "x-balance";
+  tipKind?: "post_tip" | "direct_creator_tip";
+  targetTweetId?: string;
+  targetHandle?: string;
 };
 
 export type TipReplyItem = {
@@ -44,6 +47,9 @@ export function buildSenderOnboardingUrl(context?: IntentReplyContext) {
     tweetId: context?.tweetId,
     recipient: context?.recipientHandle?.replace(/^@/, ""),
     amount: context?.amount,
+    kind: context?.tipKind,
+    targetTweetId: context?.targetTweetId,
+    targetHandle: context?.targetHandle?.replace(/^@/, ""),
   });
 }
 
@@ -73,11 +79,14 @@ export function buildInsufficientBalanceReply(handle?: string, context?: IntentR
     "",
     `Reason: ${who} Teep balance is lower than the requested amount.`,
     "",
-    `Add funds: ${buildAppUrl("/fund", {
+    `Continue tip: ${buildAppUrl("/x/onboard", {
       intent: "x-tip",
       tweetId: context?.tweetId,
       recipient: context?.recipientHandle?.replace(/^@/, ""),
       amount: context?.amount,
+      kind: context?.tipKind,
+      targetTweetId: context?.targetTweetId,
+      targetHandle: context?.targetHandle?.replace(/^@/, ""),
     })}`,
   ].join("\n");
 }

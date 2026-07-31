@@ -319,11 +319,15 @@ function getTipContext(params: {
 }
 
 function firstIntentContext(post: XIncomingPost, intent?: TipIntent) {
+  const isPostTip = intent?.targetType === "post";
   return {
     tweetId: post.id,
     recipientHandle: intent?.recipientXHandle || post.parentAuthorUsername,
     amount: intent?.amount,
     intent: "x-tip" as const,
+    tipKind: isPostTip ? "post_tip" as const : "direct_creator_tip" as const,
+    targetTweetId: isPostTip ? post.parentTweetId : post.id,
+    targetHandle: isPostTip ? post.parentAuthorUsername : post.authorUsername,
   };
 }
 

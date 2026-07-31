@@ -61,9 +61,6 @@ export default function FundAccount() {
   const hasXTipContext = intent === "x-tip" && recipient && /^\d+(\.\d{1,2})?$/.test(amount);
   const requiredTipRaw = hasXTipContext ? usdToRaw(amount) : 0n;
   const hasEnoughForTip = hasXTipContext && BigInt(balanceRaw || "0") >= requiredTipRaw;
-  const xTipComposeUrl = hasXTipContext
-    ? `https://twitter.com/intent/tweet?text=${encodeURIComponent(`@teepagent tip @${recipient} ${amount}`)}`
-    : "";
   const [fiatAmount, setFiatAmount] = useState(hasXTipContext ? amount : "10.00");
   const [onrampLoading, setOnrampLoading] = useState(false);
   const [onrampStatus, setOnrampStatus] = useState("");
@@ -100,7 +97,7 @@ export default function FundAccount() {
     if (!address) return;
     let cancelled = false;
     const refreshBalance = () => {
-      fetch(`${API_BASE}/x-balance/${address}`, { cache: "no-store" })
+      fetch(`${API_BASE}/api/v1/wallet/${address}/usdc-balance`, { cache: "no-store" })
         .then((response) => response.ok ? response.json() : null)
         .then((payload) => {
           if (!cancelled && payload?.balanceRaw != null) setBalanceRaw(String(payload.balanceRaw));
@@ -250,9 +247,8 @@ export default function FundAccount() {
           <span className="material-symbols-outlined" aria-hidden>check_circle</span>
           <div>
             <strong>Your ${amount} tip is funded</strong>
-            <span>Send the prepared command to complete your tip to @{recipient}.</span>
+            <span>Return to the original Teep tip tab. Its balance updates automatically.</span>
           </div>
-          <a href={xTipComposeUrl} target="_blank" rel="noreferrer" className="btn-primary">Send tip on X</a>
         </div>
       )}
 
@@ -330,7 +326,7 @@ export default function FundAccount() {
         <section className="x-tip-link-hero">
           <p className="eyebrow">X tip setup</p>
           <h1>{hasEnoughForTip ? "Your tip is ready" : `Fund your $${amount} tip`}</h1>
-          <p>{hasEnoughForTip ? `Complete your tip to @${recipient} on X.` : `Choose a funding method for your tip to @${recipient}. This page updates when the funds arrive.`}</p>
+          <p>{hasEnoughForTip ? `Return to your original Teep tab to complete the tip to @${recipient}.` : `Choose a funding method for your tip to @${recipient}. This page updates when the funds arrive.`}</p>
         </section>
         {fundingPanel}
       </main>

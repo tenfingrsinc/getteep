@@ -10,7 +10,6 @@ import DashboardShell from "../components/DashboardShell";
 import { DashboardConnectPage, DashboardPreparingPage } from "../components/DashboardAuthState";
 
 const PAGE_SIZE = 7;
-const X_TIPPING_ALLOWANCE_DAYS = 30n;
 
 type SettingsTab = "identity" | "tipping" | "receipts" | "funding" | "grow" | "notifications" | "privacy" | "engagement" | "support";
 
@@ -720,7 +719,7 @@ export default function DashboardSettings() {
       maxPerTipRaw = usdInputToRaw(xMaxPerTip);
       maxDailyRaw = usdInputToRaw(xMaxDaily);
       if (BigInt(maxDailyRaw) < BigInt(maxPerTipRaw)) {
-        throw new Error("Daily limit must be at least the per-tip limit.");
+        throw new Error("X tip budget must be at least the per-tip limit.");
       }
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Check the limit amounts.");
@@ -735,7 +734,7 @@ export default function DashboardSettings() {
       if (hasRouter) {
         if (nextEnabled) {
           const maxDaily = BigInt(maxDailyRaw);
-          const allowanceRaw = maxDaily * X_TIPPING_ALLOWANCE_DAYS;
+          const allowanceRaw = maxDaily;
           await smartWalletClient.sendTransaction({
             account: smartWalletClient.account,
             calls: [
@@ -1063,8 +1062,8 @@ export default function DashboardSettings() {
                         </div>
                         <div className="dashboard-settings-limit-field">
                           <span className="dashboard-settings-label-with-help">
-                            <label htmlFor="x-max-daily">Daily tip limit on X</label>
-                            <HelperTip label="Total combined value of X tip commands allowed in a 24-hour window." />
+                            <label htmlFor="x-max-daily">X tip budget</label>
+                            <HelperTip label="Total USDC approved for future X commands. This is also the daily cap; once the budget is spent, Teep asks you to authorize a new one." />
                           </span>
                           <div className="dashboard-settings-input-row is-readonly">
                             <span aria-hidden>$</span>
