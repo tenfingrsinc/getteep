@@ -1,5 +1,12 @@
 import { defineChain } from "viem";
 
+const arcRpcUrl = import.meta.env.VITE_ARC_RPC_URL;
+const arcWebSocketUrl = import.meta.env.VITE_ARC_WS_URL;
+
+if (!arcRpcUrl) {
+  throw new Error("Missing VITE_ARC_RPC_URL for the Teep web app");
+}
+
 export const arcTestnet = defineChain({
   id: 5_042_002,
   name: "Arc Testnet",
@@ -10,8 +17,8 @@ export const arcTestnet = defineChain({
   },
   rpcUrls: {
     default: {
-      http: ["https://rpc.testnet.arc.network"],
-      webSocket: ["wss://rpc.testnet.arc.network"],
+      http: [arcRpcUrl],
+      ...(arcWebSocketUrl ? { webSocket: [arcWebSocketUrl] } : {}),
     },
   },
   blockExplorers: {
@@ -22,4 +29,3 @@ export const arcTestnet = defineChain({
   },
   testnet: true,
 });
-
