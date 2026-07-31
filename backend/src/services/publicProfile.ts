@@ -69,7 +69,7 @@ type RecentTipRow = {
 };
 
 function creatorTipPredicate(alias = "t"): string {
-  return `(${alias}.author_id = ? OR LOWER(COALESCE(m.author_handle, '')) = LOWER(?))`;
+  return `(${alias}.author_id = ? OR (COALESCE(m.kind, 'post_tip') = 'post_tip' AND LOWER(COALESCE(m.author_handle, '')) = LOWER(?)))`;
 }
 
 function safeBigInt(value: unknown): bigint {
@@ -148,6 +148,7 @@ export async function getPublicCreatorProfileByUsername(usernameParam: string): 
        FROM tips t
        LEFT JOIN tip_metadata m ON t.content_id = m.content_id
        WHERE ${creatorTipPredicate("t")}
+         AND COALESCE(m.kind, 'post_tip') = 'post_tip'
        GROUP BY t.content_id
        ORDER BY total DESC
        LIMIT 10`,
@@ -206,9 +207,16 @@ export async function getPublicCreatorProfileByUsername(usernameParam: string): 
   const recentTips = await db
     .prepare(
       `SELECT t.from_address, t.amount, t.timestamp, t.tx_hash,
-              m.tweet_id, m.author_handle
+              CASE WHEN COALESCE(xbt.tip_kind, m.kind, 'post_tip') = 'direct_creator_tip' THEN NULL ELSE m.tweet_id END as tweet_id,
+              CASE
+                WHEN COALESCE(xbt.tip_kind, m.kind, 'post_tip') = 'direct_creator_tip'
+                  THEN COALESCE(xbt.recipient_x_username, m.author_handle)
+                ELSE m.author_handle
+              END as author_handle,
+              CASE WHEN COALESCE(xbt.tip_kind, m.kind, 'post_tip') = 'post_tip' THEN xbt.context_author_username ELSE NULL END as tweet_author_handle
        FROM tips t
        LEFT JOIN tip_metadata m ON t.content_id = m.content_id
+       LEFT JOIN x_bot_tips xbt ON xbt.tx_hash IS NOT NULL AND LOWER(xbt.tx_hash) = LOWER(t.tx_hash)
        WHERE ${creatorTipPredicate("t")}
        ORDER BY t.timestamp DESC
        LIMIT 12`,

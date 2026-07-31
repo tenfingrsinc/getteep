@@ -11,6 +11,7 @@
     "db:migrate:prod": "node dist/db/migrate.js",
     "ops:repair-claim-wallets": "ts-node src/scripts/repairComputedClaimWalletRows.ts",
     "ops:claim-wallet": "ts-node src/scripts/claimWalletConsistency.ts",
+    "ops:provision-claim-wallets": "ts-node src/scripts/provisionMissingClaimWallets.ts",
     "ops:reconcile-x-bot": "ts-node src/scripts/reconcileXBotTips.ts"
   },
   "dependencies": {

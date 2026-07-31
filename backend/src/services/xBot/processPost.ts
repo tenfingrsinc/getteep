@@ -475,7 +475,12 @@ export async function processIncomingPost(post: XIncomingPost): Promise<ProcessP
              author_handle = excluded.author_handle,
              tweet_id = excluded.tweet_id,
              kind = excluded.kind`
-        ).run(tip.contentId, tip.contextAuthorUsername, tip.contextTweetId, tip.tipKind);
+        ).run(
+          tip.contentId,
+          tip.tipKind === "direct_creator_tip" ? tip.recipient.xUsername : tip.contextAuthorUsername,
+          tip.tipKind === "direct_creator_tip" ? null : tip.contextTweetId,
+          tip.tipKind,
+        );
         await txDb.prepare(
           `INSERT INTO x_bot_tips (
             id, sender_address, recipient_address, recipient_x_user_id, recipient_x_username,

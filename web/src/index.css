@@ -15718,6 +15718,117 @@ a.creator-public-supporter-card:hover {
   font-weight: 700;
 }
 
+.x-tip-onboarding-page {
+  align-content: start;
+}
+
+.x-tip-onboarding-card {
+  width: min(760px, calc(100% - 40px));
+  display: grid;
+  gap: var(--space-6);
+}
+
+.x-tip-onboarding-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--border);
+}
+
+.x-tip-onboarding-steps span {
+  min-width: 0;
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px;
+  background: #17131f;
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  font-weight: 750;
+  text-align: center;
+}
+
+.x-tip-onboarding-steps span.is-active {
+  color: var(--text-primary);
+  background: #211832;
+}
+
+.x-tip-onboarding-steps i {
+  width: 24px;
+  height: 24px;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  font-style: normal;
+  font-size: 0.75rem;
+}
+
+.x-tip-onboarding-action {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) auto;
+  gap: var(--space-4);
+  align-items: center;
+}
+
+.x-tip-onboarding-action > .material-symbols-outlined {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  background: rgba(109, 40, 217, 0.18);
+  color: var(--accent);
+}
+
+.x-tip-onboarding-action h2,
+.x-tip-onboarding-action p {
+  margin: 0;
+}
+
+.x-tip-onboarding-action h2 {
+  font-size: 1.125rem;
+}
+
+.x-tip-onboarding-action p {
+  margin-top: 5px;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.x-tip-funding-ready {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  gap: var(--space-4);
+  align-items: center;
+  padding: var(--space-4);
+  border: 1px solid rgba(22, 199, 132, 0.35);
+  border-radius: var(--radius-sm);
+  background: rgba(22, 199, 132, 0.08);
+}
+
+.x-tip-funding-ready > .material-symbols-outlined {
+  color: #16c784;
+  font-size: 2rem;
+}
+
+.x-tip-funding-ready div {
+  display: grid;
+  gap: 4px;
+}
+
+.x-tip-funding-ready span {
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+
 @media (max-width: 860px) {
   .x-tip-link-page {
     min-height: calc(100vh - 86px);
@@ -15750,6 +15861,35 @@ a.creator-public-supporter-card:hover {
   .x-tip-link-hero-top {
     justify-content: center;
     gap: 0.875rem;
+  }
+
+  .x-tip-onboarding-card {
+    width: min(38.75rem, calc(100% - 32px));
+  }
+
+  .x-tip-onboarding-steps span {
+    flex-direction: column;
+    font-size: 0.7rem;
+  }
+
+  .x-tip-onboarding-action {
+    grid-template-columns: 44px minmax(0, 1fr);
+  }
+
+  .x-tip-onboarding-action .btn-primary {
+    grid-column: 1 / -1;
+    width: 100%;
+    justify-content: center;
+  }
+
+  .x-tip-funding-ready {
+    grid-template-columns: 36px minmax(0, 1fr);
+  }
+
+  .x-tip-funding-ready .btn-primary {
+    grid-column: 1 / -1;
+    width: 100%;
+    justify-content: center;
   }
 
   .x-tip-link-claim-copy h1 {

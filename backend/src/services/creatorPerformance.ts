@@ -217,10 +217,17 @@ export async function getCreatorPerformance(
     .prepare(
       `SELECT t.content_id, t.author_id, t.from_address, t.to_address, t.amount, t.tx_hash,
               t.block_number, t.log_index, t.timestamp,
-              m.author_handle, m.tweet_id, m.kind
+              CASE
+                WHEN COALESCE(xbt.tip_kind, m.kind, 'post_tip') = 'direct_creator_tip'
+                  THEN COALESCE(xbt.recipient_x_username, m.author_handle)
+                ELSE m.author_handle
+              END as author_handle,
+              CASE WHEN COALESCE(xbt.tip_kind, m.kind, 'post_tip') = 'direct_creator_tip' THEN NULL ELSE m.tweet_id END as tweet_id,
+              COALESCE(xbt.tip_kind, m.kind) as kind
        FROM tips t
        LEFT JOIN tip_metadata m ON t.content_id = m.content_id
-       WHERE (t.author_id = ? OR LOWER(COALESCE(m.author_handle, '')) = LOWER(?))
+       LEFT JOIN x_bot_tips xbt ON xbt.tx_hash IS NOT NULL AND LOWER(xbt.tx_hash) = LOWER(t.tx_hash)
+       WHERE (t.author_id = ? OR (COALESCE(m.kind, 'post_tip') = 'post_tip' AND LOWER(COALESCE(m.author_handle, '')) = LOWER(?)))
       ORDER BY t.timestamp DESC, t.block_number DESC, t.log_index DESC`
     )
     .all(claim.author_id, claim.username) as TipRow[];

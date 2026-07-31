@@ -38,6 +38,15 @@ export function buildIntentUrl(context?: IntentReplyContext) {
   });
 }
 
+export function buildSenderOnboardingUrl(context?: IntentReplyContext) {
+  return buildAppUrl("/x/onboard", {
+    intent: context?.intent || "x-tip",
+    tweetId: context?.tweetId,
+    recipient: context?.recipientHandle?.replace(/^@/, ""),
+    amount: context?.amount,
+  });
+}
+
 export function buildConnectReply(handle?: string, context?: IntentReplyContext) {
   const who = handle ? `@${handle.replace(/^@/, "")}` : "You";
   const intentLine =
@@ -51,7 +60,7 @@ export function buildConnectReply(handle?: string, context?: IntentReplyContext)
     intentLine ? "" : undefined,
     `${who} needs to connect X on Teep and fund a Teep balance first.`,
     "",
-    `Connect: ${buildIntentUrl(context)}`,
+    `Connect and fund: ${buildSenderOnboardingUrl(context)}`,
   ]
     .filter(Boolean)
     .join("\n");

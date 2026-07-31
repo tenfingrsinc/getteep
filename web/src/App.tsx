@@ -12,6 +12,7 @@ import Support from "./pages/Support";
 import Leaderboard from "./pages/Leaderboard";
 import FundAccount from "./pages/FundAccount";
 import XTipRegister from "./pages/XTipRegister";
+import XTipOnboarding from "./pages/XTipOnboarding";
 import XReceipt from "./pages/XReceipt";
 import Dashboard from "./pages/Dashboard";
 import DashboardWithdraw from "./pages/DashboardWithdraw";
@@ -172,6 +173,7 @@ export default function App() {
         <Route path="/privacy" element={<Privacy />} />
         <Route path="/support" element={<Support />} />
         <Route path="/register" element={<XTipRegister />} />
+        <Route path="/x/onboard" element={<XTipOnboarding />} />
         <Route path="/fund" element={<FundAccount />} />
         <Route path="/x/:receiptId" element={<XReceipt />} />
         <Route path="/leaderboard" element={<Leaderboard />} />

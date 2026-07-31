@@ -7,6 +7,7 @@ import { verifyWalletProof } from "../services/walletAuth";
 import { recordSecurityEvent } from "../services/ops";
 import { getConfiguredChain } from "../config/chain";
 import { createReferralEarnedNotification, createWithdrawalConfirmedNotification } from "../services/notifications";
+import { claimWalletBelongsToOwner } from "../services/claimWalletProvisioner";
 import {
   FEE_BPS,
   REFERRER_SHARE_BPS,
@@ -395,13 +396,7 @@ router.post("/confirm", async (req: Request, res: Response) => {
       res.status(400).json({ error: "claimWalletAddress is required for Tips Earned withdrawals." });
       return;
     }
-    const selectedSource = await db.prepare(
-      `SELECT wallet_address
-       FROM claim_wallets
-       WHERE LOWER(owner_address) = ? AND LOWER(wallet_address) = ?
-       LIMIT 1`
-    ).get(row.owner_address, claimWalletAddress) as { wallet_address: string } | undefined;
-    if (!selectedSource) {
+    if (!(await claimWalletBelongsToOwner(row.owner_address, claimWalletAddress))) {
       res.status(403).json({ error: "The selected Tips Earned source does not belong to this account." });
       return;
     }

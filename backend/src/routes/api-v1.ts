@@ -53,7 +53,7 @@ async function resolveAuthorId(db: ReturnType<typeof getDb>, ownerAddress: strin
 }
 
 function creatorTipPredicate(alias = "t"): string {
-  return `(${alias}.author_id = ? OR LOWER(COALESCE(m.author_handle, '')) = LOWER(?))`;
+  return `(${alias}.author_id = ? OR (COALESCE(m.kind, 'post_tip') = 'post_tip' AND LOWER(COALESCE(m.author_handle, '')) = LOWER(?)))`;
 }
 
 /** Standard error response */
@@ -1042,7 +1042,8 @@ router.get("/creators/:username", async (req: Request, res: Response) => {
       `SELECT t.content_id, SUM(CAST(t.amount AS NUMERIC)) as total, COUNT(*) as count,
               MAX(m.tweet_id) as tweet_id, MAX(m.author_handle) as author_handle
        FROM tips t LEFT JOIN tip_metadata m ON t.content_id = m.content_id
-       WHERE ${creatorTipPredicate("t")} GROUP BY t.content_id ORDER BY total DESC LIMIT 10`
+       WHERE ${creatorTipPredicate("t")} AND COALESCE(m.kind, 'post_tip') = 'post_tip'
+       GROUP BY t.content_id ORDER BY total DESC LIMIT 10`
     )
     .all(claim.author_id, claim.username) as Array<{
       content_id: string;
@@ -1089,8 +1090,15 @@ router.get("/creators/:username", async (req: Request, res: Response) => {
   const recentTips = await db
     .prepare(
       `SELECT 'tip_received' as type, t.amount, t.tx_hash, t.timestamp,
-              t.from_address as from_addr, m.author_handle, m.tweet_id
+              t.from_address as from_addr,
+              CASE
+                WHEN COALESCE(xbt.tip_kind, m.kind, 'post_tip') = 'direct_creator_tip'
+                  THEN COALESCE(xbt.recipient_x_username, m.author_handle)
+                ELSE m.author_handle
+              END as author_handle,
+              CASE WHEN COALESCE(xbt.tip_kind, m.kind, 'post_tip') = 'direct_creator_tip' THEN NULL ELSE m.tweet_id END as tweet_id
        FROM tips t LEFT JOIN tip_metadata m ON t.content_id = m.content_id
+       LEFT JOIN x_bot_tips xbt ON xbt.tx_hash IS NOT NULL AND LOWER(xbt.tx_hash) = LOWER(t.tx_hash)
        WHERE ${creatorTipPredicate("t")}
        ORDER BY t.timestamp DESC
        LIMIT 100`

@@ -65,10 +65,16 @@ router.get("/recent-tips", async (req: Request, res: Response) => {
   const rows = await db
     .prepare(
       `SELECT t.amount, t.author_id, t.from_address, t.timestamp, t.content_id,
-              m.author_handle AS creator_handle,
-              m.author_handle AS meta_handle, m.tweet_id AS meta_tweet_id
+              CASE
+                WHEN COALESCE(xbt.tip_kind, m.kind, 'post_tip') = 'direct_creator_tip'
+                  THEN COALESCE(xbt.recipient_x_username, m.author_handle)
+                ELSE m.author_handle
+              END AS creator_handle,
+              CASE WHEN COALESCE(xbt.tip_kind, m.kind, 'post_tip') = 'direct_creator_tip' THEN NULL ELSE m.author_handle END AS meta_handle,
+              CASE WHEN COALESCE(xbt.tip_kind, m.kind, 'post_tip') = 'direct_creator_tip' THEN NULL ELSE m.tweet_id END AS meta_tweet_id
        FROM tips t
        LEFT JOIN tip_metadata m ON t.content_id = m.content_id
+       LEFT JOIN x_bot_tips xbt ON xbt.tx_hash IS NOT NULL AND LOWER(xbt.tx_hash) = LOWER(t.tx_hash)
        ORDER BY t.timestamp DESC
        LIMIT ?`
     )

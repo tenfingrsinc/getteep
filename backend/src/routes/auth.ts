@@ -10,6 +10,7 @@ import { createBackendPublicClient } from "../services/rpcClient";
 import { createCreatorClaimedNotifications } from "../services/notifications";
 import { claimPendingTipsForXUser } from "../services/teepBalance";
 import { formatUsdcRaw } from "../services/xBot/parseTipCommand";
+import { isClaimWalletProvisioningConfigured, provisionClaimWallet } from "../services/claimWalletProvisioner";
 
 const FACTORY_ABI = [
   { name: "isDeployed", type: "function", stateMutability: "view", inputs: [{ name: "_authorId", type: "uint256" }], outputs: [{ type: "bool" }] },
@@ -29,7 +30,7 @@ const attestationService = new AttestationService();
 const ALLOW_UNSIGNED_ATTESTATION = process.env.ALLOW_UNSIGNED_ATTESTATION === "true";
 
 function creatorTipPredicate(alias = "t"): string {
-  return `(${alias}.author_id = ? OR LOWER(COALESCE(m.author_handle, '')) = LOWER(?))`;
+  return `(${alias}.author_id = ? OR (COALESCE(m.kind, 'post_tip') = 'post_tip' AND LOWER(COALESCE(m.author_handle, '')) = LOWER(?)))`;
 }
 
 type OAuthFlowMode = "claim" | "refresh_profile" | "x_tipping";
@@ -118,6 +119,12 @@ async function pruneOAuthFlows() {
   } catch {
     /* Database may not be initialized during module load; next auth request will prune. */
   }
+}
+
+async function provisionConnectedClaimWallet(authorId: string, ownerAddress: string) {
+  if (!isClaimWalletProvisioningConfigured()) return null;
+  const attestation = await attestationService.createAttestation(authorId, ownerAddress);
+  return provisionClaimWallet({ authorId, ownerAddress, attestation });
 }
 
 function createPkcePair(): { codeVerifier: string; codeChallenge: string } {
@@ -374,6 +381,18 @@ router.get("/x/callback", async (req: Request, res: Response) => {
         maxDailyRaw
       );
 
+      try {
+        const provisioned = await provisionConnectedClaimWallet(authorIdForDb, ownerAddress);
+        if (provisioned?.deployed) {
+          console.log(`[Auth] Claim wallet ready for @${profile.username}: ${provisioned.walletAddress}`);
+        }
+      } catch (provisionError) {
+        console.error(
+          `[Auth] Claim wallet provisioning failed for @${profile.username}:`,
+          provisionError instanceof Error ? provisionError.message : provisionError,
+        );
+      }
+
       const claimResult = await claimPendingTipsForXUser(profile.id, ownerAddress);
       await createCreatorClaimedNotifications({
         authorId: authorIdForDb,
@@ -383,6 +402,11 @@ router.get("/x/callback", async (req: Request, res: Response) => {
       console.log(
         `[Auth] X tipping linked: @${profile.username} (${profile.id}) -> ${ownerAddress} (claimed ${claimResult.claimedCount})`
       );
+
+      if (flow.returnTo) {
+        res.redirect(303, flow.returnTo);
+        return;
+      }
 
       res.setHeader("Content-Type", "text/html");
       res.send(`<!DOCTYPE html>
@@ -526,14 +550,39 @@ router.get("/x/callback", async (req: Request, res: Response) => {
 
     console.log(`[Auth] Claim verified: @${profile.username} (${profile.id}) → ${flow.ownerAddress} [authorIdHash: ${authorIdHash}]`);
 
-    // 5. Store attestation keyed by owner address for extension to retrieve
-    await db.prepare(`
-      INSERT INTO pending_attestations (owner_address, attestation_json)
-      VALUES (?, ?)
-      ON CONFLICT(owner_address) DO UPDATE SET
-        attestation_json = excluded.attestation_json,
-        created_at = now()
-    `).run(flow.ownerAddress.toLowerCase(), JSON.stringify(attestation));
+    // 5. Provision through the current factory when a gas-paying backend signer
+    // is configured. Retain the attestation only as a fallback for older clients.
+    let claimWalletProvisioned = false;
+    try {
+      if (isClaimWalletProvisioningConfigured()) {
+        const provisioned = await provisionClaimWallet({
+          authorId: authorIdForDb,
+          ownerAddress: flow.ownerAddress.toLowerCase(),
+          attestation,
+        });
+        claimWalletProvisioned = provisioned.deployed;
+        if (provisioned.deployed) {
+          console.log(`[Auth] Claim wallet ready for @${profile.username}: ${provisioned.walletAddress}`);
+        }
+      }
+    } catch (provisionError) {
+      console.error(
+        `[Auth] Claim wallet provisioning failed for @${profile.username}:`,
+        provisionError instanceof Error ? provisionError.message : provisionError,
+      );
+    }
+
+    if (claimWalletProvisioned) {
+      await db.prepare("DELETE FROM pending_attestations WHERE owner_address = ?").run(flow.ownerAddress.toLowerCase());
+    } else {
+      await db.prepare(`
+        INSERT INTO pending_attestations (owner_address, attestation_json)
+        VALUES (?, ?)
+        ON CONFLICT(owner_address) DO UPDATE SET
+          attestation_json = excluded.attestation_json,
+          created_at = now()
+      `).run(flow.ownerAddress.toLowerCase(), JSON.stringify(attestation));
+    }
 
     // 6. Return styled success page
     res.setHeader("Content-Type", "text/html");

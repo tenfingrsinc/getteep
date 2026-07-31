@@ -24,6 +24,12 @@ function shortAddress(address: string) {
   return `${address.slice(0, 6)}...${address.slice(-4)}`;
 }
 
+function usdToRaw(value: string) {
+  if (!/^\d+(\.\d{1,2})?$/.test(value)) return 0n;
+  const [whole, fraction = ""] = value.split(".");
+  return BigInt(whole) * 1_000_000n + BigInt(fraction.padEnd(6, "0"));
+}
+
 export default function FundAccount() {
   const [searchParams] = useSearchParams();
   const { ready, authenticated, user, login } = usePrivy();
@@ -53,6 +59,11 @@ export default function FundAccount() {
   const recipient = (searchParams.get("recipient") || "").replace(/^@/, "").trim();
   const amount = (searchParams.get("amount") || "").replace(/^\$/, "").trim();
   const hasXTipContext = intent === "x-tip" && recipient && /^\d+(\.\d{1,2})?$/.test(amount);
+  const requiredTipRaw = hasXTipContext ? usdToRaw(amount) : 0n;
+  const hasEnoughForTip = hasXTipContext && BigInt(balanceRaw || "0") >= requiredTipRaw;
+  const xTipComposeUrl = hasXTipContext
+    ? `https://twitter.com/intent/tweet?text=${encodeURIComponent(`@teepagent tip @${recipient} ${amount}`)}`
+    : "";
   const [fiatAmount, setFiatAmount] = useState(hasXTipContext ? amount : "10.00");
   const [onrampLoading, setOnrampLoading] = useState(false);
   const [onrampStatus, setOnrampStatus] = useState("");
@@ -88,18 +99,21 @@ export default function FundAccount() {
   useEffect(() => {
     if (!address) return;
     let cancelled = false;
-    fetch(`${API_BASE}/x-balance/${address}`)
-      .then((response) => response.ok ? response.json() : null)
-      .then((payload) => {
-        if (!cancelled && payload?.balanceRaw) setBalanceRaw(String(payload.balanceRaw));
-      })
-      .catch(() => {
-        if (!cancelled) setBalanceRaw("0");
-      });
+    const refreshBalance = () => {
+      fetch(`${API_BASE}/x-balance/${address}`, { cache: "no-store" })
+        .then((response) => response.ok ? response.json() : null)
+        .then((payload) => {
+          if (!cancelled && payload?.balanceRaw != null) setBalanceRaw(String(payload.balanceRaw));
+        })
+        .catch(() => {});
+    };
+    refreshBalance();
+    const interval = hasXTipContext ? window.setInterval(refreshBalance, 5000) : null;
     return () => {
       cancelled = true;
+      if (interval) window.clearInterval(interval);
     };
-  }, [address]);
+  }, [address, hasXTipContext]);
 
   const copyAddress = useCallback(async () => {
     if (!address) return;
@@ -231,7 +245,18 @@ export default function FundAccount() {
         </button>
       </div>
 
-      <div className="dashboard-funding-options" style={{ display: "grid", gap: "var(--space-3)" }}>
+      {hasEnoughForTip && (
+        <div className="x-tip-funding-ready" role="status">
+          <span className="material-symbols-outlined" aria-hidden>check_circle</span>
+          <div>
+            <strong>Your ${amount} tip is funded</strong>
+            <span>Send the prepared command to complete your tip to @{recipient}.</span>
+          </div>
+          <a href={xTipComposeUrl} target="_blank" rel="noreferrer" className="btn-primary">Send tip on X</a>
+        </div>
+      )}
+
+      {!hasEnoughForTip && <div className="dashboard-funding-options" style={{ display: "grid", gap: "var(--space-3)" }}>
         {fundingPolicy.providers.fiatOnramp.enabled ? (
           <>
           <label style={{ display: "grid", gap: 8 }}>
@@ -288,7 +313,7 @@ export default function FundAccount() {
           </span>
           <span>Copy</span>
         </button>
-      </div>
+      </div>}
 
       <div style={{ display: "grid", gap: "var(--space-2)" }}>
         <p className="dashboard-funding-note" style={{ margin: 0 }}>{fundingPolicy.testnetCopy}</p>
@@ -304,8 +329,8 @@ export default function FundAccount() {
       <main className="x-tip-link-page x-tip-link-page--fund">
         <section className="x-tip-link-hero">
           <p className="eyebrow">X tip setup</p>
-          <h1>Fund your ${amount} tip</h1>
-          <p>Add funds for your tip to @{recipient}, then return to X and send the same command again.</p>
+          <h1>{hasEnoughForTip ? "Your tip is ready" : `Fund your $${amount} tip`}</h1>
+          <p>{hasEnoughForTip ? `Complete your tip to @${recipient} on X.` : `Choose a funding method for your tip to @${recipient}. This page updates when the funds arrive.`}</p>
         </section>
         {fundingPanel}
       </main>

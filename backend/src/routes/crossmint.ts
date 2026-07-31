@@ -1,6 +1,7 @@
 import { Router, Request, Response } from "express";
 import crypto from "crypto";
 import { getDb } from "../db/database";
+import { claimWalletBelongsToOwner } from "../services/claimWalletProvisioner";
 import { isAddress } from "../utils/security";
 import { verifyWalletProof } from "../services/walletAuth";
 import { recordSecurityEvent } from "../services/ops";
@@ -160,13 +161,9 @@ async function validateTipsEarnedWithdrawal(ownerAddress: string, claimWalletAdd
   ).get(ownerAddress) as { author_id: string } | undefined;
   if (!claim) return { ok: false, status: 403, error: "Verify your X account before withdrawing tips earned." };
 
-  const source = await db.prepare(
-    `SELECT wallet_address
-     FROM claim_wallets
-     WHERE LOWER(owner_address) = ? AND LOWER(wallet_address) = ?
-     LIMIT 1`
-  ).get(ownerAddress, claimWalletAddress) as { wallet_address: string } | undefined;
-  if (!source) return { ok: false, status: 403, error: "The selected Tips Earned source does not belong to this account." };
+  if (!(await claimWalletBelongsToOwner(ownerAddress, claimWalletAddress))) {
+    return { ok: false, status: 403, error: "The selected Tips Earned source does not belong to this account." };
+  }
 
   const usage = await getDailyUsage(ownerAddress, db);
   if (amount > usage.remaining) {
