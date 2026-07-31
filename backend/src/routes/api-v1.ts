@@ -1,7 +1,7 @@
 import { Router, Request, Response } from "express";
 import https from "https";
 import { getDb } from "../db/database";
-import { formatUnits, keccak256, toBytes } from "viem";
+import { keccak256, toBytes } from "viem";
 import { ARC_TESTNET_USDC, getRpcUrl } from "../config/chain";
 import { getUnifiedTipperStats } from "../services/tipperStats";
 import { createBackendPublicClient } from "../services/rpcClient";
@@ -13,6 +13,12 @@ import { verifyWalletProof } from "../services/walletAuth";
 import { getCreatorPerformance } from "../services/creatorPerformance";
 import { resolveAddressIdentities } from "../services/identity";
 import { XOAuthService } from "../services/oauth";
+import {
+  deletePrivyUser,
+  getAccountDeleteReadiness,
+  purgeTeepAccountData,
+  verifyPrivyUserOwnsAddress,
+} from "../services/accountDeletion";
 
 const router = Router();
 
@@ -319,80 +325,6 @@ function timeAgoFromUnix(timestamp: number | null | undefined): string {
   return `${months} month${months === 1 ? "" : "s"} ago`;
 }
 
-async function getAccountBalances(address: string) {
-  const balances: Array<{ key: string; label: string; raw: string; decimals: number; display: string }> = [];
-  const client = createBackendPublicClient({ url: RPC_URL });
-
-  const nativeRaw = await client.getBalance({ address: address as `0x${string}` });
-  balances.push({
-    key: "arc_native_usdc",
-    label: "Arc USDC balance",
-    raw: nativeRaw.toString(),
-    decimals: 18,
-    display: formatUnits(nativeRaw, 18),
-  });
-
-  if (USDC_ADDRESS && USDC_ADDRESS.toLowerCase() !== "0x0000000000000000000000000000000000000000") {
-    const erc20Raw = await client.readContract({
-      address: USDC_ADDRESS,
-      abi: ERC20_ABI,
-      functionName: "balanceOf",
-      args: [address as `0x${string}`],
-    });
-    balances.push({
-      key: "arc_token_usdc",
-      label: "Arc token USDC balance",
-      raw: erc20Raw.toString(),
-      decimals: 6,
-      display: formatUnits(erc20Raw, 6),
-    });
-  }
-
-  return balances;
-}
-
-async function getDeleteReadiness(address: string) {
-  const balances = await getAccountBalances(address);
-  const blockingBalances = balances.filter((balance) => BigInt(balance.raw) > 0n);
-  return {
-    address,
-    canDelete: blockingBalances.length === 0,
-    balances,
-    blockingBalances,
-  };
-}
-
-async function deletePrivyUser(userId: string) {
-  const appId = process.env.PRIVY_APP_ID || process.env.VITE_PRIVY_APP_ID || "";
-  const appSecret = process.env.PRIVY_APP_SECRET || "";
-  if (!appId || !appSecret) {
-    return {
-      ok: false,
-      status: 501,
-      message: "Privy account deletion is not configured. Set PRIVY_APP_ID and PRIVY_APP_SECRET on the backend.",
-    };
-  }
-  if (!/^did:privy:[a-zA-Z0-9_-]+$/.test(userId)) {
-    return { ok: false, status: 400, message: "Invalid Privy user id" };
-  }
-
-  const auth = Buffer.from(`${appId}:${appSecret}`).toString("base64");
-  const response = await fetch(`https://auth.privy.io/api/v1/users/${encodeURIComponent(userId)}`, {
-    method: "DELETE",
-    headers: {
-      Authorization: `Basic ${auth}`,
-      "privy-app-id": appId,
-    },
-  });
-  if (response.ok) return { ok: true, status: response.status, message: "" };
-  const payload = await response.json().catch(() => null);
-  return {
-    ok: false,
-    status: response.status,
-    message: payload?.message || payload?.error || "Privy account deletion failed",
-  };
-}
-
 router.get("/wallet/:address/settings", async (req: Request, res: Response) => {
   const address = String(req.params.address || "").toLowerCase();
   if (!isAddress(address)) {
@@ -628,11 +560,20 @@ router.get("/wallet/:address/funding-history", async (req: Request, res: Respons
   const whereSql = where.join(" AND ");
   const total = await db.prepare(`SELECT COUNT(*) as count FROM funding_provider_sessions WHERE ${whereSql}`).get(...params) as { count: number | string };
   const rows = (await db
-    .prepare(`SELECT id, provider, kind, status, provider_session_id as providerSessionId, metadata_json as metadataJson, created_at as createdAt, updated_at as updatedAt FROM funding_provider_sessions WHERE ${whereSql} ORDER BY created_at DESC LIMIT ? OFFSET ?`)
+    .prepare(`SELECT id, provider, kind, status,
+                     provider_session_id as "providerSessionId",
+                     metadata_json as "metadataJson",
+                     created_at as "createdAt",
+                     updated_at as "updatedAt"
+              FROM funding_provider_sessions
+              WHERE ${whereSql}
+              ORDER BY created_at DESC LIMIT ? OFFSET ?`)
     .all(...params, limit, (page - 1) * limit))
     .map((row: any) => ({
       ...row,
-      metadata: row.metadataJson ? JSON.parse(row.metadataJson) : null,
+      createdAt: Number(row.createdAt),
+      updatedAt: Number(row.updatedAt),
+      metadata: safeJson(row.metadataJson),
       metadataJson: undefined,
     }));
   res.set("Cache-Control", "private, no-store");
@@ -663,17 +604,17 @@ router.get("/wallet/:address/withdrawal-history", async (req: Request, res: Resp
   }
   const recordRows = await db
     .prepare(
-      `SELECT destination_address as destinationAddress, source, amount_raw as amountRaw,
-              tx_hash as txHash, created_at as createdAt, 'withdrawal_records' as origin
+      `SELECT destination_address as "destinationAddress", source, amount_raw as "amountRaw",
+              tx_hash as "txHash", created_at as "createdAt", 'withdrawal_records' as origin
        FROM withdrawal_records
        WHERE ${recordWhere.join(" AND ")}`
     )
     .all(...recordParams) as Array<{ destinationAddress: string; source: string; amountRaw: string; txHash: string; createdAt: number; origin: string }>;
   const activityRows = await db
     .prepare(
-      `SELECT COALESCE(to_address, '') as destinationAddress,
+      `SELECT COALESCE(to_address, '') as "destinationAddress",
               CASE WHEN type = 'withdraw_balance' THEN 'tipBalance' ELSE 'tipsEarned' END as source,
-              amount as amountRaw, tx_hash as txHash, timestamp * 1000 as createdAt,
+              amount as "amountRaw", tx_hash as "txHash", timestamp * 1000 as "createdAt",
               'user_activity' as origin
        FROM user_activity
        WHERE ${activityWhere.join(" AND ")}`
@@ -703,6 +644,8 @@ router.get("/wallet/:address/withdrawal-history", async (req: Request, res: Resp
     total: sorted.length,
     records: rows.map((row) => ({
       ...row,
+      createdAt: Number(row.createdAt),
+      status: "completed",
       destinationIdentity: identities.get(row.destinationAddress.toLowerCase()) ?? null,
     })),
   });
@@ -833,7 +776,7 @@ router.get("/wallet/:address/delete-readiness", async (req: Request, res: Respon
   }
   try {
     res.set("Cache-Control", "private, no-store");
-    res.json(await getDeleteReadiness(address));
+    res.json(await getAccountDeleteReadiness(address));
   } catch (error) {
     console.error("[Account Delete] Readiness check failed:", error);
     err(res, 500, "Could not verify account balance before deletion");
@@ -858,36 +801,47 @@ router.post("/wallet/:address/delete-local-data", async (req: Request, res: Resp
   }
 
   try {
-    const readiness = await getDeleteReadiness(address);
+    let readiness = await getAccountDeleteReadiness(address);
     if (!readiness.canDelete) {
       res.status(409).json({
-        error: "Transfer or withdraw your remaining balance before deleting your account.",
-        code: "POSITIVE_BALANCE",
+        error: "Clear all balances, pending money movements, and spending permissions before deleting your account.",
+        code: "ACCOUNT_NOT_SETTLED",
         ...readiness,
       });
       return;
     }
 
-    const privyDeletion = await deletePrivyUser(userId);
-    if (!privyDeletion.ok) {
-      err(res, privyDeletion.status, privyDeletion.message);
+    await verifyPrivyUserOwnsAddress(userId, address);
+
+    // Re-check immediately before deletion. RPC and provider checks fail closed.
+    readiness = await getAccountDeleteReadiness(address);
+    if (!readiness.canDelete) {
+      res.status(409).json({
+        error: "The account state changed during deletion. Clear the new balance or pending operation and try again.",
+        code: "ACCOUNT_STATE_CHANGED",
+        ...readiness,
+      });
       return;
     }
 
-    const db = getDb();
-    await db.transaction(async (txDb) => {
-      await txDb.prepare("DELETE FROM user_notifications WHERE LOWER(user_address) = ?").run(address);
-      await txDb.prepare("DELETE FROM funding_sync_state WHERE LOWER(user_address) = ?").run(address);
-      await txDb.prepare("DELETE FROM referral_codes WHERE LOWER(referrer_address) = ?").run(address);
-      await txDb.prepare("DELETE FROM user_referrals WHERE LOWER(user_address) = ?").run(address);
-      await txDb.prepare("DELETE FROM user_settings WHERE LOWER(address) = ?").run(address);
-    })();
+    await purgeTeepAccountData(address);
+    await deletePrivyUser(userId);
 
     res.set("Cache-Control", "private, no-store");
-    res.json({ success: true });
+    res.json({
+      success: true,
+      preservedRecords: [
+        "indexed_tip_transactions",
+        "indexed_deposits",
+        "completed_withdrawal_transactions",
+        "claim_wallet_deployments",
+      ],
+    });
   } catch (error) {
-    console.error("[Account Delete] Local cleanup failed:", error);
-    err(res, 500, "Could not delete local account data");
+    console.error("[Account Delete] Deletion failed:", error);
+    const status = Number((error as { status?: number })?.status || 500);
+    const message = error instanceof Error ? error.message : "Could not delete account data";
+    err(res, status >= 400 && status < 600 ? status : 500, message);
   }
 });
 

@@ -337,6 +337,7 @@ export default function DashboardSettings() {
   const [deactivateConfirmOpen, setDeactivateConfirmOpen] = useState(false);
   const [deactivateText, setDeactivateText] = useState("");
   const [deactivateMsg, setDeactivateMsg] = useState("");
+  const [deletingAccount, setDeletingAccount] = useState(false);
   const [xTippingStatus, setXTippingStatus] = useState<XTippingStatus | null>(null);
   const [xTippingLoading, setXTippingLoading] = useState(false);
   const [xTippingSaving, setXTippingSaving] = useState(false);
@@ -820,41 +821,68 @@ export default function DashboardSettings() {
   }, [address, requestWalletProof, settings.privacy.requireVerification, showToast]);
 
   const deactivateAccount = useCallback(async () => {
+    if (deletingAccount) return;
     if (deactivateText !== "DELETE") {
       setDeactivateMsg("Type DELETE to confirm account deletion.");
       return;
     }
-    setDeactivateMsg("Checking account balance...");
-    const readinessResponse = await fetch(`${API_BASE}/api/v1/wallet/${address}/delete-readiness`);
-    const readiness = await readinessResponse.json().catch(() => null);
-    if (!readinessResponse.ok || !readiness) {
-      setDeactivateMsg(readiness?.error || "Could not verify account balance before deletion.");
-      return;
-    }
-    if (!readiness.canDelete) {
-      const balanceText = Array.isArray(readiness.blockingBalances)
-        ? readiness.blockingBalances.map((balance: { display: string }) => balance.display).join(", ")
-        : "remaining balance";
-      setDeactivateMsg(`Transfer or withdraw your funds first. Remaining balance: ${balanceText}.`);
-      return;
-    }
-    if (settings.privacy.requireVerification && !window.confirm("Permanently delete your Teep account?")) {
-      setDeactivateMsg("");
-      return;
-    }
-    let walletProof: { message: string; signature: string };
+    setDeletingAccount(true);
     try {
-      walletProof = await requestWalletProof();
-    } catch (error) {
-      setDeactivateMsg(error instanceof Error ? error.message : "Could not verify account.");
-      return;
-    }
-    const privyUserId = user?.id || "";
-    if (!privyUserId) {
-      setDeactivateMsg("Could not find the connected Privy user id.");
-      return;
-    }
-    try {
+      const loadReadiness = async () => {
+        const response = await fetch(`${API_BASE}/api/v1/wallet/${address}/delete-readiness`, { cache: "no-store" });
+        const payload = await response.json().catch(() => null);
+        if (!response.ok || !payload) throw new Error(payload?.error || "Could not verify the account before deletion.");
+        return payload;
+      };
+
+      setDeactivateMsg("Checking every balance and pending money movement...");
+      let readiness = await loadReadiness();
+      const financialOperations = Array.isArray(readiness.blockingOperations)
+        ? readiness.blockingOperations.filter((item: { key?: string }) => item.key !== "x_router_authority")
+        : [];
+      if ((readiness.blockingBalances?.length || 0) > 0 || financialOperations.length > 0) {
+        const balances = (readiness.blockingBalances || []).map(
+          (balance: { label: string; display: string }) => `${balance.label}: ${balance.display}`
+        );
+        const operations = financialOperations.map(
+          (item: { label: string; count?: number }) => `${item.label}${item.count ? ` (${item.count})` : ""}`
+        );
+        setDeactivateMsg(`Deletion is blocked. ${[...balances, ...operations].join("; ")}.`);
+        return;
+      }
+
+      if (!window.confirm("Permanently delete your Teep account? Blockchain transaction records cannot be erased.")) {
+        setDeactivateMsg("");
+        return;
+      }
+
+      if (readiness.router?.requiresRevocation) {
+        if (!smartWalletClient?.account || !/^0x[a-fA-F0-9]{40}$/.test(X_TIPPING_ROUTER_ADDRESS)) {
+          throw new Error("Reconnect your Teep wallet so X tipping permission can be revoked first.");
+        }
+        setDeactivateMsg("Revoking X tipping permission and token allowance...");
+        await smartWalletClient.sendTransaction({
+          account: smartWalletClient.account,
+          calls: [
+            { to: X_TIPPING_ROUTER_ADDRESS, data: encodeXTippingRevokeCall() },
+            { to: USDC_ADDRESS, data: encodeApproveCall(X_TIPPING_ROUTER_ADDRESS, 0n) },
+          ],
+        } as Parameters<typeof smartWalletClient.sendTransaction>[0]);
+
+        for (let attempt = 0; attempt < 6; attempt += 1) {
+          if (attempt > 0) await new Promise((resolve) => window.setTimeout(resolve, 1_000));
+          readiness = await loadReadiness();
+          if (!readiness.router?.requiresRevocation) break;
+        }
+        if (readiness.router?.requiresRevocation) {
+          throw new Error("The X tipping revocation is still confirming. Wait a moment, then try deletion again.");
+        }
+      }
+
+      if (!readiness.canDelete) throw new Error("The account state changed. Review the remaining balance or pending operation and try again.");
+      const privyUserId = user?.id || "";
+      if (!privyUserId) throw new Error("Could not find the connected Privy user id.");
+      const walletProof = await requestWalletProof();
       setDeactivateMsg("Deleting account...");
       const response = await fetch(`${API_BASE}/api/v1/wallet/${address}/delete-local-data`, {
         method: "POST",
@@ -866,8 +894,10 @@ export default function DashboardSettings() {
       await logout();
     } catch (error) {
       setDeactivateMsg(error instanceof Error ? error.message : "Could not delete account.");
+    } finally {
+      setDeletingAccount(false);
     }
-  }, [address, deactivateText, logout, requestWalletProof, settings.privacy.requireVerification, user?.id]);
+  }, [address, deactivateText, deletingAccount, logout, requestWalletProof, smartWalletClient, user?.id]);
 
   if (!ready) {
     return <DashboardPreparingPage title="Settings" />;
@@ -1129,51 +1159,9 @@ export default function DashboardSettings() {
               {currentTab === "funding" && (
                 <>
                   <div className="dashboard-settings-panel-head">
-                    <div><h3>{isCreatorSettings ? "Payouts" : "Funding and withdrawals"}</h3><p>{isCreatorSettings ? "Set creator payout defaults and review money moving in or out of your Teep account." : "Review money added to and withdrawn from your Teep account."}</p></div>
+                    <div><h3>{isCreatorSettings ? "Payouts" : "Funding and withdrawals"}</h3><p>Review money added to and withdrawn from your Teep account.</p></div>
                   </div>
                   <div className="dashboard-settings-panel-body">
-                    {isCreatorSettings && (
-                      <div className="dashboard-settings-subcard">
-                        <h4>Payout defaults</h4>
-                        <p>These preferences help prefill withdrawal flows. Live withdrawals still require account confirmation.</p>
-                        <div className="dashboard-settings-two-col">
-                          <div className="dashboard-settings-field">
-                            <label htmlFor="payout-destination">Default withdrawal destination</label>
-                            <div className="dashboard-settings-input-row is-editing">
-                              <span className="material-symbols-outlined" aria-hidden>account_balance_wallet</span>
-                              <input
-                                id="payout-destination"
-                                value={settings.payout.defaultDestination}
-                                onChange={(event) => updateSettings({ payout: { ...settings.payout, defaultDestination: event.target.value.trim() } })}
-                                placeholder="0x..."
-                                spellCheck={false}
-                              />
-                            </div>
-                          </div>
-                          <div className="dashboard-settings-field">
-                            <label>Withdrawal confirmation</label>
-                            <div className="dashboard-settings-segmented" role="group" aria-label="Withdrawal confirmation preference">
-                              {(["email", "wallet", "both"] as const).map((value) => (
-                                <button
-                                  key={value}
-                                  type="button"
-                                  className={settings.payout.confirmationPreference === value ? "is-active" : ""}
-                                  onClick={() => updateSettings({ payout: { ...settings.payout, confirmationPreference: value } })}
-                                >
-                                  {value === "email" ? "Email" : value === "wallet" ? "Wallet" : "Both"}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        </div>
-                        <div className="dashboard-settings-list">
-                          <div className="dashboard-settings-list-row">
-                            <div><strong>Payout notifications</strong><span>Notify me when withdrawals and payout-related events complete.</span></div>
-                            <Toggle checked={settings.payout.notifications} onChange={(next) => updateSettings({ payout: { ...settings.payout, notifications: next } })} />
-                          </div>
-                        </div>
-                      </div>
-                    )}
                     <div className="dashboard-settings-history-card">
                       <div className="dashboard-settings-history-card-head">
                         <div>
@@ -1334,7 +1322,7 @@ export default function DashboardSettings() {
                           <div className="dashboard-settings-list-row"><div><strong>Hide growth activity</strong><span>Keep Grow Tips activity out of public creator-facing surfaces.</span></div><Toggle checked={settings.privacy.hideGrowthActivity} onChange={(next) => updateSettings({ privacy: { ...settings.privacy, hideGrowthActivity: next } })} /></div>
                         </>
                       )}
-                      <div className="dashboard-settings-list-row"><div><strong>Require confirmation for sensitive changes</strong><span>Ask for an extra confirmation before privacy, export, or account deletion actions.</span></div><Toggle checked={settings.privacy.requireVerification} onChange={(next) => updateSettings({ privacy: { ...settings.privacy, requireVerification: next } })} /></div>
+                      <div className="dashboard-settings-list-row"><div><strong>Require confirmation for sensitive changes</strong><span>Ask for an extra confirmation before privacy or account export actions. Account deletion always requires confirmation.</span></div><Toggle checked={settings.privacy.requireVerification} onChange={(next) => updateSettings({ privacy: { ...settings.privacy, requireVerification: next } })} /></div>
                     </div>
                     <div className="dashboard-settings-actions"><button type="button" className="btn-secondary" onClick={exportMyData}>Export My Data</button><button type="button" className="dashboard-danger-btn" onClick={() => { setDeactivateConfirmOpen(true); setDeactivateMsg(""); setDeactivateText(""); }}>Delete Account</button></div>
                   </div>
@@ -1393,15 +1381,15 @@ export default function DashboardSettings() {
         <div className="dashboard-settings-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="deactivate-title">
           <div className="dashboard-settings-modal">
             <h3 id="deactivate-title">Delete Teep account</h3>
-            <p>This permanently deletes your Teep account and removes local account settings. If your account has any remaining balance, transfer or withdraw it first. Type <strong>DELETE</strong> to confirm.</p>
+            <p>This permanently deletes your Teep profile, linked X account, settings, and Teep-held account data after all balances and pending money movements are cleared. Public blockchain transaction and wallet-deployment records cannot be erased. Type <strong>DELETE</strong> to confirm.</p>
             <div className="dashboard-settings-input-row is-editing">
               <span className="material-symbols-outlined" aria-hidden>lock</span>
               <input value={deactivateText} onChange={(event) => setDeactivateText(event.target.value)} placeholder="DELETE" />
             </div>
             {deactivateMsg && <div className="dashboard-settings-modal-message">{deactivateMsg}</div>}
             <div className="dashboard-settings-modal-actions">
-              <button type="button" className="btn-secondary" onClick={() => setDeactivateConfirmOpen(false)}>Cancel</button>
-              <button type="button" className="dashboard-danger-btn" onClick={deactivateAccount}>Delete Account</button>
+              <button type="button" className="btn-secondary" onClick={() => setDeactivateConfirmOpen(false)} disabled={deletingAccount}>Cancel</button>
+              <button type="button" className="dashboard-danger-btn" onClick={deactivateAccount} disabled={deletingAccount || deactivateText !== "DELETE"}>{deletingAccount ? "Checking..." : "Delete Account"}</button>
             </div>
           </div>
         </div>

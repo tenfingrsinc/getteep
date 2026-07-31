@@ -49,6 +49,38 @@ type WithdrawalConfirmationDialog = {
   error?: string;
 };
 
+type WithdrawalHistoryRecord = {
+  destinationAddress: string;
+  source: string;
+  amountRaw: string;
+  txHash: string;
+  createdAt: number;
+  status?: string;
+};
+
+function withdrawalHistoryType(source: string) {
+  if (source === "tipsEarned") return "Tips Earned";
+  if (source === "tipBalance") return "Tip Balance";
+  return "Withdrawal";
+}
+
+function formatHistoryDate(value: number) {
+  if (!value) return "-";
+  const milliseconds = value > 10_000_000_000 ? value : value * 1000;
+  return new Date(milliseconds).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
+function historyStatusLabel(value = "completed") {
+  return value.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function historyStatusClass(value = "completed") {
+  const normalized = value.toLowerCase();
+  if (["completed", "confirmed", "success", "succeeded", "used"].includes(normalized)) return "is-success";
+  if (["failed", "cancelled", "canceled", "expired", "rejected"].includes(normalized)) return "is-danger";
+  return "is-pending";
+}
+
 export default function DashboardWithdraw() {
   const { pathname, search } = useLocation();
   const { ready, authenticated, user } = usePrivy();
@@ -76,6 +108,10 @@ export default function DashboardWithdraw() {
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
   const [breakdown, setBreakdown] = useState<{ protocolFeeUsd: string; netUsd: string } | null>(null);
   const [confirmationDialog, setConfirmationDialog] = useState<WithdrawalConfirmationDialog | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+  const [historyRecords, setHistoryRecords] = useState<WithdrawalHistoryRecord[]>([]);
   const confirmationResolverRef = useRef<((code: string | null) => void) | null>(null);
   const fundingPolicy = buildFundingPolicy({
     environment: FUNDING_ENV,
@@ -191,6 +227,37 @@ export default function DashboardWithdraw() {
       confirmationResolverRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    if (!historyOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setHistoryOpen(false);
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [historyOpen]);
+
+  const openHistory = useCallback(async () => {
+    setHistoryOpen(true);
+    setHistoryError("");
+    if (!address) {
+      setHistoryRecords([]);
+      setHistoryError("Your account is still connecting.");
+      return;
+    }
+    setHistoryLoading(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/v1/wallet/${address}/withdrawal-history?page=1&limit=5`, { cache: "no-store" });
+      const payload = await readApiPayload(response);
+      if (!response.ok) throw new Error(payload.error || "Could not load withdrawal history.");
+      setHistoryRecords(Array.isArray(payload.records) ? payload.records.slice(0, 5) : []);
+    } catch (error) {
+      setHistoryRecords([]);
+      setHistoryError(error instanceof Error ? error.message : "Could not load withdrawal history.");
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [address]);
 
   const loadData = useCallback(async () => {
     if (!address) return;
@@ -644,6 +711,7 @@ export default function DashboardWithdraw() {
 
   const accountHydrating = authenticated && !address;
   const growTipsPath = pathname.startsWith("/creator") ? "/creator/grow/earn" : "/dashboard/grow-tips";
+  const fullHistoryPath = pathname.startsWith("/creator") ? "/creator/settings?tab=funding" : "/dashboard/settings?tab=funding";
 
   if (!ready) {
     return <DashboardPreparingPage title="Withdraw" />;
@@ -656,12 +724,18 @@ export default function DashboardWithdraw() {
   return (
     <DashboardShell address={address} title="Withdraw">
       <main className="dashboard-body-inner">
-      <h1 className="withdraw-title" style={{ fontSize: "clamp(1.75rem, 4vw, 2.5rem)", fontWeight: 900, marginBottom: "var(--space-2)", letterSpacing: "-0.02em", color: "var(--text-primary)" }}>
-        Withdraw Funds
-      </h1>
-      <p className="withdraw-subtitle" style={{ color: "var(--text-secondary)", marginBottom: "var(--space-8)", fontSize: "var(--text-body)", lineHeight: 1.5, maxWidth: "42rem" }}>
-        Move your available Teep balance to your preferred destination. Review the source, amount, and destination before you confirm.
-      </p>
+      <div className="withdraw-page-header">
+        <div className="withdraw-page-title-row">
+          <h1 className="withdraw-title">Withdraw Funds</h1>
+          <button type="button" className="withdraw-history-trigger" onClick={() => void openHistory()}>
+            <span className="material-symbols-outlined" aria-hidden>history</span>
+            <span>History</span>
+          </button>
+        </div>
+        <p className="withdraw-subtitle">
+          Move your available Teep balance to your preferred destination. Review the source, amount, and destination before you confirm.
+        </p>
+      </div>
 
       {(accountHydrating || (authenticated && loading)) && (
         <div className="withdraw-grid">
@@ -987,6 +1061,60 @@ export default function DashboardWithdraw() {
         </div>
       )}
       </main>
+      {historyOpen && (
+        <div
+          className="withdraw-history-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setHistoryOpen(false);
+          }}
+        >
+          <section className="withdraw-history-modal" role="dialog" aria-modal="true" aria-labelledby="withdraw-history-title">
+            <header>
+              <div>
+                <span className="material-symbols-outlined" aria-hidden>history</span>
+                <div>
+                  <h2 id="withdraw-history-title">Withdrawal history</h2>
+                  <p>Your five most recent completed withdrawals.</p>
+                </div>
+              </div>
+              <button type="button" autoFocus aria-label="Close withdrawal history" onClick={() => setHistoryOpen(false)}>
+                <span className="material-symbols-outlined" aria-hidden>close</span>
+              </button>
+            </header>
+
+            <div className="withdraw-history-list">
+              <div className="withdraw-history-row is-head" aria-hidden>
+                <span>Type</span><span>Amount</span><span>Date</span><span>Status</span>
+              </div>
+              {historyLoading ? (
+                <div className="withdraw-history-empty">Loading withdrawals...</div>
+              ) : historyError ? (
+                <div className="withdraw-history-empty is-error">{historyError}</div>
+              ) : historyRecords.length === 0 ? (
+                <div className="withdraw-history-empty">No completed withdrawals yet.</div>
+              ) : historyRecords.map((record) => (
+                <div className="withdraw-history-row" key={`${record.txHash || record.createdAt}-${record.source}`}>
+                  <div><span className="withdraw-history-field-label">Type</span><strong>{withdrawalHistoryType(record.source)}</strong></div>
+                  <div><span className="withdraw-history-field-label">Amount</span><strong>${formatUsd(record.amountRaw)}</strong></div>
+                  <div><span className="withdraw-history-field-label">Date</span><span>{formatHistoryDate(record.createdAt)}</span></div>
+                  <div>
+                    <span className="withdraw-history-field-label">Status</span>
+                    <span className={`dashboard-settings-status-pill ${historyStatusClass(record.status)}`}>{historyStatusLabel(record.status)}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <footer>
+              <Link to={fullHistoryPath} onClick={() => setHistoryOpen(false)}>
+                View Full History
+                <span className="material-symbols-outlined" aria-hidden>arrow_forward</span>
+              </Link>
+            </footer>
+          </section>
+        </div>
+      )}
       {confirmationDialog && (
         <div
           className="withdraw-confirmation-backdrop"

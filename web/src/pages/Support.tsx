@@ -77,7 +77,12 @@ export default function Support() {
 
       <h2 id="account-deletion" style={headingStyle}>Account and data deletion</h2>
       <p style={{ color: "var(--text-secondary)", lineHeight: "var(--line-relaxed)", marginBottom: "var(--space-2)" }}>
-        Email{" "}
+        Use the Delete Account control in the Privacy and safety section of dashboard Settings. Teep verifies your
+        wallet and checks account, ClaimWallet, internal, and Grow Tips balances together with pending money
+        movements before deletion. Active X tipping permission and token allowance must also be revoked.
+      </p>
+      <p style={{ color: "var(--text-secondary)", lineHeight: "var(--line-relaxed)", marginBottom: "var(--space-2)" }}>
+        If you cannot use that control, email{" "}
         <a href="mailto:support@getteep.xyz?subject=Account%20deletion%20request" style={{ color: "var(--link)" }}>
           support@getteep.xyz
         </a>{" "}
@@ -85,8 +90,9 @@ export default function Support() {
         connected X handle. We may ask you to verify ownership before deleting account records.
       </p>
       <p style={{ color: "var(--text-secondary)", lineHeight: "var(--line-relaxed)", marginBottom: "var(--space-2)" }}>
-        Account deletion removes Teep-controlled account records where possible. Public blockchain transactions cannot
-        be deleted, and limited records may be retained when required for security, fraud prevention, or legal obligations.
+        Account deletion removes Teep-controlled mutable account records. Indexed confirmed transactions and wallet
+        deployments remain because the corresponding public blockchain records cannot be deleted. Privy disassociates
+        and archives embedded wallets rather than erasing them. Read the Privacy Policy for the complete retention list.
       </p>
 
       <h2 style={headingStyle}>Limits</h2>

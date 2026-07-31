@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom";
 
-const lastUpdated = "2026-06-14";
+const lastUpdated = "2026-07-31";
 
 const sectionStyle = {
   color: "var(--text-secondary)",
@@ -54,11 +54,10 @@ export default function Privacy() {
 
       <h2 style={headingStyle}>Connected X features</h2>
       <p style={sectionStyle}>
-        When you choose to connect X for Teep tip commands, Teep stores the connected X account identifier,
-        username, Teep account address, command preferences, and safety limits needed to recognize and process
-        commands from that X account. Connecting X for this purpose enables X tip commands with default limits
-        unless you pause or change them in Settings. Creating a Teep account by itself does not enable X tip
-        commands.
+        When you connect X, Teep stores the connected X account identifier, username, Teep account address,
+        command preferences, and safety limits needed to recognize that account. Linking or verifying X does not
+        by itself enable X tip commands. Commands are enabled only when you expressly turn them on and approve the
+        displayed command limits and token allowance. You can pause them or change their limits in Settings.
       </p>
 
       <h2 style={headingStyle}>Service providers</h2>
@@ -66,8 +65,9 @@ export default function Privacy() {
         Teep uses service providers to operate the product. These currently include Privy for authentication
         and embedded-wallet services; smart-wallet, bundler, and paymaster infrastructure configured for Arc;
         Arc network RPC and blockchain-indexing services; X for creator verification and supported-page context;
-        and Circle's testnet faucet when a user chooses to request test funds. Providers process only the data
-        needed for their service and are governed by their own privacy terms.
+        Crossmint for enabled funding or withdrawal routes; and Circle services, including the testnet faucet when
+        a user chooses to request test funds. Providers process data needed to perform their services and may retain
+        records under their own privacy terms and legal obligations.
       </p>
 
       <h2 style={headingStyle}>Browser storage</h2>
@@ -79,22 +79,51 @@ export default function Privacy() {
 
       <h2 style={headingStyle}>Retention</h2>
       <p style={sectionStyle}>
-        We retain account, support, withdrawal, provider, and security records only as long as needed to operate
-        the beta, prevent abuse, resolve disputes, and meet legal obligations. Our current target is up to 24
-        months for these operational records and generally 30 to 90 days for routine logs. Public blockchain
-        records cannot be edited or deleted by Teep.
+        While your account is active, we retain account, support, withdrawal, provider, and security records only
+        as long as reasonably needed to operate Teep, prevent abuse, resolve disputes, and meet legal obligations.
+        Our current target is up to 24 months for these operational records and generally 30 to 90 days for routine
+        logs. The deletion process described below removes Teep-controlled account data associated with the account,
+        except for records that reproduce or identify immutable blockchain activity. Service providers may apply
+        their own retention periods.
       </p>
 
       <h2 style={headingStyle}>Your choices and deletion</h2>
       <p style={sectionStyle}>
         Depending on where you live, you may request access, correction, deletion, portability, restriction, or
-        objection regarding personal data we control. To request account or data deletion, email{" "}
+        objection regarding personal data we control. You can permanently delete your Teep account from the Privacy
+        and safety section of Settings. You must verify control of the connected wallet and type the displayed
+        confirmation before deletion can begin.
+      </p>
+      <p style={sectionStyle}>
+        To protect funds, deletion is blocked until all connected account and ClaimWallet balances, Teep internal
+        balances, and Grow Tips positions are zero, and until claimable tips and pending funding, withdrawal, or Grow
+        operations are settled. If X tipping permission or a token allowance remains active, Teep asks your wallet to
+        revoke both before performing a final state check. Teep does not transfer, withdraw, forfeit, or claim funds
+        on your behalf as part of deletion.
+      </p>
+      <p style={sectionStyle}>
+        After the checks pass, Teep removes its mutable account data, including your profile and settings, linked X
+        account, preferences, notifications, referrals, provider sessions and payloads, pending confirmations,
+        off-chain activity, internal balance ledger, and Grow Tips account records. Teep retains only indexed records
+        that reproduce immutable blockchain activity, including confirmed tips and deposits, completed withdrawal
+        transactions, and ClaimWallet deployments. Those records may contain public wallet addresses, transaction
+        hashes, amounts, and on-chain creator identifiers. Removable profile metadata is separated from retained
+        transaction records where technically possible.
+      </p>
+      <p style={sectionStyle}>
+        Teep also requests deletion of the associated Privy user. Privy disassociates and archives an embedded wallet
+        rather than erasing the wallet itself. Public blockchain records, smart-wallet deployments, and other
+        immutable on-chain data cannot be edited or deleted by Teep. Account deletion is permanent, and signing in
+        again may create a new Privy user and wallet rather than restore the deleted account.
+      </p>
+      <p style={sectionStyle}>
+        If you cannot use the in-product deletion control, email{" "}
         <a href="mailto:support@getteep.xyz?subject=Account%20deletion%20request" style={{ color: "var(--link)" }}>
           support@getteep.xyz
         </a>{" "}
         from your account email with the subject "Account deletion request" and include your Teep wallet address
-        or X handle. We may ask you to verify account ownership. We cannot delete public blockchain records or
-        records we must retain for security or legal reasons.
+        or X handle. We will require account ownership verification and the same financial-readiness checks before
+        processing the request.
       </p>
 
       <h2 style={headingStyle}>Changes and contact</h2>
