@@ -15,6 +15,9 @@ async function main() {
 
   const TREASURY = process.env.PROTOCOL_TREASURY_ADDRESS || deployer.address;
   const FEE_BPS = parseInt(process.env.WITHDRAWAL_FEE_BPS || "500", 10);
+  const GROW_TIPS_PERFORMANCE_FEE_BPS = parseInt(process.env.GROW_TIPS_PERFORMANCE_FEE_BPS || "1000", 10);
+  const STRATEGY_ACTIVATION_DELAY_SECONDS = parseInt(process.env.STRATEGY_ACTIVATION_DELAY_SECONDS || "3600", 10);
+  const FEE_CHANGE_DELAY_SECONDS = parseInt(process.env.FEE_CHANGE_DELAY_SECONDS || "3600", 10);
   const REFERRER_SHARE_BPS = parseInt(process.env.REFERRER_SHARE_BPS || "3000", 10);
   const REFERRER_SIGNER = process.env.REFERRAL_SIGNER_ADDRESS || ATTESTATION_SIGNER;
   const X_TIPPING_RELAYER = process.env.X_TIPPING_RELAYER_ADDRESS || deployer.address;
@@ -69,22 +72,43 @@ async function main() {
   console.log("   ReferralRegistry deployed to:", registryAddress);
   console.log("   Treasury:", TREASURY, "| FeeBps:", FEE_BPS, "| ReferrerShareBps:", REFERRER_SHARE_BPS);
 
-  // 3. Point factory at registry (new claim wallets get it; use injectRegistryToWallet for existing)
-  console.log("\n3. Setting referral registry on WalletFactory...");
+  // 3. Deploy revised configurable fee policy
+  console.log("\n3. Deploying FeePolicy...");
+  const FeePolicy = await ethers.getContractFactory("FeePolicy");
+  const feePolicy = await FeePolicy.deploy(FEE_BPS, GROW_TIPS_PERFORMANCE_FEE_BPS, deployer.address, FEE_CHANGE_DELAY_SECONDS);
+  await feePolicy.waitForDeployment();
+  const feePolicyAddress = await feePolicy.getAddress();
+  console.log("   FeePolicy deployed to:", feePolicyAddress);
+  console.log("   Withdrawal fee:", FEE_BPS, "| Grow Tips performance fee:", GROW_TIPS_PERFORMANCE_FEE_BPS);
+  console.log("   Fee change delay:", FEE_CHANGE_DELAY_SECONDS, "seconds");
+
+  // 4. Deploy the strategy allowlist. Adapters are registered separately.
+  console.log("\n4. Deploying StrategyRegistry...");
+  const StrategyRegistry = await ethers.getContractFactory("StrategyRegistry");
+  const strategyRegistry = await StrategyRegistry.deploy(usdcAddress, STRATEGY_ACTIVATION_DELAY_SECONDS);
+  await strategyRegistry.waitForDeployment();
+  const strategyRegistryAddress = await strategyRegistry.getAddress();
+  console.log("   StrategyRegistry deployed to:", strategyRegistryAddress);
+  console.log("   Adapter activation delay:", STRATEGY_ACTIVATION_DELAY_SECONDS, "seconds");
+
+  // 5. Configure revised ClaimWallet dependencies before any creator wallets deploy.
+  console.log("\n5. Configuring WalletFactory dependencies...");
   const tx = await factory.setReferralRegistry(registryAddress);
   await tx.wait();
-  console.log("   Factory.setReferralRegistry(", registryAddress, ") done");
+  await (await factory.setFeePolicy(feePolicyAddress)).wait();
+  await (await factory.setStrategyRegistry(strategyRegistryAddress)).wait();
+  console.log("   Referral registry, fee policy, and strategy registry configured");
 
-  // 4. Deploy TipContract
-  console.log("\n4. Deploying TipContract...");
+  // 6. Deploy TipContract
+  console.log("\n6. Deploying TipContract...");
   const TipContract = await ethers.getContractFactory("TipContract");
   const tipContract = await TipContract.deploy(usdcAddress, factoryAddress);
   await tipContract.waitForDeployment();
   const tipAddress = await tipContract.getAddress();
   console.log("   TipContract deployed to:", tipAddress);
 
-  // 5. Deploy XTippingRouter
-  console.log("\n5. Deploying XTippingRouter...");
+  // 7. Deploy XTippingRouter
+  console.log("\n7. Deploying XTippingRouter...");
   const XTippingRouter = await ethers.getContractFactory("XTippingRouter");
   const xTippingRouter = await XTippingRouter.deploy(usdcAddress, factoryAddress, X_TIPPING_RELAYER);
   await xTippingRouter.waitForDeployment();
@@ -99,6 +123,8 @@ async function main() {
   console.log("USDC:            ", usdcAddress, network === "base" || network === "arcTestnet" || process.env.USDC_ADDRESS ? "(configured)" : "(MockUSDC)");
   console.log("WalletFactory:   ", factoryAddress);
   console.log("ReferralRegistry:", registryAddress);
+  console.log("FeePolicy:      ", feePolicyAddress);
+  console.log("StrategyRegistry:", strategyRegistryAddress);
   console.log("TipContract:     ", tipAddress);
   console.log("XTippingRouter:  ", xTippingRouterAddress);
   console.log("Att. Signer:     ", ATTESTATION_SIGNER);
@@ -112,6 +138,8 @@ async function main() {
     usdc: usdcAddress,
     walletFactory: factoryAddress,
     referralRegistry: registryAddress,
+    feePolicy: feePolicyAddress,
+    strategyRegistry: strategyRegistryAddress,
     tipContract: tipAddress,
     xTippingRouter: xTippingRouterAddress,
     xTippingRelayer: X_TIPPING_RELAYER,

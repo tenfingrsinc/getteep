@@ -1,6 +1,6 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
-import { loadFixture } from "@nomicfoundation/hardhat-toolbox/network-helpers";
+import { loadFixture, time } from "@nomicfoundation/hardhat-toolbox/network-helpers";
 
 describe("PooledTipsVault", function () {
   const STRATEGY_ID = ethers.keccak256(ethers.toUtf8Bytes("AAVE_V3_ARC_TESTNET_USDC"));
@@ -22,7 +22,7 @@ describe("PooledTipsVault", function () {
     await aToken.setPool(await pool.getAddress());
 
     const StrategyRegistry = await ethers.getContractFactory("StrategyRegistry");
-    const registry = await StrategyRegistry.deploy();
+    const registry = await StrategyRegistry.deploy(await usdc.getAddress(), 0);
     await registry.waitForDeployment();
 
     const AaveV3SupplyAdapter = await ethers.getContractFactory("AaveV3SupplyAdapter");
@@ -34,7 +34,11 @@ describe("PooledTipsVault", function () {
       await aToken.getAddress()
     );
     await adapter.waitForDeployment();
-    await registry.registerStrategy(STRATEGY_ID, await adapter.getAddress(), "Aave Arc Testnet USDC", true);
+    await registry.proposeStrategy(
+      STRATEGY_ID, await adapter.getAddress(), "Aave Arc Testnet USDC",
+      ethers.parseUnits("1000", 6), ethers.parseUnits("10000", 6),
+    );
+    await registry.activateStrategy(STRATEGY_ID);
 
     const PooledTipsVault = await ethers.getContractFactory("PooledTipsVault");
     const vault = await PooledTipsVault.deploy(
@@ -49,7 +53,8 @@ describe("PooledTipsVault", function () {
 
     await usdc.mint(user.address, ethers.parseUnits("100", 6));
 
-    return { deployer, user, allocator, other, usdc, aToken, registry, adapter, vault };
+    const deadline = BigInt(await time.latest()) + 3600n;
+    return { deployer, user, allocator, other, usdc, aToken, registry, adapter, vault, deadline };
   }
 
   it("should accept pooled deposits and mint vault shares", async function () {
@@ -66,31 +71,32 @@ describe("PooledTipsVault", function () {
   });
 
   it("should allocate pooled idle assets to the configured strategy", async function () {
-    const { user, allocator, usdc, aToken, adapter, vault } = await loadFixture(deployFixture);
+    const { user, allocator, usdc, aToken, adapter, vault, deadline } = await loadFixture(deployFixture);
     const depositAmount = ethers.parseUnits("100", 6);
     const allocation = ethers.parseUnits("50", 6);
 
     await usdc.connect(user).approve(await vault.getAddress(), depositAmount);
     await vault.connect(user).deposit(depositAmount, user.address);
 
-    await expect(vault.connect(allocator).allocateToStrategy(allocation))
+    await expect(vault.connect(allocator).allocateToStrategy(allocation, allocation, deadline, "0x"))
       .to.emit(vault, "AllocatedToStrategy")
       .withArgs(await adapter.getAddress(), allocation);
 
     expect(await usdc.balanceOf(await vault.getAddress())).to.equal(depositAmount - allocation);
-    expect(await aToken.balanceOf(await vault.getAddress())).to.equal(allocation);
+    expect(await aToken.balanceOf(await adapter.getAddress())).to.equal(allocation);
+    expect(await adapter.balanceOf(await vault.getAddress())).to.equal(allocation);
     expect(await vault.totalAssets()).to.equal(depositAmount);
   });
 
   it("should recall strategy assets and let users withdraw from the pool", async function () {
-    const { user, allocator, usdc, vault } = await loadFixture(deployFixture);
+    const { user, allocator, usdc, vault, deadline } = await loadFixture(deployFixture);
     const depositAmount = ethers.parseUnits("100", 6);
     const allocation = ethers.parseUnits("70", 6);
 
     await usdc.connect(user).approve(await vault.getAddress(), depositAmount);
     await vault.connect(user).deposit(depositAmount, user.address);
-    await vault.connect(allocator).allocateToStrategy(allocation);
-    await vault.connect(allocator).recallFromStrategy(ethers.MaxUint256);
+    await vault.connect(allocator).allocateToStrategy(allocation, allocation, deadline, "0x");
+    await vault.connect(allocator).recallFromStrategy(ethers.MaxUint256, allocation, deadline, "0x");
 
     const userBefore = await usdc.balanceOf(user.address);
     await vault.connect(user).withdraw(depositAmount, user.address, user.address);
@@ -100,25 +106,25 @@ describe("PooledTipsVault", function () {
   });
 
   it("should enforce strategy cap", async function () {
-    const { user, allocator, usdc, vault } = await loadFixture(deployFixture);
+    const { user, allocator, usdc, vault, deadline } = await loadFixture(deployFixture);
     const depositAmount = ethers.parseUnits("100", 6);
 
     await vault.setStrategyCapBps(5000);
     await usdc.connect(user).approve(await vault.getAddress(), depositAmount);
     await vault.connect(user).deposit(depositAmount, user.address);
 
-    await expect(vault.connect(allocator).allocateToStrategy(ethers.parseUnits("50", 6))).to.emit(
+    await expect(vault.connect(allocator).allocateToStrategy(ethers.parseUnits("50", 6), ethers.parseUnits("50", 6), deadline, "0x")).to.emit(
       vault,
       "AllocatedToStrategy"
     );
-    await expect(vault.connect(allocator).allocateToStrategy(1)).to.be.revertedWith("Vault: strategy cap exceeded");
+    await expect(vault.connect(allocator).allocateToStrategy(1, 1, deadline, "0x")).to.be.revertedWith("Vault: strategy cap exceeded");
   });
 
   it("should restrict allocation and strategy controls", async function () {
-    const { user, other, vault, adapter } = await loadFixture(deployFixture);
+    const { user, other, vault, adapter, deadline } = await loadFixture(deployFixture);
 
-    await expect(vault.connect(user).allocateToStrategy(1)).to.be.revertedWith("Vault: not allocator");
-    await expect(vault.connect(user).recallFromStrategy(1)).to.be.revertedWith("Vault: not allocator");
+    await expect(vault.connect(user).allocateToStrategy(1, 1, deadline, "0x")).to.be.revertedWith("Vault: not allocator");
+    await expect(vault.connect(user).recallFromStrategy(1, 1, deadline, "0x")).to.be.revertedWith("Vault: not allocator");
     await expect(vault.connect(user).setStrategy(await adapter.getAddress()))
       .to.be.revertedWithCustomError(vault, "OwnableUnauthorizedAccount")
       .withArgs(user.address);
@@ -127,7 +133,7 @@ describe("PooledTipsVault", function () {
       .withArgs(user.address);
   });
 
-  it("should pause deposits, withdrawals, and share transfers", async function () {
+  it("should pause deposits and transfers while keeping withdrawals open", async function () {
     const { user, other, usdc, vault } = await loadFixture(deployFixture);
     const amount = ethers.parseUnits("10", 6);
 
@@ -137,10 +143,7 @@ describe("PooledTipsVault", function () {
     await vault.pause();
 
     await expect(vault.connect(user).transfer(other.address, 1)).to.be.revertedWithCustomError(vault, "EnforcedPause");
-    await expect(vault.connect(user).withdraw(1, user.address, user.address)).to.be.revertedWithCustomError(
-      vault,
-      "EnforcedPause"
-    );
+    await expect(vault.connect(user).withdraw(1, user.address, user.address)).to.not.be.reverted;
     await usdc.connect(user).approve(await vault.getAddress(), 1);
     await expect(vault.connect(user).deposit(1, user.address)).to.be.revertedWithCustomError(vault, "EnforcedPause");
 

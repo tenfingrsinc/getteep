@@ -58,10 +58,10 @@ contract PooledTipsVault is ERC4626, Ownable, Pausable, ReentrancyGuard {
 
     function totalAssets() public view override returns (uint256) {
         uint256 idleAssets = IERC20(asset()).balanceOf(address(this));
-        if (positionToken == address(0)) {
+        if (positionToken == address(0) || address(strategyAdapter) == address(0)) {
             return idleAssets;
         }
-        return idleAssets + IERC20(positionToken).balanceOf(address(this));
+        return idleAssets + _strategyAssets();
     }
 
     function setAllocator(address _allocator) external onlyOwner {
@@ -87,37 +87,67 @@ contract PooledTipsVault is ERC4626, Ownable, Pausable, ReentrancyGuard {
         emit StrategyCapUpdated(_strategyCapBps);
     }
 
-    function allocateToStrategy(uint256 amount) external onlyAllocatorOrOwner nonReentrant whenNotPaused returns (uint256) {
+    function allocateToStrategy(
+        uint256 amount,
+        uint256 minShares,
+        uint256 deadline,
+        bytes calldata adapterData
+    ) external onlyAllocatorOrOwner nonReentrant whenNotPaused returns (uint256) {
         require(address(strategyAdapter) != address(0), "Vault: no strategy");
         require(amount > 0, "Vault: zero amount");
         require(amount <= IERC20(asset()).balanceOf(address(this)), "Vault: insufficient idle assets");
 
         uint256 maxStrategyAssets = (totalAssets() * strategyCapBps) / BPS_DENOMINATOR;
-        uint256 currentStrategyAssets = IERC20(positionToken).balanceOf(address(this));
+        uint256 currentStrategyAssets = _strategyAssets();
         require(currentStrategyAssets + amount <= maxStrategyAssets, "Vault: strategy cap exceeded");
 
         IERC20(asset()).forceApprove(address(strategyAdapter), amount);
-        uint256 deposited = strategyAdapter.deposit(amount, address(this));
+        uint256 deposited = strategyAdapter.deposit(IStrategyAdapter.DepositParams({
+            assets: amount,
+            beneficiary: address(this),
+            minShares: minShares,
+            deadline: deadline,
+            adapterData: adapterData
+        }));
         IERC20(asset()).forceApprove(address(strategyAdapter), 0);
 
         emit AllocatedToStrategy(address(strategyAdapter), deposited);
         return deposited;
     }
 
-    function recallFromStrategy(uint256 amount) external onlyAllocatorOrOwner nonReentrant returns (uint256) {
+    function recallFromStrategy(
+        uint256 shares,
+        uint256 minAssets,
+        uint256 deadline,
+        bytes calldata adapterData
+    ) external onlyAllocatorOrOwner nonReentrant returns (uint256) {
         require(address(strategyAdapter) != address(0), "Vault: no strategy");
-        require(amount > 0, "Vault: zero amount");
+        require(shares > 0, "Vault: zero amount");
 
         uint256 positionBalance = IERC20(positionToken).balanceOf(address(this));
-        uint256 amountToApprove = amount == type(uint256).max ? positionBalance : amount;
+        uint256 amountToApprove = shares == type(uint256).max ? positionBalance : shares;
         require(amountToApprove > 0, "Vault: zero position");
 
         IERC20(positionToken).forceApprove(address(strategyAdapter), amountToApprove);
-        uint256 withdrawn = strategyAdapter.withdraw(amount, address(this));
+        uint256 withdrawn = strategyAdapter.redeem(IStrategyAdapter.RedeemParams({
+            shares: amountToApprove,
+            recipient: address(this),
+            minAssets: minAssets,
+            deadline: deadline,
+            adapterData: adapterData
+        }));
         IERC20(positionToken).forceApprove(address(strategyAdapter), 0);
 
-        emit RecalledFromStrategy(address(strategyAdapter), amount, withdrawn);
+        emit RecalledFromStrategy(address(strategyAdapter), shares, withdrawn);
         return withdrawn;
+    }
+
+    function _strategyAssets() private view returns (uint256) {
+        uint256 positionShares = IERC20(positionToken).balanceOf(address(this));
+        uint256 positionSupply = IERC20(positionToken).totalSupply();
+        return positionSupply == 0
+            ? 0
+            : (positionShares * strategyAdapter.totalManagedAssets()) / positionSupply;
     }
 
     function pause() external onlyOwner {
@@ -128,7 +158,8 @@ contract PooledTipsVault is ERC4626, Ownable, Pausable, ReentrancyGuard {
         _unpause();
     }
 
-    function _update(address from, address to, uint256 value) internal override whenNotPaused {
+    function _update(address from, address to, uint256 value) internal override {
+        if (paused() && to != address(0)) revert EnforcedPause();
         super._update(from, to, value);
     }
 }

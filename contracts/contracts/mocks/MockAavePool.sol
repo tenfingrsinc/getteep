@@ -33,4 +33,9 @@ contract MockAavePool {
         asset.safeTransfer(to, amountToWithdraw);
         return amountToWithdraw;
     }
+
+    function accrueYield(address beneficiary, uint256 amount) external {
+        require(beneficiary != address(0), "Pool: zero beneficiary");
+        aToken.mint(beneficiary, amount);
+    }
 }

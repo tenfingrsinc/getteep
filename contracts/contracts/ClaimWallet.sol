@@ -7,6 +7,9 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import "./IReferralRegistry.sol";
+import "./interfaces/IFeePolicy.sol";
+import "./interfaces/IStrategyAdapter.sol";
+import "./interfaces/IStrategyRegistry.sol";
 
 /**
  * @title ClaimWallet
@@ -38,6 +41,25 @@ contract ClaimWallet is ReentrancyGuard, EIP712 {
     /// @notice Backend signer for non-owner withdrawal destinations.
     address public withdrawalSigner;
 
+    /// @notice Revised withdrawal and Grow Tips performance-fee policy.
+    address public feePolicy;
+
+    /// @notice Allowlist of Grow Tips strategy adapters.
+    address public strategyRegistry;
+
+    struct GrowPosition {
+        bytes32 strategyId;
+        uint256 remainingPrincipal;
+        uint256 remainingShares;
+        uint256 realizedYield;
+        uint256 performanceFeesPaid;
+        uint64 createdAt;
+        bool active;
+    }
+
+    uint256 public nextPositionId = 1;
+    mapping(uint256 => GrowPosition) public growPositions;
+
     /// @notice Used authorization nonces to prevent replay.
     mapping(bytes32 => bool) public usedWithdrawalNonces;
 
@@ -56,6 +78,28 @@ contract ClaimWallet is ReentrancyGuard, EIP712 {
     event ReferralFeePaid(address indexed referrer, address indexed token, uint256 amount);
     event WithdrawalSignerUpdated(address indexed signer);
     event WithdrawalAuthorizationUsed(bytes32 indexed nonce, address indexed destination, uint256 amount);
+    event FeePolicySet(address indexed feePolicy);
+    event StrategyRegistrySet(address indexed strategyRegistry);
+    event StrategyAllocated(
+        uint256 indexed positionId,
+        bytes32 indexed strategyId,
+        address indexed adapter,
+        address asset,
+        uint256 assets,
+        uint256 shares
+    );
+    event StrategyExited(
+        uint256 indexed positionId,
+        bytes32 indexed strategyId,
+        address indexed adapter,
+        address asset,
+        uint256 shares,
+        uint256 principalReturned,
+        uint256 grossAssets,
+        uint256 realizedYield,
+        uint256 performanceFee,
+        uint256 netAssets
+    );
 
     modifier onlyOwner() {
         require(msg.sender == owner, "ClaimWallet: not owner");
@@ -102,6 +146,142 @@ contract ClaimWallet is ReentrancyGuard, EIP712 {
         require(_signer != address(0), "ClaimWallet: zero signer");
         withdrawalSigner = _signer;
         emit WithdrawalSignerUpdated(_signer);
+    }
+
+    /**
+     * @notice Set the configurable fee policy. Can only be called once by the factory.
+     */
+    function setFeePolicy(address _feePolicy) external onlyFactory {
+        require(feePolicy == address(0), "ClaimWallet: fee policy already set");
+        require(_feePolicy != address(0), "ClaimWallet: zero fee policy");
+        feePolicy = _feePolicy;
+        emit FeePolicySet(_feePolicy);
+    }
+
+    /**
+     * @notice Set the Grow Tips strategy registry. Can only be called once by the factory.
+     */
+    function setStrategyRegistry(address _strategyRegistry) external onlyFactory {
+        require(strategyRegistry == address(0), "ClaimWallet: strategy registry already set");
+        require(_strategyRegistry != address(0), "ClaimWallet: zero strategy registry");
+        strategyRegistry = _strategyRegistry;
+        emit StrategyRegistrySet(_strategyRegistry);
+    }
+
+    /**
+     * @notice Allocate Tips Earned to an approved Grow Tips strategy with no allocation fee.
+     *         Position tokens remain in this ClaimWallet so principal and yield fees are enforceable.
+     */
+    function allocateToStrategy(
+        bytes32 strategyId,
+        uint256 assets,
+        uint256 minShares,
+        uint256 deadline,
+        bytes calldata adapterData
+    ) external onlyOwner nonReentrant returns (uint256 positionId, uint256 shares) {
+        require(strategyRegistry != address(0), "ClaimWallet: strategy registry not set");
+        require(assets > 0, "ClaimWallet: zero amount");
+        require(block.timestamp <= deadline, "ClaimWallet: deadline expired");
+
+        IStrategyRegistry registry = IStrategyRegistry(strategyRegistry);
+        require(registry.isStrategyAvailable(strategyId), "ClaimWallet: strategy unavailable");
+        IStrategyRegistry.Strategy memory strategy = registry.getStrategy(strategyId);
+        require(assets <= strategy.maxPositionAssets, "ClaimWallet: position cap exceeded");
+        require(IStrategyAdapter(strategy.adapter).totalManagedAssets() + assets <= strategy.totalAssetsCap, "ClaimWallet: total cap exceeded");
+
+        uint256 sharesBefore = IERC20(strategy.positionToken).balanceOf(address(this));
+        IERC20(strategy.asset).forceApprove(strategy.adapter, assets);
+        shares = IStrategyAdapter(strategy.adapter).deposit(IStrategyAdapter.DepositParams({
+            assets: assets,
+            beneficiary: address(this),
+            minShares: minShares,
+            deadline: deadline,
+            adapterData: adapterData
+        }));
+        IERC20(strategy.asset).forceApprove(strategy.adapter, 0);
+        require(shares > 0 && shares >= minShares, "ClaimWallet: insufficient shares");
+        require(IERC20(strategy.positionToken).balanceOf(address(this)) - sharesBefore == shares, "ClaimWallet: share mismatch");
+
+        positionId = nextPositionId++;
+        growPositions[positionId] = GrowPosition({
+            strategyId: strategyId,
+            remainingPrincipal: assets,
+            remainingShares: shares,
+            realizedYield: 0,
+            performanceFeesPaid: 0,
+            createdAt: uint64(block.timestamp),
+            active: true
+        });
+        emit StrategyAllocated(positionId, strategyId, strategy.adapter, strategy.asset, assets, shares);
+    }
+
+    /**
+     * @notice Exit part or all of a Grow Tips position back into this Tips Earned wallet.
+     *         There is no exit fee. A configurable fee applies only to realized positive yield.
+     */
+    function exitStrategy(
+        uint256 positionId,
+        uint256 sharesToRedeem,
+        uint256 minAssets,
+        uint256 deadline,
+        bytes calldata adapterData
+    ) external onlyOwner nonReentrant returns (uint256 netAssets) {
+        require(strategyRegistry != address(0), "ClaimWallet: strategy registry not set");
+        require(feePolicy != address(0), "ClaimWallet: fee policy not set");
+        require(block.timestamp <= deadline, "ClaimWallet: deadline expired");
+
+        GrowPosition storage position = growPositions[positionId];
+        require(position.active, "ClaimWallet: inactive position");
+        require(sharesToRedeem > 0, "ClaimWallet: zero amount");
+
+        IStrategyRegistry.Strategy memory strategy = IStrategyRegistry(strategyRegistry).getStrategy(position.strategyId);
+        uint256 amountToRedeem = sharesToRedeem == type(uint256).max ? position.remainingShares : sharesToRedeem;
+        require(amountToRedeem > 0 && amountToRedeem <= position.remainingShares, "ClaimWallet: insufficient position");
+
+        uint256 principalReturned = amountToRedeem == position.remainingShares
+            ? position.remainingPrincipal
+            : (position.remainingPrincipal * amountToRedeem) / position.remainingShares;
+
+        uint256 assetsBefore = IERC20(strategy.asset).balanceOf(address(this));
+        IERC20(strategy.positionToken).forceApprove(strategy.adapter, amountToRedeem);
+        uint256 reportedAssets = IStrategyAdapter(strategy.adapter).redeem(IStrategyAdapter.RedeemParams({
+            shares: amountToRedeem,
+            recipient: address(this),
+            minAssets: minAssets,
+            deadline: deadline,
+            adapterData: adapterData
+        }));
+        IERC20(strategy.positionToken).forceApprove(strategy.adapter, 0);
+        uint256 grossAssets = IERC20(strategy.asset).balanceOf(address(this)) - assetsBefore;
+        require(grossAssets == reportedAssets && grossAssets >= minAssets, "ClaimWallet: asset mismatch");
+
+        position.remainingPrincipal -= principalReturned;
+        position.remainingShares -= amountToRedeem;
+        uint256 realizedYield = grossAssets > principalReturned ? grossAssets - principalReturned : 0;
+        uint256 performanceFee = (realizedYield * IFeePolicy(feePolicy).performanceFeeBps(position.strategyId)) / 10_000;
+        netAssets = grossAssets - performanceFee;
+        position.realizedYield += realizedYield;
+        position.performanceFeesPaid += performanceFee;
+        if (position.remainingShares == 0) position.active = false;
+
+        address treasuryAddr = IReferralRegistry(referralRegistry).treasury();
+        if (performanceFee > 0) {
+            require(treasuryAddr != address(0), "ClaimWallet: zero treasury");
+            IERC20(strategy.asset).safeTransfer(treasuryAddr, performanceFee);
+        }
+
+        emit StrategyExited(
+            positionId,
+            position.strategyId,
+            strategy.adapter,
+            strategy.asset,
+            amountToRedeem,
+            principalReturned,
+            grossAssets,
+            realizedYield,
+            performanceFee,
+            netAssets
+        );
     }
 
     /**
@@ -188,7 +368,9 @@ contract ClaimWallet is ReentrancyGuard, EIP712 {
         address ref = address(0);
 
         IReferralRegistry reg = IReferralRegistry(referralRegistry);
-        uint256 feeBps = reg.feeBps();
+        uint256 feeBps = feePolicy == address(0)
+            ? reg.feeBps()
+            : IFeePolicy(feePolicy).withdrawalFeeBps(owner, token, amount);
         uint256 fee = (amount * feeBps) / 10000;
         net = amount - fee;
         ref = reg.getReferrer(owner);

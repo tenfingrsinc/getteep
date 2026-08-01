@@ -54,6 +54,8 @@ async function main() {
   const strategyId = ethers.keccak256(
     ethers.toUtf8Bytes(process.env.GROW_TIPS_AAVE_STRATEGY_ID || "AAVE_V3_ARC_TESTNET_USDC")
   );
+  const maxPositionAssets = ethers.parseUnits(process.env.GROW_TIPS_MAX_POSITION_USDC || "1000", 6);
+  const totalAssetsCap = ethers.parseUnits(process.env.GROW_TIPS_TOTAL_CAP_USDC || "10000", 6);
 
   console.log("Deploying Grow Tips contracts with account:", deployer.address);
   console.log("USDC:", usdcAddress);
@@ -67,11 +69,14 @@ async function main() {
   }
   console.log("Strategy ID:", strategyId);
 
+  const configuredRegistry = process.env.STRATEGY_REGISTRY_ADDRESS;
   const StrategyRegistry = await ethers.getContractFactory("StrategyRegistry");
-  const registry = await StrategyRegistry.deploy();
-  await registry.waitForDeployment();
+  const registry = configuredRegistry
+    ? StrategyRegistry.attach(configuredRegistry)
+    : await StrategyRegistry.deploy(usdcAddress, Number(process.env.STRATEGY_ACTIVATION_DELAY_SECONDS || "3600"));
+  if (!configuredRegistry) await registry.waitForDeployment();
   const registryAddress = await registry.getAddress();
-  console.log("StrategyRegistry deployed to:", registryAddress);
+  console.log(configuredRegistry ? "Using StrategyRegistry:" : "StrategyRegistry deployed to:", registryAddress);
 
   const AaveV3SupplyAdapter = await ethers.getContractFactory("AaveV3SupplyAdapter");
   const adapter = await AaveV3SupplyAdapter.deploy(
@@ -85,9 +90,21 @@ async function main() {
   const adapterAddress = await adapter.getAddress();
   console.log("AaveV3SupplyAdapter deployed to:", adapterAddress);
 
-  const tx = await registry.registerStrategy(strategyId, adapterAddress, "Aave Arc Testnet USDC", true);
+  const tx = await registry.proposeStrategy(
+    strategyId,
+    adapterAddress,
+    "Aave Arc Testnet USDC",
+    maxPositionAssets,
+    totalAssetsCap
+  );
   await tx.wait();
-  console.log("Registered and enabled Aave Arc Testnet USDC strategy");
+  const activationDelay = await registry.activationDelay();
+  if (activationDelay === 0n) {
+    await (await registry.activateStrategy(strategyId)).wait();
+    console.log("Registered and enabled Aave Arc Testnet USDC strategy");
+  } else {
+    console.log("Strategy proposed. Activate after the registry timelock expires.");
+  }
 
   console.log("\nSet these app/backend env values after deployment:");
   console.log("STRATEGY_REGISTRY_ADDRESS=", registryAddress);

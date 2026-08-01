@@ -29,6 +29,12 @@ contract WalletFactory is Ownable {
     /// @notice Referral/fee registry; claim wallets use it for withdrawWithFee
     address public referralRegistry;
 
+    /// @notice Revised global/tiered withdrawal and Grow Tips performance-fee policy.
+    address public feePolicy;
+
+    /// @notice Allowlist of Grow Tips strategy adapters.
+    address public strategyRegistry;
+
     /// @notice Used nonces to prevent replay
     mapping(bytes32 => bool) public usedNonces;
 
@@ -39,6 +45,8 @@ contract WalletFactory is Ownable {
     );
     event AttestationSignerUpdated(address indexed newSigner);
     event ReferralRegistryUpdated(address indexed registry);
+    event FeePolicyUpdated(address indexed policy);
+    event StrategyRegistryUpdated(address indexed registry);
 
     constructor(address _attestationSigner) Ownable(msg.sender) {
         require(_attestationSigner != address(0), "Factory: zero signer");
@@ -65,6 +73,18 @@ contract WalletFactory is Ownable {
         emit ReferralRegistryUpdated(_registry);
     }
 
+    function setFeePolicy(address _policy) external onlyOwner {
+        require(_policy != address(0), "Factory: zero fee policy");
+        feePolicy = _policy;
+        emit FeePolicyUpdated(_policy);
+    }
+
+    function setStrategyRegistry(address _registry) external onlyOwner {
+        require(_registry != address(0), "Factory: zero strategy registry");
+        strategyRegistry = _registry;
+        emit StrategyRegistryUpdated(_registry);
+    }
+
     /**
      * @notice Inject the current referral registry into an already-deployed claim wallet (e.g. after registry deploy).
      */
@@ -82,6 +102,20 @@ contract WalletFactory is Ownable {
         address wallet = claimWallets[_authorId];
         require(wallet != address(0), "Factory: wallet not deployed");
         ClaimWallet(payable(wallet)).setWithdrawalSigner(attestationSigner);
+    }
+
+    function injectFeePolicyToWallet(uint256 _authorId) external onlyOwner {
+        address wallet = claimWallets[_authorId];
+        require(wallet != address(0), "Factory: wallet not deployed");
+        require(feePolicy != address(0), "Factory: no fee policy set");
+        ClaimWallet(payable(wallet)).setFeePolicy(feePolicy);
+    }
+
+    function injectStrategyRegistryToWallet(uint256 _authorId) external onlyOwner {
+        address wallet = claimWallets[_authorId];
+        require(wallet != address(0), "Factory: wallet not deployed");
+        require(strategyRegistry != address(0), "Factory: no strategy registry set");
+        ClaimWallet(payable(wallet)).setStrategyRegistry(strategyRegistry);
     }
 
     /**
@@ -148,6 +182,12 @@ contract WalletFactory is Ownable {
             ClaimWallet(payable(wallet)).setReferralRegistry(referralRegistry);
         }
         ClaimWallet(payable(wallet)).setWithdrawalSigner(attestationSigner);
+        if (feePolicy != address(0)) {
+            ClaimWallet(payable(wallet)).setFeePolicy(feePolicy);
+        }
+        if (strategyRegistry != address(0)) {
+            ClaimWallet(payable(wallet)).setStrategyRegistry(strategyRegistry);
+        }
 
         // Record
         claimWallets[_authorId] = wallet;

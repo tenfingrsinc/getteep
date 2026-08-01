@@ -2,88 +2,126 @@
 pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "./StrategyRegistry.sol";
 import "./interfaces/IAaveV3Pool.sol";
 import "./interfaces/IStrategyAdapter.sol";
+import "./interfaces/IStrategyRegistry.sol";
 
 /**
  * @title AaveV3SupplyAdapter
- * @notice Non-custodial Grow Tips adapter for Aave-style lending markets.
- *         Deposits pull assets from the caller and supply to Aave with the beneficiary as position owner.
- *         Withdrawals pull the user's aToken position and redeem directly to the requested recipient.
+ * @notice Isolated Grow Tips lending vault. It custodies aTokens and issues
+ *         non-rebasing ERC-20 shares so individual ClaimWallet lots remain measurable.
  */
-contract AaveV3SupplyAdapter is Ownable, Pausable, ReentrancyGuard, IStrategyAdapter {
+contract AaveV3SupplyAdapter is ERC20, Ownable, Pausable, ReentrancyGuard, IStrategyAdapter {
     using SafeERC20 for IERC20;
 
     uint16 public constant AAVE_REFERRAL_CODE = 0;
 
-    StrategyRegistry public immutable registry;
+    IStrategyRegistry public immutable registry;
     IAaveV3Pool public immutable pool;
     bytes32 public immutable override strategyId;
     address public immutable override asset;
-    address public immutable override positionToken;
+    address public immutable aToken;
 
-    event Deposited(address indexed caller, address indexed beneficiary, address indexed asset, uint256 amount);
-    event Withdrawn(address indexed caller, address indexed recipient, address indexed asset, uint256 amount);
+    event Deposited(address indexed caller, address indexed beneficiary, uint256 assets, uint256 shares);
+    event Redeemed(address indexed caller, address indexed recipient, uint256 shares, uint256 assets);
 
     constructor(
         address _registry,
         address _pool,
         bytes32 _strategyId,
         address _asset,
-        address _positionToken
-    ) Ownable(msg.sender) {
+        address _aToken
+    ) ERC20("Teep Aave USDC Strategy", "teepAaveUSDC") Ownable(msg.sender) {
         require(_registry != address(0), "Adapter: zero registry");
         require(_pool != address(0), "Adapter: zero pool");
         require(_strategyId != bytes32(0), "Adapter: zero strategy");
         require(_asset != address(0), "Adapter: zero asset");
-        require(_positionToken != address(0), "Adapter: zero position token");
-
-        registry = StrategyRegistry(_registry);
+        require(_aToken != address(0), "Adapter: zero position token");
+        registry = IStrategyRegistry(_registry);
         pool = IAaveV3Pool(_pool);
         strategyId = _strategyId;
         asset = _asset;
-        positionToken = _positionToken;
+        aToken = _aToken;
     }
 
-    function deposit(uint256 amount, address beneficiary) external override nonReentrant whenNotPaused returns (uint256) {
+    function decimals() public view override returns (uint8) {
+        return IERC20Metadata(asset).decimals();
+    }
+
+    function positionToken() external view override returns (address) {
+        return address(this);
+    }
+
+    function totalManagedAssets() public view override returns (uint256) {
+        return IERC20(aToken).balanceOf(address(this));
+    }
+
+    function deposit(DepositParams calldata params)
+        external
+        override
+        nonReentrant
+        whenNotPaused
+        returns (uint256 shares)
+    {
+        require(params.assets > 0, "Adapter: zero amount");
+        require(params.beneficiary != address(0), "Adapter: zero beneficiary");
+        require(block.timestamp <= params.deadline, "Adapter: deadline expired");
+        require(params.adapterData.length == 0, "Adapter: unsupported data");
         require(registry.isStrategyAvailable(strategyId), "Adapter: strategy unavailable");
-        require(amount > 0, "Adapter: zero amount");
-        require(beneficiary != address(0), "Adapter: zero beneficiary");
 
-        IERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
-        IERC20(asset).forceApprove(address(pool), amount);
-        pool.supply(asset, amount, beneficiary, AAVE_REFERRAL_CODE);
+        IStrategyRegistry.Strategy memory strategy = registry.getStrategy(strategyId);
+        require(params.assets <= strategy.maxPositionAssets, "Adapter: position cap exceeded");
+        uint256 managedBefore = totalManagedAssets();
+        require(managedBefore + params.assets <= strategy.totalAssetsCap, "Adapter: total cap exceeded");
+
+        uint256 supply = totalSupply();
+        require((supply == 0) == (managedBefore == 0), "Adapter: inconsistent initial state");
+        shares = supply == 0 ? params.assets : (params.assets * supply) / managedBefore;
+        require(shares > 0, "Adapter: zero shares");
+        require(shares >= params.minShares, "Adapter: insufficient shares");
+
+        uint256 idleBefore = IERC20(asset).balanceOf(address(this));
+        IERC20(asset).safeTransferFrom(msg.sender, address(this), params.assets);
+        require(IERC20(asset).balanceOf(address(this)) - idleBefore == params.assets, "Adapter: asset transfer mismatch");
+
+        IERC20(asset).forceApprove(address(pool), params.assets);
+        pool.supply(asset, params.assets, address(this), AAVE_REFERRAL_CODE);
         IERC20(asset).forceApprove(address(pool), 0);
+        require(totalManagedAssets() >= managedBefore + params.assets, "Adapter: provider receipt mismatch");
 
-        emit Deposited(msg.sender, beneficiary, asset, amount);
-        return amount;
+        _mint(params.beneficiary, shares);
+        emit Deposited(msg.sender, params.beneficiary, params.assets, shares);
     }
 
-    function withdraw(uint256 amount, address recipient) external override nonReentrant whenNotPaused returns (uint256) {
-        _requireRegisteredAdapter();
-        require(recipient != address(0), "Adapter: zero recipient");
+    function redeem(RedeemParams calldata params)
+        external
+        override
+        nonReentrant
+        returns (uint256 assets)
+    {
+        require(params.shares > 0, "Adapter: zero shares");
+        require(params.recipient != address(0), "Adapter: zero recipient");
+        require(block.timestamp <= params.deadline, "Adapter: deadline expired");
+        require(params.adapterData.length == 0, "Adapter: unsupported data");
 
-        uint256 amountToTransfer = amount;
-        if (amount == type(uint256).max) {
-            amountToTransfer = IERC20(positionToken).balanceOf(msg.sender);
-        }
-        require(amountToTransfer > 0, "Adapter: zero amount");
+        uint256 supply = totalSupply();
+        require(params.shares <= balanceOf(msg.sender), "Adapter: insufficient shares");
+        uint256 quotedAssets = (params.shares * totalManagedAssets()) / supply;
+        require(quotedAssets >= params.minAssets, "Adapter: insufficient assets");
 
-        IERC20(positionToken).safeTransferFrom(msg.sender, address(this), amountToTransfer);
-        uint256 withdrawn = pool.withdraw(asset, amount, recipient);
+        _burn(msg.sender, params.shares);
+        uint256 recipientBefore = IERC20(asset).balanceOf(params.recipient);
+        pool.withdraw(asset, quotedAssets, params.recipient);
+        assets = IERC20(asset).balanceOf(params.recipient) - recipientBefore;
+        require(assets >= params.minAssets, "Adapter: provider slippage");
 
-        emit Withdrawn(msg.sender, recipient, asset, withdrawn);
-        return withdrawn;
-    }
-
-    function _requireRegisteredAdapter() private view {
-        StrategyRegistry.Strategy memory strategy = registry.getStrategy(strategyId);
-        require(strategy.adapter == address(this), "Adapter: strategy mismatch");
+        emit Redeemed(msg.sender, params.recipient, params.shares, assets);
     }
 
     function pause() external onlyOwner {
