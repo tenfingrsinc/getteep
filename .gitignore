@@ -53,7 +53,6 @@ gasstation/output/
 
 # Research/scratch docs are intentionally private.
 docs/
-!docs/
 docs/*
 !docs/GOLDSKY_INGESTION.md
 project-docs/
