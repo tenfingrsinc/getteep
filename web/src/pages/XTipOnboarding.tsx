@@ -160,7 +160,7 @@ export default function XTipOnboarding() {
     if (!address) return null;
     setBalanceState("checking");
     try {
-      const response = await fetch(`${API_BASE}/api/v1/wallet/${address}/usdc-balance`, { cache: "no-store" });
+      const response = await fetch(`${API_BASE}/api/v1/wallet/${address}/usdc-balance?requireLive=true`, { cache: "no-store" });
       const payload = await response.json().catch(() => null);
       if (!response.ok || payload?.balanceRaw == null) throw new Error(payload?.error || "Could not check your balance.");
       const nextRaw = String(payload.balanceRaw);

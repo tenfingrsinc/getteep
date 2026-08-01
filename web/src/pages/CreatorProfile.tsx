@@ -286,11 +286,11 @@ export default function CreatorProfile() {
   const visibleSupporters = (profile?.topSupporters || []).slice(0, 3);
 
   const fetchBalance = useCallback(async () => {
-    if (!address) return 0;
-    const response = await fetch(`${API_BASE}/api/v1/wallet/${address}/usdc-balance`);
-    if (!response.ok) return 0;
+    if (!address) return null;
+    const response = await fetch(`${API_BASE}/api/v1/wallet/${address}/usdc-balance?requireLive=true`, { cache: "no-store" });
+    if (!response.ok) return null;
     const payload = await response.json();
-    return Number(payload.balanceRaw || 0) / 1e6;
+    return payload.balanceRaw == null ? null : Number(payload.balanceRaw) / 1e6;
   }, [address]);
 
   const prepareTip = useCallback(async () => {
@@ -311,6 +311,10 @@ export default function CreatorProfile() {
       return;
     }
     const balance = await fetchBalance();
+    if (balance == null) {
+      setTipError("Live balance is temporarily unavailable. Please try again shortly.");
+      return;
+    }
     if (balance < amountNumber) {
       setRechargeRetryStatus("idle");
       setRechargeRetryMessage(null);
@@ -411,6 +415,11 @@ export default function CreatorProfile() {
     setRechargeRetryStatus("checking");
     setRechargeRetryMessage(null);
     const balance = await fetchBalance();
+    if (balance == null) {
+      setRechargeRetryStatus("idle");
+      setRechargeRetryMessage("Live balance is temporarily unavailable. Try again shortly.");
+      return;
+    }
     if (balance >= amountNumber) {
       setRechargeOpen(false);
       setRechargeRetryStatus("idle");

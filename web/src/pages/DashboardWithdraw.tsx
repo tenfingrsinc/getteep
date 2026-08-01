@@ -389,7 +389,24 @@ export default function DashboardWithdraw() {
       setMsg({ text: "Enter a valid USDC amount", ok: false });
       return;
     }
-    if (rawAmount > BigInt(activeBalance || "0")) {
+    const liveBalanceAddress = withdrawalSource === "tipsEarned" ? selectedClaimWalletAddress : address;
+    if (!liveBalanceAddress) {
+      setMsg({ text: "The selected withdrawal source is unavailable", ok: false });
+      return;
+    }
+    const liveBalanceResponse = await fetch(
+      `${API_BASE}/api/v1/wallet/${liveBalanceAddress}/usdc-balance?requireLive=true`,
+      { cache: "no-store" },
+    ).catch(() => null);
+    const liveBalancePayload = liveBalanceResponse?.ok ? await readApiPayload(liveBalanceResponse) : null;
+    if (liveBalancePayload?.balanceRaw == null || !liveBalancePayload.live) {
+      setMsg({ text: "Live balance is temporarily unavailable. Withdrawal has not started.", ok: false });
+      return;
+    }
+    const liveBalanceRaw = String(liveBalancePayload.balanceRaw);
+    if (withdrawalSource === "tipsEarned") setTipsEarnedBalance(liveBalanceRaw);
+    else setTipBalance(liveBalanceRaw);
+    if (rawAmount > BigInt(liveBalanceRaw)) {
       setMsg({
         text: withdrawalSource === "tipsEarned"
           ? "Amount exceeds your Tips Earned balance"

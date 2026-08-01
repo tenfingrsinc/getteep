@@ -1,5 +1,6 @@
 import { parseAbiItem, type Log } from "viem";
-import { getDb } from "../db/database";
+import type { PoolClient } from "pg";
+import { getDb, getPool } from "../db/database";
 import { getConfiguredChain, getRpcUrl } from "../config/chain";
 import { inspectTipForAbuse } from "./abuse";
 import { recordOpsEvent } from "./ops";
@@ -20,7 +21,7 @@ const RPC_URL = getRpcUrl();
 const TIP_CONTRACT_ADDRESS = process.env.TIP_CONTRACT_ADDRESS as `0x${string}`;
 const X_TIPPING_ROUTER_ADDRESS = process.env.X_TIPPING_ROUTER_ADDRESS as `0x${string}` | undefined;
 const FACTORY_ADDRESS = process.env.FACTORY_ADDRESS as `0x${string}`;
-const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL_MS || "5000");
+const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL_MS || "15000");
 // Arc Testnet's Alchemy free tier accepts eth_getLogs over at most 10 inclusive
 // blocks. Keep the provider limit separate so paid/self-hosted RPCs can opt into
 // larger ranges without accidentally exceeding their own cap.
@@ -31,7 +32,7 @@ const BATCH_SIZE = CONFIGURED_BATCH_SIZE < RPC_MAX_LOG_BLOCK_RANGE
   : RPC_MAX_LOG_BLOCK_RANGE;
 const START_BLOCK = BigInt(process.env.INDEXER_START_BLOCK || process.env.DEPLOYMENT_BLOCK || "0");
 const CONFIRMATIONS = BigInt(process.env.INDEXER_CONFIRMATIONS || "2");
-const RESCAN_BLOCKS = BigInt(process.env.INDEXER_RESCAN_BLOCKS || "100");
+const RESCAN_BLOCKS = BigInt(process.env.INDEXER_RESCAN_BLOCKS || "0");
 // viem default is 10s. Timeout can be caused by: slow Alchemy response, network latency,
 // firewall/VPN, or free-tier throttling. Set RPC_TIMEOUT_MS in .env to increase (e.g. 30000).
 const RPC_TIMEOUT_MS = parseInt(process.env.RPC_TIMEOUT_MS || "30000", 10) || 30000;
@@ -49,6 +50,7 @@ function tipEventAddresses(): `0x${string}`[] {
 export class Indexer {
   private client;
   private running = false;
+  private lockClient: PoolClient | null = null;
 
   constructor() {
     this.client = createBackendPublicClient({ url: RPC_URL, timeoutMs: RPC_TIMEOUT_MS });
@@ -60,6 +62,14 @@ export class Indexer {
       return;
     }
 
+    const lockClient = await getPool().connect();
+    const lock = await lockClient.query<{ acquired: boolean }>("SELECT pg_try_advisory_lock($1) as acquired", [5_042_002]);
+    if (!lock.rows[0]?.acquired) {
+      lockClient.release();
+      console.warn("[Indexer] Another backend owns the indexer lease. This replica will serve API traffic only.");
+      return;
+    }
+    this.lockClient = lockClient;
     this.running = true;
     console.log(`[Indexer] Starting on ${CHAIN.name}, polling every ${POLL_INTERVAL}ms, RPC timeout ${RPC_TIMEOUT_MS}ms`);
     if (ALLOW_INSECURE_RPC_TLS) warnIfInsecureRpcTlsEnabled("Indexer");
@@ -75,6 +85,11 @@ export class Indexer {
 
   stop(): void {
     this.running = false;
+    if (this.lockClient) {
+      const client = this.lockClient;
+      this.lockClient = null;
+      void client.query("SELECT pg_advisory_unlock($1)", [5_042_002]).finally(() => client.release());
+    }
     console.log("[Indexer] Stopped");
   }
 
@@ -111,6 +126,10 @@ export class Indexer {
     if (confirmedBlock === 0n) return;
 
     const lagBlocks = confirmedBlock > lastIndexedBlock ? confirmedBlock - lastIndexedBlock : 0n;
+
+    // When caught up there is nothing to query. Recovery rescans must never turn an
+    // idle server into a permanent eth_getLogs loop.
+    if (lagBlocks === 0n) return;
 
     // Re-scan only when caught up. During recovery, replaying the recent window before every
     // catch-up pass wastes RPC calls and delays newly confirmed tips.

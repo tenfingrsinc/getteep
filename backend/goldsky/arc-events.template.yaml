@@ -1,0 +1,46 @@
+name: teep-arc-events
+resource_size: s
+apiVersion: 3
+
+# Replace the __...__ values during deployment. Do not commit database credentials;
+# store the PostgreSQL connection as a Goldsky secret named below.
+sources:
+  arc_logs:
+    type: dataset
+    dataset_name: arc-testnet.raw_logs
+    version: 1.0.0
+    start_at: earliest
+
+transforms:
+  teep_logs:
+    primary_key: id
+    sql: |
+      SELECT
+        id,
+        5042002 AS chain_id,
+        LOWER(address) AS address,
+        topics,
+        data,
+        block_number,
+        block_hash,
+        transaction_hash,
+        log_index,
+        block_timestamp,
+        TRUE AS canonical
+      FROM arc_logs
+      WHERE block_number >= __START_BLOCK__
+        AND LOWER(address) IN (
+          LOWER('__TIP_CONTRACT_ADDRESS__'),
+          LOWER('__X_TIPPING_ROUTER_ADDRESS__'),
+          LOWER('__FACTORY_ADDRESS__'),
+          LOWER('__USDC_ADDRESS__'),
+          LOWER('__ARC_NATIVE_USDC_EVENT_ADDRESS__')
+        )
+
+sinks:
+  teep_postgres:
+    type: postgres
+    from: teep_logs
+    schema: goldsky_ingest
+    table: chain_logs
+    secret_name: TEEP_GOLDSKY_POSTGRES

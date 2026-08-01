@@ -98,9 +98,11 @@ type CreatorClaim = {
 };
 
 type AccountData = {
-  tipsEarnedRaw: string;
-  mainBalanceRaw: string;
+  tipsEarnedRaw: string | null;
+  mainBalanceRaw: string | null;
   claimWalletDeployed: boolean;
+  tipsFreshness: string;
+  mainFreshness: string;
 };
 
 type PostPreview = {
@@ -117,6 +119,10 @@ function money(value: string | number | null | undefined) {
 function rawMoney(value: string | number | null | undefined) {
   const raw = Number(value || 0);
   return money(Number.isFinite(raw) ? raw / 1e6 : 0);
+}
+
+function balanceMoney(value: string | number | null | undefined) {
+  return value == null ? "--" : rawMoney(value);
 }
 
 function identityName(_address: string, identity?: AddressIdentity | null) {
@@ -221,9 +227,11 @@ export default function CreatorDashboardHome() {
   const [activityPage, setActivityPage] = useState(1);
   const [claim, setClaim] = useState<CreatorClaim | null>(null);
   const [account, setAccount] = useState<AccountData>({
-    tipsEarnedRaw: "0",
-    mainBalanceRaw: "0",
+    tipsEarnedRaw: null,
+    mainBalanceRaw: null,
     claimWalletDeployed: false,
+    tipsFreshness: "checking",
+    mainFreshness: "checking",
   });
   const [data, setData] = useState<PerformanceData | null>(null);
   const [chartData, setChartData] = useState<PerformanceData | null>(null);
@@ -264,22 +272,28 @@ export default function CreatorDashboardHome() {
     setAccountLoading(true);
     setError("");
 
-    Promise.all([
-      requiredJson(`${API_BASE}/auth/claim-status/${address}`),
-      optionalJson(`${API_BASE}/auth/claim-wallet-status/${address}`),
-      optionalJson(`${API_BASE}/api/v1/wallet/${address}/balance`),
-      optionalJson(`${API_BASE}/api/v1/wallet/${address}/usdc-balance`),
-    ]).then(([claimPayload, walletPayload, tipsPayload, mainPayload]) => {
+    requiredJson(`${API_BASE}/auth/claim-status/${address}`).then((claimPayload) => {
       if (cancelled) return;
       const firstClaim = claimPayload?.verified ? claimPayload?.claims?.[0] : null;
       setClaim(firstClaim?.username ? {
         username: firstClaim.username,
         authorId: firstClaim.author_id || firstClaim.username,
       } : null);
-      setAccount({
-        tipsEarnedRaw: tipsPayload?.balanceRaw || "0",
-        mainBalanceRaw: mainPayload?.balanceRaw || "0",
-        claimWalletDeployed: Boolean(walletPayload?.deployed),
+      setAccountLoading(false);
+
+      void Promise.all([
+      optionalJson(`${API_BASE}/auth/claim-wallet-status/${address}`),
+      optionalJson(`${API_BASE}/api/v1/wallet/${address}/balance`),
+      optionalJson(`${API_BASE}/api/v1/wallet/${address}/usdc-balance`),
+      ]).then(([walletPayload, tipsPayload, mainPayload]) => {
+        if (cancelled) return;
+        setAccount({
+          tipsEarnedRaw: tipsPayload?.balanceRaw ?? null,
+          mainBalanceRaw: mainPayload?.balanceRaw ?? null,
+          claimWalletDeployed: Boolean(walletPayload?.deployed),
+          tipsFreshness: tipsPayload?.freshness || "unavailable",
+          mainFreshness: mainPayload?.freshness || "unavailable",
+        });
       });
     }).catch(() => {
       if (!cancelled) setError("The creator workspace could not be loaded.");
@@ -381,9 +395,11 @@ export default function CreatorDashboardHome() {
   );
 
   const withdrawalState = useMemo(() => {
-    const balance = Number(account.tipsEarnedRaw || 0);
     if (!account.claimWalletDeployed) return { label: "Setup needed", ready: false };
+    if (account.tipsEarnedRaw == null) return { label: "Balance unavailable", ready: false };
+    const balance = Number(account.tipsEarnedRaw);
     if (balance <= 0) return { label: "No balance", ready: false };
+    if (account.tipsFreshness === "stale") return { label: "Live check required", ready: false };
     return { label: "Ready", ready: true };
   }, [account]);
 
@@ -693,10 +709,10 @@ export default function CreatorDashboardHome() {
                     {withdrawalState.label}
                   </span>
                 </div>
-                <strong>{rawMoney(account.tipsEarnedRaw)}</strong>
+                <strong>{balanceMoney(account.tipsEarnedRaw)}</strong>
                 <p>Earned creator tips held in your claim wallet and available to move.</p>
                 <div className="creator-workspace-withdraw-actions">
-                  {Number(account.tipsEarnedRaw || 0) > 0 ? (
+                  {withdrawalState.ready ? (
                     <Link className="btn-primary" to="/creator/withdraw?source=tipsEarned">
                       <span className="material-symbols-outlined" aria-hidden>account_balance_wallet</span>
                       Withdraw
@@ -713,8 +729,8 @@ export default function CreatorDashboardHome() {
                   </Link>
                 </div>
                 <div className="creator-workspace-balance-split">
-                  <div><span>Tips earned</span><strong>{rawMoney(account.tipsEarnedRaw)}</strong></div>
-                  <div><span>Main balance</span><strong>{rawMoney(account.mainBalanceRaw)}</strong></div>
+                  <div><span>Tips earned</span><strong>{balanceMoney(account.tipsEarnedRaw)}</strong></div>
+                  <div><span>Main balance</span><strong>{balanceMoney(account.mainBalanceRaw)}</strong></div>
                 </div>
               </section>
 

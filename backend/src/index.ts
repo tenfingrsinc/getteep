@@ -8,6 +8,7 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { initDb } from "./db/database";
 import { Indexer } from "./services/indexer";
+import { ChainEventProjector } from "./services/chainEventProjector";
 import tipsRouter from "./routes/tips";
 import authRouter from "./routes/auth";
 import healthRouter from "./routes/health";
@@ -303,9 +304,15 @@ async function main() {
   // Initialize database
   await initDb();
 
-  // Start indexer
-  const indexer = new Indexer();
-  indexer.start();
+  const indexerMode = (process.env.CHAIN_INDEXER_MODE || "rpc").trim().toLowerCase();
+  const indexer = indexerMode === "rpc" ? new Indexer() : null;
+  const projector = indexerMode === "goldsky" ? new ChainEventProjector() : null;
+  if (!indexer && !projector && indexerMode !== "disabled") {
+    throw new Error("CHAIN_INDEXER_MODE must be goldsky, rpc, or disabled");
+  }
+  if (indexer) await indexer.start();
+  if (projector) await projector.start();
+  console.log(`[Chain data] Mode: ${indexerMode}`);
 
   // Start HTTP server
   app.listen(PORT, () => {
@@ -316,7 +323,8 @@ async function main() {
   // Graceful shutdown
   process.on("SIGINT", () => {
     console.log("\n[Server] Shutting down...");
-    indexer.stop();
+    indexer?.stop();
+    projector?.stop();
     process.exit(0);
   });
 }

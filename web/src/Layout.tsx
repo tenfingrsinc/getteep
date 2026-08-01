@@ -1,6 +1,7 @@
 import { ReactNode, useState, useRef, useEffect } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { DOCS_URL, GITHUB_URL, TWITTER_URL, DISCORD_URL } from "./config";
+import ServiceHealthRibbon from "./components/ServiceHealthRibbon";
 
 export default function Layout({ children }: { children: ReactNode }) {
   const location = useLocation();
@@ -104,6 +105,7 @@ export default function Layout({ children }: { children: ReactNode }) {
   return (
     <div className={`layout ${isHome ? "layout--lp" : ""} ${!hideGlobalNav ? "layout--public-shell" : ""} ${isUtilityPage ? "layout--utility" : ""}`}>
       <a className="layout-skip-link" href="#main-content">Skip to content</a>
+      {isDashboard && <ServiceHealthRibbon />}
       {!hideGlobalNav && (
         <header className={`layout-header layout-header--landing ${headerScrolled ? "layout-header--scrolled" : ""}`}>
           <div className="layout-header-inner">

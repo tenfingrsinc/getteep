@@ -2,9 +2,10 @@ import { Router, Request, Response } from "express";
 import https from "https";
 import { getDb } from "../db/database";
 import { keccak256, toBytes } from "viem";
-import { ARC_TESTNET_USDC, getRpcUrl } from "../config/chain";
+import { getRpcUrl } from "../config/chain";
 import { getUnifiedTipperStats } from "../services/tipperStats";
 import { createBackendPublicClient } from "../services/rpcClient";
+import { readDisplayUsdcBalance, readLiveUsdcBalance } from "../services/balanceSnapshots";
 import { isAddress } from "../utils/security";
 import { getUserSettings, publicIdentity, settingsRowToResponse } from "../services/userSettings";
 import { createLowBalanceNotification, createThankYouMessageNotification } from "../services/notifications";
@@ -23,22 +24,11 @@ import {
 const router = Router();
 
 const RPC_URL = getRpcUrl();
-const USDC_ADDRESS = (process.env.MOCK_USDC_ADDRESS || process.env.USDC_ADDRESS || ARC_TESTNET_USDC) as `0x${string}`;
 const ALLOW_INSECURE_OEMBED_TLS = process.env.ALLOW_INSECURE_OEMBED_TLS === "true" && process.env.NODE_ENV !== "production";
 const ALLOW_INSECURE_AVATAR_TLS = process.env.ALLOW_INSECURE_AVATAR_TLS === "true" && process.env.NODE_ENV !== "production";
 let warnedInsecureOembedTls = false;
 let warnedInsecureAvatarTls = false;
 const xOAuthService = new XOAuthService();
-
-const ERC20_ABI = [
-  {
-    name: "balanceOf",
-    type: "function",
-    stateMutability: "view",
-    inputs: [{ name: "account", type: "address" }],
-    outputs: [{ type: "uint256" }],
-  },
-] as const;
 
 function contentIdFromPost(handle: string, tweetId: string): string {
   const canonical = `x.com/${handle.toLowerCase()}/status/${tweetId}`;
@@ -548,14 +538,18 @@ router.get("/wallet/:address/funding-history", async (req: Request, res: Respons
     status: "synced",
     message: "Latest funding activity checked.",
   };
-  try {
-    await syncInboundUsdcFunding(address);
-  } catch (error) {
-    console.warn("[Funding Sync] Could not sync inbound funding transfers:", error instanceof Error ? error.message : error);
-    syncState = {
-      status: "delayed",
-      message: "Checking latest funding activity. Recent transfers may appear shortly.",
-    };
+  if ((process.env.CHAIN_INDEXER_MODE || "rpc").trim().toLowerCase() === "rpc") {
+    try {
+      await syncInboundUsdcFunding(address);
+    } catch (error) {
+      console.warn("[Funding Sync] Could not sync inbound funding transfers:", error instanceof Error ? error.message : error);
+      syncState = {
+        status: "delayed",
+        message: "Checking latest funding activity. Recent transfers may appear shortly.",
+      };
+    }
+  } else {
+    syncState.message = "Funding activity is synced from the chain event stream.";
   }
   const whereSql = where.join(" AND ");
   const total = await db.prepare(`SELECT COUNT(*) as count FROM funding_provider_sessions WHERE ${whereSql}`).get(...params) as { count: number | string };
@@ -665,10 +659,12 @@ router.post("/wallet/:address/export", async (req: Request, res: Response) => {
   }
 
   const db = getDb();
-  try {
-    await syncInboundUsdcFunding(address);
-  } catch (error) {
-    console.warn("[Account Export] Could not sync funding before export:", error instanceof Error ? error.message : error);
+  if ((process.env.CHAIN_INDEXER_MODE || "rpc").trim().toLowerCase() === "rpc") {
+    try {
+      await syncInboundUsdcFunding(address);
+    } catch (error) {
+      console.warn("[Account Export] Could not sync funding before export:", error instanceof Error ? error.message : error);
+    }
   }
 
   const settings = await getUserSettings(address);
@@ -2247,30 +2243,32 @@ router.get("/wallet/:address/usdc-balance", async (req: Request, res: Response) 
     err(res, 400, "Invalid address");
     return;
   }
-  if (!USDC_ADDRESS || !RPC_URL) {
-    err(res, 503, "Balance lookup not configured");
-    return;
-  }
   try {
-    const client = createBackendPublicClient({ url: RPC_URL });
-    const balanceRaw = await client.readContract({
-      address: USDC_ADDRESS,
-      abi: ERC20_ABI,
-      functionName: "balanceOf",
-      args: [address as `0x${string}`],
-    });
-    const rawStr = balanceRaw.toString();
-    const usd = (Number(balanceRaw) / 1e6).toFixed(2);
-    const settings = await getUserSettings(address);
-    const thresholdRaw = BigInt(Math.round(Number(settings.defaultTipAmount) * 1e6));
-    if (settings.notifications.lowBalance && thresholdRaw > 0n && balanceRaw < thresholdRaw) {
-      await createLowBalanceNotification({ userAddress: address, balanceRaw: rawStr, thresholdUsd: settings.defaultTipAmount });
+    const requireLive = req.query.requireLive === "true" || req.query.requireLive === "1";
+    const balance = requireLive ? await readLiveUsdcBalance(address) : await readDisplayUsdcBalance(address);
+    if (requireLive && !balance.live) {
+      res.status(503).json(balance);
+      return;
+    }
+    if (balance.live && balance.balanceRaw != null) {
+      const settings = await getUserSettings(address);
+      const thresholdRaw = BigInt(Math.round(Number(settings.defaultTipAmount) * 1e6));
+      if (settings.notifications.lowBalance && thresholdRaw > 0n && BigInt(balance.balanceRaw) < thresholdRaw) {
+        await createLowBalanceNotification({ userAddress: address, balanceRaw: balance.balanceRaw, thresholdUsd: settings.defaultTipAmount });
+      }
     }
     res.set("Cache-Control", "private, no-store");
-    res.json({ address, balanceRaw: rawStr, balanceUsd: usd });
+    res.json(balance);
   } catch (e) {
     console.error("[API v1] USDC balance fetch error:", e);
-    err(res, 500, "Failed to fetch balance");
+    res.status(503).json({
+      address,
+      balanceRaw: null,
+      balanceUsd: null,
+      freshness: "unavailable",
+      live: false,
+      observedAt: null,
+    });
   }
 });
 
@@ -2286,11 +2284,18 @@ router.get("/wallet/:address/balance", async (req: Request, res: Response) => {
     return;
   }
 
-  const factoryAddress = process.env.FACTORY_ADDRESS as `0x${string}` | undefined;
   let claimWalletAddress: string | null = null;
-  if (factoryAddress && RPC_URL) {
+  const currentWallet = await db
+    .prepare("SELECT wallet_address FROM claim_wallets WHERE author_id = ? AND LOWER(owner_address) = ? LIMIT 1")
+    .get(authorId, address) as { wallet_address: string } | undefined;
+  claimWalletAddress = currentWallet?.wallet_address?.toLowerCase() || null;
+
+  // Only use a bounded chain fallback for a newly provisioned wallet that has not
+  // reached the index yet. Existing indexed users never wait on RPC to open the dashboard.
+  const factoryAddress = process.env.FACTORY_ADDRESS as `0x${string}` | undefined;
+  if (!claimWalletAddress && factoryAddress && RPC_URL) {
     try {
-      const client = createBackendPublicClient({ url: RPC_URL });
+      const client = createBackendPublicClient({ url: RPC_URL, timeoutMs: Number(process.env.DISPLAY_RPC_TIMEOUT_MS || 4_000) });
       const walletAddr = await client.readContract({
         address: factoryAddress,
         abi: [{ name: "computeClaimWallet", type: "function", stateMutability: "view", inputs: [{ name: "_authorId", type: "uint256" }], outputs: [{ type: "address" }] }],
@@ -2298,48 +2303,34 @@ router.get("/wallet/:address/balance", async (req: Request, res: Response) => {
         args: [BigInt(authorId)],
       });
       claimWalletAddress = (walletAddr as string).toLowerCase();
-    } catch {
-      claimWalletAddress = null;
-    }
-  }
-
-  if (!claimWalletAddress) {
-    const currentWallet = await db
-      .prepare("SELECT wallet_address FROM claim_wallets WHERE author_id = ? AND LOWER(owner_address) = ? LIMIT 1")
-      .get(authorId, address) as { wallet_address: string } | undefined;
-    claimWalletAddress = currentWallet?.wallet_address?.toLowerCase() || null;
+    } catch {}
   }
   if (!claimWalletAddress || !/^0x[a-f0-9]{40}$/.test(claimWalletAddress)) {
     err(res, 404, "Current claim wallet not found", "NOT_FOUND");
     return;
   }
 
-  if (!USDC_ADDRESS || !RPC_URL) {
-    err(res, 503, "Balance lookup not configured");
-    return;
-  }
-
   try {
-    const client = createBackendPublicClient({ url: RPC_URL });
-    const balanceRaw = await client.readContract({
-      address: USDC_ADDRESS,
-      abi: ERC20_ABI,
-      functionName: "balanceOf",
-      args: [claimWalletAddress as `0x${string}`],
-    });
-    const rawStr = balanceRaw.toString();
-    const usd = (Number(balanceRaw) / 1e6).toFixed(2);
+    const balance = await readDisplayUsdcBalance(claimWalletAddress);
 
     res.set("Cache-Control", "public, max-age=30");
     res.json({
+      ...balance,
       address,
+      balanceAddress: balance.address,
       claimWalletAddress,
-      balanceRaw: rawStr,
-      balanceUsd: usd,
     });
   } catch (e) {
     console.error("[API v1] Balance fetch error:", e);
-    err(res, 500, "Failed to fetch balance");
+    res.status(503).json({
+      address,
+      claimWalletAddress,
+      balanceRaw: null,
+      balanceUsd: null,
+      freshness: "unavailable",
+      live: false,
+      observedAt: null,
+    });
   }
 });
 

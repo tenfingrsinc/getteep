@@ -420,6 +420,64 @@ const schemaSql = `
     updated_at BIGINT NOT NULL
   );
 
+  CREATE SCHEMA IF NOT EXISTS goldsky_ingest;
+
+  CREATE TABLE IF NOT EXISTS goldsky_ingest.chain_logs (
+    id TEXT PRIMARY KEY,
+    chain_id INTEGER NOT NULL DEFAULT 5042002,
+    address TEXT NOT NULL,
+    topics JSONB NOT NULL,
+    data TEXT NOT NULL,
+    block_number BIGINT NOT NULL,
+    block_hash TEXT NOT NULL,
+    transaction_hash TEXT NOT NULL,
+    log_index INTEGER NOT NULL,
+    block_timestamp BIGINT,
+    canonical BOOLEAN NOT NULL DEFAULT TRUE,
+    ingested_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_goldsky_chain_logs_block
+    ON goldsky_ingest.chain_logs(block_number, log_index);
+  CREATE INDEX IF NOT EXISTS idx_goldsky_chain_logs_address
+    ON goldsky_ingest.chain_logs(LOWER(address));
+
+  CREATE TABLE IF NOT EXISTS chain_event_projections (
+    event_id TEXT PRIMARY KEY,
+    event_kind TEXT NOT NULL,
+    entity_key TEXT,
+    block_number BIGINT NOT NULL,
+    canonical BOOLEAN NOT NULL DEFAULT TRUE,
+    projected_at BIGINT NOT NULL,
+    error TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_chain_event_projections_block
+    ON chain_event_projections(block_number);
+
+  CREATE TABLE IF NOT EXISTS wallet_balance_snapshots (
+    chain_id INTEGER NOT NULL,
+    wallet_address TEXT NOT NULL,
+    token_address TEXT NOT NULL,
+    balance_raw TEXT NOT NULL,
+    observed_at BIGINT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'rpc',
+    PRIMARY KEY (chain_id, wallet_address, token_address)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_wallet_balance_snapshots_observed
+    ON wallet_balance_snapshots(observed_at DESC);
+
+  CREATE TABLE IF NOT EXISTS service_health_state (
+    service TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    last_success_at BIGINT,
+    last_failure_at BIGINT,
+    last_error TEXT,
+    metadata_json TEXT,
+    updated_at BIGINT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS funding_provider_webhooks (
     id BIGSERIAL PRIMARY KEY,
     provider TEXT NOT NULL,

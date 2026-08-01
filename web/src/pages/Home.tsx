@@ -431,12 +431,12 @@ export default function Home() {
   const amountNum = parseFloat(tipAmount) || 0;
   const amountUsd = amountNum > 0 ? amountNum.toFixed(2) : "0.00";
 
-  const fetchBalance = useCallback(async (): Promise<string> => {
-    if (!address) return "0";
-    const response = await fetch(`${API_BASE}/api/v1/wallet/${address}/usdc-balance`);
-    if (!response.ok) return "0";
+  const fetchBalance = useCallback(async (): Promise<string | null> => {
+    if (!address) return null;
+    const response = await fetch(`${API_BASE}/api/v1/wallet/${address}/usdc-balance?requireLive=true`, { cache: "no-store" });
+    if (!response.ok) return null;
     const data = await response.json();
-    return data.balanceRaw ?? "0";
+    return data.balanceRaw ?? null;
   }, [address]);
 
   const handleSendTip = useCallback(async () => {
@@ -450,6 +450,10 @@ export default function Home() {
     }
 
     const balanceRaw = await fetchBalance();
+    if (balanceRaw == null) {
+      setTipError("Live balance is temporarily unavailable. Please try again shortly.");
+      return;
+    }
     const balance = Number(balanceRaw) / 1e6;
     if (balance < amountNum) {
       setRechargeRetryStatus("idle");
@@ -483,6 +487,10 @@ export default function Home() {
 
     const checkAndDecide = async () => {
       const balanceRaw = await fetchBalance();
+      if (balanceRaw == null) {
+        if (!cancelled) setTipError("Live balance is temporarily unavailable. Please try again shortly.");
+        return;
+      }
       const balance = Number(balanceRaw) / 1e6;
       if (cancelled) return;
       if (balance >= needed) {
@@ -495,6 +503,10 @@ export default function Home() {
       await new Promise((resolve) => setTimeout(resolve, 1500));
       if (cancelled) return;
       const retryRaw = await fetchBalance();
+      if (retryRaw == null) {
+        if (!cancelled) setTipError("Live balance is temporarily unavailable. Please try again shortly.");
+        return;
+      }
       const retryBalance = Number(retryRaw) / 1e6;
       if (cancelled) return;
       if (retryBalance >= needed) {
@@ -519,6 +531,7 @@ export default function Home() {
     if (!rechargeModalOpen || !pendingTip) return;
     const timeout = setTimeout(async () => {
       const balanceRaw = await fetchBalance();
+      if (balanceRaw == null) return;
       const balance = Number(balanceRaw) / 1e6;
       const needed = parseFloat(pendingTip.amountUsd);
       if (balance >= needed) {
@@ -538,6 +551,11 @@ export default function Home() {
     setRechargeRetryStatus("checking");
     setRechargeRetryMessage(null);
     const balanceRaw = await fetchBalance();
+    if (balanceRaw == null) {
+      setRechargeRetryStatus("idle");
+      setRechargeRetryMessage("Live balance is temporarily unavailable. Try again shortly.");
+      return;
+    }
     const balance = Number(balanceRaw) / 1e6;
     const needed = parseFloat(pendingTip.amountUsd);
 

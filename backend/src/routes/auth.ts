@@ -681,9 +681,27 @@ router.get("/claim-wallet-status/:address", async (req: Request, res: Response) 
     "SELECT wallet_address, deployed_at_block, tx_hash FROM claim_wallets WHERE author_id = ?"
   ).get(authorIdForChain) as { wallet_address: string; deployed_at_block: string | number; tx_hash: string } | undefined;
 
+  const indexedDeployment =
+    row &&
+    Number(row.deployed_at_block || 0) > 0 &&
+    typeof row.tx_hash === "string" &&
+    row.tx_hash.trim().length > 0;
+  if (indexedDeployment) {
+    res.json({
+      deployed: true,
+      claimWalletAddress: row.wallet_address.toLowerCase(),
+      totalEarnedRaw,
+      freshness: "indexed",
+    });
+    return;
+  }
+
   if (factoryAddress && rpcUrl) {
     try {
-      const client = createBackendPublicClient({ url: rpcUrl });
+      const client = createBackendPublicClient({
+        url: rpcUrl,
+        timeoutMs: Number(process.env.DISPLAY_RPC_TIMEOUT_MS || 4_000),
+      });
       const authorIdBigInt = BigInt(authorIdForChain);
       const deployed = await client.readContract({
         address: factoryAddress,

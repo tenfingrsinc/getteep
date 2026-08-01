@@ -721,8 +721,8 @@ export default function Dashboard({ mode = "auto" }: { mode?: DashboardMode }) {
   const [creatorData, setCreatorData] = useState<CreatorData | null>(null);
   const [earningsDaily, setEarningsDaily] = useState<EarningsDaily[]>([]);
   const [chartDays, setChartDays] = useState<number>(30);
-  const [balanceRaw, setBalanceRaw] = useState("0");
-  const [mainBalanceRaw, setMainBalanceRaw] = useState("0");
+  const [balanceRaw, setBalanceRaw] = useState<string | null>(null);
+  const [mainBalanceRaw, setMainBalanceRaw] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [postPreviews, setPostPreviews] = useState<Record<string, PostPreview>>({});
   const [overviewSupporterTab, setOverviewSupporterTab] = useState<OverviewSupporterTab>("top");
@@ -937,23 +937,26 @@ export default function Dashboard({ mode = "auto" }: { mode?: DashboardMode }) {
       if (shouldShowCreatorDashboard) {
         const username = claimedUsername;
         setIsCreator(true);
-        const [creatorRes, earningsRes, balanceRes, mainBalanceRes] = await Promise.all([
+        const [creatorRes, earningsRes] = await Promise.all([
           username ? fetch(`${API_BASE}/api/v1/creators/${username}`).then((r) => (r.ok ? r.json() : null)).catch(() => null) : Promise.resolve(null),
           username ? fetch(`${API_BASE}/api/v1/creators/${username}/earnings-over-time?days=30`).then((r) => (r.ok ? r.json() : { daily: [] })).catch(() => ({ daily: [] })) : Promise.resolve({ daily: [] }),
-          fetch(`${API_BASE}/api/v1/wallet/${targetAddress}/balance`).then((r) => (r.ok ? r.json() : { balanceRaw: "0" })).catch(() => ({ balanceRaw: "0" })),
-          fetch(`${API_BASE}/api/v1/wallet/${targetAddress}/usdc-balance`).then((r) => (r.ok ? r.json() : { balanceRaw: "0" })).catch(() => ({ balanceRaw: "0" })),
         ]);
         if (activeAddressRef.current !== targetAddress) return;
         if (creatorRes) setCreatorData(creatorRes);
         if (earningsRes?.daily?.length) setEarningsDaily(earningsRes.daily);
-        setBalanceRaw(balanceRes?.balanceRaw ?? "0");
-        setMainBalanceRaw(mainBalanceRes?.balanceRaw ?? "0");
+        void Promise.all([
+          fetch(`${API_BASE}/api/v1/wallet/${targetAddress}/balance`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+          fetch(`${API_BASE}/api/v1/wallet/${targetAddress}/usdc-balance`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+        ]).then(([balanceRes, mainBalanceRes]) => {
+          if (activeAddressRef.current !== targetAddress) return;
+          if (balanceRes?.balanceRaw != null) setBalanceRaw(balanceRes.balanceRaw);
+          if (mainBalanceRes?.balanceRaw != null) setMainBalanceRaw(mainBalanceRes.balanceRaw);
+        });
       } else {
         setIsCreator(false);
         // Load tipper specific data
-        const [walletRes, usdcRes, leaderboardRes] = await Promise.all([
+        const [walletRes, leaderboardRes] = await Promise.all([
           fetch(`${API_BASE}/tips/wallet/${targetAddress}`).then(r => r.ok ? r.json() : null).catch(() => null),
-          fetch(`${API_BASE}/api/v1/wallet/${targetAddress}/usdc-balance`).then((r) => (r.ok ? r.json() : { balanceRaw: "0" })).catch(() => ({ balanceRaw: "0" })),
           fetch(`${API_BASE}/leaderboard/creators?limit=12&period=7d`)
             .then(async (r) => {
               const data = r.ok ? await r.json() : { creators: [] };
@@ -971,7 +974,12 @@ export default function Dashboard({ mode = "auto" }: { mode?: DashboardMode }) {
             creatorsSupported: Array.isArray(walletRes.creatorsSupported) ? walletRes.creatorsSupported : [],
           });
         }
-        setBalanceRaw(usdcRes?.balanceRaw ?? "0");
+        void fetch(`${API_BASE}/api/v1/wallet/${targetAddress}/usdc-balance`)
+          .then((response) => response.ok ? response.json() : null)
+          .then((usdcRes) => {
+            if (activeAddressRef.current === targetAddress && usdcRes?.balanceRaw != null) setBalanceRaw(usdcRes.balanceRaw);
+          })
+          .catch(() => {});
         if (leaderboardRes?.creators) setDiscoverCreators(leaderboardRes.creators);
       }
     } catch {
@@ -1465,7 +1473,7 @@ export default function Dashboard({ mode = "auto" }: { mode?: DashboardMode }) {
               <div className="dashboard-metric-card dashboard-balance-readiness">
                 <div className="dashboard-metric-label">Balance Readiness</div>
                 <div className="dashboard-metric-value">
-                  ${formatUsdRaw(balanceRaw)}
+                  {balanceRaw == null ? "--" : `$${formatUsdRaw(balanceRaw)}`}
                   <span className="dashboard-metric-value-sub">USD</span>
                 </div>
                 <div className="dashboard-ready-state">
@@ -2023,7 +2031,7 @@ export default function Dashboard({ mode = "auto" }: { mode?: DashboardMode }) {
           <div className="creator-overview-hero dashboard-card">
             <div>
               <div className="dashboard-metric-label">Available to withdraw</div>
-              <div className="creator-overview-balance">${normalizeRawUsd(balanceRaw)}</div>
+              <div className="creator-overview-balance">{balanceRaw == null ? "--" : `$${normalizeRawUsd(balanceRaw)}`}</div>
               <p>Creator tips earned from your verified X identity and ready for the cash-out flow.</p>
               <div className="creator-overview-actions">
                 <Link to="/creator/withdraw" className="btn-primary">Cash out</Link>
@@ -2041,7 +2049,7 @@ export default function Dashboard({ mode = "auto" }: { mode?: DashboardMode }) {
               </div>
               <div className="creator-overview-balance-tile">
                 <div className="dashboard-metric-label">Main Teep balance</div>
-                <strong>${normalizeRawUsd(mainBalanceRaw)}</strong>
+                <strong>{mainBalanceRaw == null ? "--" : `$${normalizeRawUsd(mainBalanceRaw)}`}</strong>
                 <span>Balance available for tipping and other account actions.</span>
               </div>
             </div>
@@ -2227,7 +2235,7 @@ export default function Dashboard({ mode = "auto" }: { mode?: DashboardMode }) {
               <p>Move available tip balance into Grow Tips when the beta strategy is enabled.</p>
               <div className="creator-grow-amount">
                 <div className="dashboard-metric-label">Available to grow</div>
-                <strong>${normalizeRawUsd(balanceRaw)}</strong>
+                <strong>{balanceRaw == null ? "--" : `$${normalizeRawUsd(balanceRaw)}`}</strong>
               </div>
               <Link to="/creator/grow/earn" className="creator-grow-cta">
                 Explore Grow Tips

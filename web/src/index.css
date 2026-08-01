@@ -18165,3 +18165,74 @@ a.creator-workspace-post-link:hover {
     grid-template-columns: 1fr;
   }
 }
+/* Global dependency status. It remains in normal flow so dashboard headers are never covered. */
+.service-health-ribbon {
+  position: relative;
+  z-index: 1200;
+  min-height: 42px;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) 36px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px clamp(14px, 3vw, 32px);
+  color: #f8fafc;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  background: #45320b;
+}
+
+.service-health-ribbon.is-offline {
+  background: #571f29;
+}
+
+.service-health-ribbon > .material-symbols-outlined {
+  font-size: 20px;
+}
+
+.service-health-ribbon p {
+  min-width: 0;
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.service-health-ribbon p strong {
+  flex: 0 0 auto;
+}
+
+.service-health-ribbon p span {
+  color: rgba(248, 250, 252, 0.84);
+}
+
+.service-health-ribbon button {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.service-health-ribbon button .material-symbols-outlined {
+  font-size: 20px;
+}
+
+@media (max-width: 640px) {
+  .service-health-ribbon {
+    grid-template-columns: 22px minmax(0, 1fr) 34px;
+    padding: 8px 10px;
+  }
+
+  .service-health-ribbon p {
+    display: block;
+    font-size: 12px;
+  }
+
+  .service-health-ribbon p strong {
+    display: block;
+  }
+}

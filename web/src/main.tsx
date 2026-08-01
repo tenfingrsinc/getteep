@@ -6,6 +6,7 @@ import { SmartWalletsProvider } from "@privy-io/react-auth/smart-wallets";
 import App from "./App";
 import { AccountRoleProvider } from "./context/AccountRoleContext";
 import { ReferralProvider } from "./context/ReferralContext";
+import { ServiceHealthProvider } from "./context/ServiceHealthContext";
 import { PRIVY_APP_ID } from "./config";
 import { arcTestnet } from "./chains";
 import "./index.css";
@@ -37,9 +38,11 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       <SmartWalletsProvider>
         <BrowserRouter>
           <AccountRoleProvider>
-            <ReferralProvider>
-              <App />
-            </ReferralProvider>
+            <ServiceHealthProvider>
+              <ReferralProvider>
+                <App />
+              </ReferralProvider>
+            </ServiceHealthProvider>
           </AccountRoleProvider>
         </BrowserRouter>
       </SmartWalletsProvider>

@@ -125,12 +125,12 @@ export default function TipPost() {
     };
   }, [cleanHandle, tweetId, postUrl]);
 
-  const fetchBalance = useCallback(async (): Promise<string> => {
-    if (!address) return "0";
-    const response = await fetch(`${API_BASE}/api/v1/wallet/${address}/usdc-balance`);
-    if (!response.ok) return "0";
+  const fetchBalance = useCallback(async (): Promise<string | null> => {
+    if (!address) return null;
+    const response = await fetch(`${API_BASE}/api/v1/wallet/${address}/usdc-balance?requireLive=true`, { cache: "no-store" });
+    if (!response.ok) return null;
     const data = await response.json();
-    return data.balanceRaw ?? "0";
+    return data.balanceRaw ?? null;
   }, [address]);
 
   const prepareTip = useCallback(async (tip: PendingTip) => {
@@ -149,6 +149,10 @@ export default function TipPost() {
     }
 
     const balanceRaw = await fetchBalance();
+    if (balanceRaw == null) {
+      setPageError("Live balance is temporarily unavailable. Please try again shortly.");
+      return;
+    }
     const balance = Number(balanceRaw) / 1e6;
     const needed = Number(tip.amountUsd);
     if (balance < needed) {
@@ -197,6 +201,10 @@ export default function TipPost() {
         return;
       }
       const balanceRaw = await fetchBalance();
+      if (balanceRaw == null) {
+        if (!cancelled) setPageError("Live balance is temporarily unavailable. Please try again shortly.");
+        return;
+      }
       const balance = Number(balanceRaw) / 1e6;
       const needed = Number(tip.amountUsd);
       if (cancelled) return;
@@ -222,6 +230,11 @@ export default function TipPost() {
     setRechargeRetryStatus("checking");
     setRechargeRetryMessage(null);
     const balanceRaw = await fetchBalance();
+    if (balanceRaw == null) {
+      setRechargeRetryStatus("idle");
+      setRechargeRetryMessage("Live balance is temporarily unavailable. Try again shortly.");
+      return;
+    }
     const balance = Number(balanceRaw) / 1e6;
     const needed = Number(pendingTip.amountUsd);
 
