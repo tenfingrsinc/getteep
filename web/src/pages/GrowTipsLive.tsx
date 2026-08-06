@@ -7,6 +7,11 @@ import { API_BASE } from "../config";
 import { arcTestnet } from "../chains";
 
 type PositionControl = "add" | "withdraw_partial" | "withdraw_all";
+type StrategyAvailabilityFilter = "all" | "live" | "preview" | "paused";
+type StrategyRiskFilter = "all" | "low" | "medium" | "high";
+type StrategyAccessFilter = "all" | "fast" | "moderate" | "longer";
+type StrategyActivityFilter = "all" | "using" | "not_using";
+type StrategySort = "recommended" | "risk" | "access" | "rate";
 
 type StrategyEvidence = {
   participantCount: number;
@@ -22,6 +27,8 @@ type GrowOption = {
   description: string;
   provider: string;
   status: "preview" | "pending_provider" | "ready" | "disabled";
+  availability?: "live" | "preview" | "paused";
+  accessCategory?: "fast" | "moderate" | "longer";
   sourceChainName: string;
   destinationChainName?: string;
   assetSymbol: string;
@@ -147,6 +154,18 @@ function strategyName(option: GrowOption | undefined, fallback = "Growth positio
   return option?.plainName || option?.name || fallback;
 }
 
+function strategyAvailability(option: GrowOption) {
+  return option.availability || (option.status === "ready" ? "live" : option.status === "disabled" ? "paused" : "preview");
+}
+
+function strategyAccess(option: GrowOption) {
+  if (option.accessCategory) return option.accessCategory;
+  const access = option.exitTimeEstimate.toLowerCase();
+  if (/longer|day|bridge|finality/.test(access)) return "longer";
+  if (/moderate|hour/.test(access)) return "moderate";
+  return "fast";
+}
+
 function actionLabel(action: GrowActivity["action"]) {
   if (action === "grow") return "Started growing";
   if (action === "yield") return "Service fees received";
@@ -179,13 +198,21 @@ export default function GrowTipsLive() {
   const [actionMode, setActionMode] = useState<PositionControl>("add");
   const [actionAmount, setActionAmount] = useState("");
   const [actionMessage, setActionMessage] = useState("");
+  const [actionMessageTone, setActionMessageTone] = useState<"info" | "success" | "error">("info");
   const [loadingStrategies, setLoadingStrategies] = useState(true);
   const [loadingAccount, setLoadingAccount] = useState(true);
+  const [refreshingAccount, setRefreshingAccount] = useState(false);
+  const [hasAccountSnapshot, setHasAccountSnapshot] = useState(false);
   const [strategyError, setStrategyError] = useState("");
   const [accountError, setAccountError] = useState("");
   const [accountSetup, setAccountSetup] = useState<"ready" | "unverified" | "wallet_pending">("ready");
   const [showAllActivity, setShowAllActivity] = useState(false);
   const [submittingAction, setSubmittingAction] = useState(false);
+  const [availabilityFilter, setAvailabilityFilter] = useState<StrategyAvailabilityFilter>("all");
+  const [riskFilter, setRiskFilter] = useState<StrategyRiskFilter>("all");
+  const [accessFilter, setAccessFilter] = useState<StrategyAccessFilter>("all");
+  const [activityFilter, setActivityFilter] = useState<StrategyActivityFilter>("all");
+  const [strategySort, setStrategySort] = useState<StrategySort>("recommended");
 
   const loadStrategies = useCallback(async () => {
     setLoadingStrategies(true);
@@ -215,10 +242,14 @@ export default function GrowTipsLive() {
       setAvailableRaw("0");
       setClaimWalletAddress("");
       setLoadingAccount(false);
+      setRefreshingAccount(false);
+      setHasAccountSnapshot(false);
       setAccountSetup("ready");
       return;
     }
-    setLoadingAccount(true);
+    const isBackgroundRefresh = hasAccountSnapshot;
+    if (isBackgroundRefresh) setRefreshingAccount(true);
+    else setLoadingAccount(true);
     setAccountError("");
     try {
       const eligibilityResponse = await fetch(`${API_BASE}/api/v1/wallet/${address}/eligibility`);
@@ -230,6 +261,7 @@ export default function GrowTipsLive() {
         setActivity([]);
         setAvailableRaw("0");
         setClaimWalletAddress("");
+        setHasAccountSnapshot(false);
         return;
       }
       if (!eligibility?.claimWalletDeployed) {
@@ -238,6 +270,7 @@ export default function GrowTipsLive() {
         setActivity([]);
         setAvailableRaw("0");
         setClaimWalletAddress("");
+        setHasAccountSnapshot(false);
         return;
       }
       setAccountSetup("ready");
@@ -256,16 +289,21 @@ export default function GrowTipsLive() {
       setPositions(nextPositions);
       setActivity(Array.isArray(activityData?.records) ? activityData.records : []);
       setSelectedPositionId((current) => nextPositions.some((position: GrowPosition) => position.id === current) ? current : nextPositions[0]?.id || null);
+      setHasAccountSnapshot(true);
     } catch (error) {
-      setPositions([]);
-      setActivity([]);
-      setClaimWalletAddress("");
-      setAccountSetup("ready");
+      if (!isBackgroundRefresh) {
+        setPositions([]);
+        setActivity([]);
+        setClaimWalletAddress("");
+        setAccountSetup("ready");
+        setHasAccountSnapshot(false);
+      }
       setAccountError(error instanceof Error ? error.message : "Your growth data could not be refreshed.");
     } finally {
       setLoadingAccount(false);
+      setRefreshingAccount(false);
     }
-  }, [address]);
+  }, [address, hasAccountSnapshot]);
 
   useEffect(() => { void loadStrategies(); }, [loadStrategies]);
   useEffect(() => { void loadAccount(); }, [loadAccount]);
@@ -293,6 +331,35 @@ export default function GrowTipsLive() {
   const actionAmountValid = actionValueRaw > 0n
     && actionValueRaw <= actionLimitRaw
     && (actionMode !== "add" || actionValueRaw >= raw(actionStrategy?.minDepositRaw));
+  const accountBlockingError = Boolean(accountError && !hasAccountSnapshot);
+  const activeStrategyIds = useMemo(() => new Set(positions.map((position) => position.strategyId)), [positions]);
+  const filteredStrategies = useMemo(() => {
+    const riskRank = { low: 0, medium: 1, high: 2 } as const;
+    const accessRank = { fast: 0, moderate: 1, longer: 2 } as const;
+    const availabilityRank = { live: 0, preview: 1, paused: 2 } as const;
+    return strategies
+      .filter((strategy) => availabilityFilter === "all" || strategyAvailability(strategy) === availabilityFilter)
+      .filter((strategy) => riskFilter === "all" || strategy.riskLevel === riskFilter)
+      .filter((strategy) => accessFilter === "all" || strategyAccess(strategy) === accessFilter)
+      .filter((strategy) => activityFilter === "all"
+        || (activityFilter === "using" ? activeStrategyIds.has(strategy.id) : !activeStrategyIds.has(strategy.id)))
+      .map((strategy, index) => ({ strategy, index }))
+      .sort((left, right) => {
+        if (strategySort === "risk") return riskRank[left.strategy.riskLevel] - riskRank[right.strategy.riskLevel] || left.index - right.index;
+        if (strategySort === "access") return accessRank[strategyAccess(left.strategy)] - accessRank[strategyAccess(right.strategy)] || left.index - right.index;
+        if (strategySort === "rate") return (right.strategy.estimatedApy ?? -Infinity) - (left.strategy.estimatedApy ?? -Infinity) || left.index - right.index;
+        return availabilityRank[strategyAvailability(left.strategy)] - availabilityRank[strategyAvailability(right.strategy)] || left.index - right.index;
+      })
+      .map(({ strategy }) => strategy);
+  }, [accessFilter, activeStrategyIds, activityFilter, availabilityFilter, riskFilter, strategies, strategySort]);
+  const filtersActive = availabilityFilter !== "all" || riskFilter !== "all" || accessFilter !== "all" || activityFilter !== "all";
+
+  const clearStrategyFilters = () => {
+    setAvailabilityFilter("all");
+    setRiskFilter("all");
+    setAccessFilter("all");
+    setActivityFilter("all");
+  };
 
   const scrollToStrategies = () => document.querySelector("#grow-live-strategies")?.scrollIntoView({ behavior: "smooth" });
 
@@ -301,6 +368,7 @@ export default function GrowTipsLive() {
     setActionMode(mode);
     setActionAmount(mode === "withdraw_all" ? rawToInput(position.currentValueRaw) : "");
     setActionMessage("");
+    setActionMessageTone("info");
   };
 
   const requestDefiWalletProof = async () => {
@@ -327,6 +395,7 @@ export default function GrowTipsLive() {
     if (!summary.transactionEnabled || !strategy?.transactionEnabled) return;
     const amountRaw = actionValueRaw.toString();
     setSubmittingAction(true);
+    setActionMessageTone("info");
     setActionMessage("Verifying your wallet…");
     try {
       const walletProof = await requestDefiWalletProof();
@@ -362,9 +431,11 @@ export default function GrowTipsLive() {
         calls,
       } as Parameters<typeof smartWalletClient.sendTransaction>[0]);
       setActionMessage(`Submitted: ${String(txHash).slice(0, 10)}… Your report will update after confirmation.`);
+      setActionMessageTone("success");
       await loadAccount();
     } catch (error) {
       setActionMessage(error instanceof Error ? error.message : "The wallet request could not be prepared.");
+      setActionMessageTone("error");
     } finally {
       setSubmittingAction(false);
     }
@@ -392,12 +463,12 @@ export default function GrowTipsLive() {
           <section className="grow-live-report" aria-labelledby="grow-live-report-title">
             <div className="grow-live-section-head">
               <div><h2 id="grow-live-report-title">Your growth report</h2><p>Live totals from your indexed positions.</p></div>
-              {!loadingAccount && !accountError && <span className="grow-live-live"><span className="material-symbols-outlined">sync</span> Updated live</span>}
+              {hasAccountSnapshot && <span className={`grow-live-live${accountError ? " is-delayed" : ""}`}><span className={`material-symbols-outlined${refreshingAccount ? " is-spinning" : ""}`}>{accountError ? "warning" : "sync"}</span>{refreshingAccount ? " Updating" : accountError ? " Update delayed" : " Updated live"}</span>}
             </div>
 
-            {loadingAccount ? (
+            {loadingAccount && !hasAccountSnapshot ? (
               <div className="grow-live-state"><span className="material-symbols-outlined is-spinning">progress_activity</span><strong>Loading your positions…</strong></div>
-            ) : accountError ? (
+            ) : accountBlockingError ? (
               <div className="grow-live-state is-error"><span className="material-symbols-outlined">cloud_off</span><strong>{accountError}</strong><button type="button" onClick={() => void loadAccount()}>Try again</button></div>
             ) : !address ? (
               <div className="grow-live-state"><span className="material-symbols-outlined">account_circle</span><strong>Connect your creator account to see your growth report.</strong><button type="button" onClick={login}>Connect account</button></div>
@@ -449,11 +520,20 @@ export default function GrowTipsLive() {
         </section>
 
         <section className="grow-live-strategies" id="grow-live-strategies">
-          <div className="grow-live-section-head"><div><h2>Choose a way to grow</h2><p>Compare what each option is best for, how balances may move, and expected access time.</p></div>{!loadingStrategies && <span>{strategies.length} choices</span>}</div>
+          <div className="grow-live-section-head"><div><h2>Choose a way to grow</h2><p>Compare what each option is best for, how balances may move, and expected access time.</p></div>{!loadingStrategies && <span>{filteredStrategies.length === strategies.length ? strategies.length : `${filteredStrategies.length} of ${strategies.length}`} choices</span>}</div>
           {loadingStrategies ? <div className="grow-live-state"><span className="material-symbols-outlined is-spinning">progress_activity</span><strong>Loading strategies…</strong></div>
             : strategyError ? <div className="grow-live-state is-error"><span className="material-symbols-outlined">cloud_off</span><strong>{strategyError}</strong><button type="button" onClick={() => void loadStrategies()}>Try again</button></div>
             : strategies.length === 0 ? <div className="grow-live-state"><span className="material-symbols-outlined">hourglass_empty</span><strong>No strategies are available right now.</strong><p>Check back after a provider strategy has been verified.</p></div>
-            : <div className="grow-live-strategy-grid">{strategies.map((strategy) => {
+            : <><div className="grow-live-strategy-filters" aria-label="Strategy filters">
+              <label><span className="material-symbols-outlined">toggle_on</span><small>Availability</small><select value={availabilityFilter} onChange={(event) => setAvailabilityFilter(event.target.value as StrategyAvailabilityFilter)}><option value="all">All</option><option value="live">Available now</option><option value="preview">Preview</option><option value="paused">Paused</option></select></label>
+              <label><span className="material-symbols-outlined">shield</span><small>Risk</small><select value={riskFilter} onChange={(event) => setRiskFilter(event.target.value as StrategyRiskFilter)}><option value="all">All levels</option><option value="low">Lower</option><option value="medium">Moderate</option><option value="high">Higher</option></select></label>
+              <label><span className="material-symbols-outlined">schedule</span><small>Access</small><select value={accessFilter} onChange={(event) => setAccessFilter(event.target.value as StrategyAccessFilter)}><option value="all">Any speed</option><option value="fast">Fastest</option><option value="moderate">Moderate</option><option value="longer">Longer</option></select></label>
+              <label><span className="material-symbols-outlined">account_balance_wallet</span><small>My activity</small><select value={activityFilter} onChange={(event) => setActivityFilter(event.target.value as StrategyActivityFilter)}><option value="all">All strategies</option><option value="using">Using</option><option value="not_using">Not using</option></select></label>
+              <label><span className="material-symbols-outlined">sort</span><small>Sort</small><select value={strategySort} onChange={(event) => setStrategySort(event.target.value as StrategySort)}><option value="recommended">Recommended</option><option value="risk">Lowest risk</option><option value="access">Fastest access</option><option value="rate">Highest estimated rate</option></select></label>
+              {filtersActive && <button type="button" onClick={clearStrategyFilters}><span className="material-symbols-outlined">filter_alt_off</span>Clear</button>}
+            </div>
+            {filteredStrategies.length === 0 ? <div className="grow-live-state"><span className="material-symbols-outlined">filter_alt_off</span><strong>No strategies match these filters.</strong><p>Clear the filters to see every available choice.</p><button type="button" onClick={clearStrategyFilters}>Clear filters</button></div>
+            : <div className="grow-live-strategy-grid">{filteredStrategies.map((strategy) => {
               const language = strategyLanguage(strategy);
               const evidence = strategy.evidence && strategy.evidence.participantCount > 0 && raw(strategy.evidence.yieldPaidRaw) > 0n ? strategy.evidence : null;
               return <article key={strategy.id} className={`grow-live-strategy${strategy.status === "disabled" ? " is-paused" : ""}`}>
@@ -469,13 +549,13 @@ export default function GrowTipsLive() {
                 </button>
                 {strategy.status === "disabled" && <span className="grow-live-strategy-status"><i className="material-symbols-outlined">pause_circle</i>Paused</span>}
               </article>;
-            })}</div>}
+            })}</div>}</>}
         </section>
 
         <section className="grow-live-history">
           <div className="grow-live-section-head"><div><h2>Your history</h2><p>Every amount added, earned, or withdrawn.</p></div>{activity.length > 0 && <button type="button" onClick={() => setShowAllActivity((value) => !value)}>{showAllActivity ? "Show less" : "View all"}</button>}</div>
-          {loadingAccount ? <div className="grow-live-state"><span className="material-symbols-outlined is-spinning">progress_activity</span><strong>Loading history…</strong></div>
-            : accountError ? <div className="grow-live-state is-error"><span className="material-symbols-outlined">cloud_off</span><strong>History is unavailable.</strong><button type="button" onClick={() => void loadAccount()}>Try again</button></div>
+          {loadingAccount && !hasAccountSnapshot ? <div className="grow-live-state"><span className="material-symbols-outlined is-spinning">progress_activity</span><strong>Loading history…</strong></div>
+            : accountBlockingError ? <div className="grow-live-state is-error"><span className="material-symbols-outlined">cloud_off</span><strong>History is unavailable.</strong><button type="button" onClick={() => void loadAccount()}>Try again</button></div>
             : activity.length === 0 ? <div className="grow-live-state"><span className="material-symbols-outlined">history</span><strong>No growth activity yet.</strong><p>Your amounts added, verified service fees received, and withdrawals will appear here.</p>{strategies.length > 0 && <button type="button" onClick={scrollToStrategies}>Explore strategies</button>}</div>
             : <div className="grow-live-history-table"><div className="is-head"><span>Date</span><span>Action</span><span>Strategy</span><span>Amount</span><span>Status</span></div>{shownActivity.map((record) => <div key={record.id}><span>{date(record.timestamp)}</span><span><i className="material-symbols-outlined">{actionIcon(record.action)}</i><strong>{actionLabel(record.action)}</strong></span><span>{record.strategyName}</span><strong className={record.direction === "in" ? "is-positive" : ""}>{record.direction === "out" ? "−" : record.direction === "in" ? "+" : ""}{record.direction === "neutral" ? "—" : money(record.amountRaw)}</strong><span>{record.status}</span></div>)}</div>}
         </section>
@@ -498,14 +578,14 @@ export default function GrowTipsLive() {
         const limitRaw = actionMode === "add" ? availableRaw : actionPosition.currentValueRaw;
         return <div className="grow-live-modal-layer" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setActionPosition(null); }}><section className="grow-live-modal" role="dialog" aria-modal="true" aria-labelledby="grow-live-action-title">
           <header><div><span>{actionMode === "add" ? "Add funds" : "Withdraw funds"}</span><h2 id="grow-live-action-title">{strategyName(strategy, actionPosition.strategyId)}</h2><p>{actionMode === "add" ? "Adding funds creates a new position under this strategy." : "This withdrawal applies only to the selected position."}</p></div><button type="button" aria-label="Close action" onClick={() => setActionPosition(null)}><i className="material-symbols-outlined">close</i></button></header>
-          <div className="grow-live-action-tabs"><button type="button" className={actionMode === "add" ? "is-active" : ""} onClick={() => { setActionMode("add"); setActionAmount(""); }}><i className="material-symbols-outlined">add_circle</i>Add funds</button>{actionPosition.id && <button type="button" className={actionMode !== "add" ? "is-active" : ""} onClick={() => { setActionMode("withdraw_partial"); setActionAmount(""); }}><i className="material-symbols-outlined">download</i>Withdraw funds</button>}</div>
-          <label className="grow-live-action-input"><span>{actionMode === "add" ? "Amount to add" : "Amount to withdraw"}</span><div><b>$</b><input type="number" min="0" step="0.01" value={actionAmount} onChange={(event) => { setActionAmount(event.target.value); if (actionMode === "withdraw_all") setActionMode("withdraw_partial"); }} /></div><small>{actionMode === "add" ? "Available balance" : "Position balance"}: <strong>{money(limitRaw)}</strong></small></label>
+          <div className="grow-live-action-control-row"><div className="grow-live-action-tabs"><button type="button" className={actionMode === "add" ? "is-active" : ""} onClick={() => { setActionMode("add"); setActionAmount(""); }}><i className="material-symbols-outlined">add_circle</i>Add funds</button>{actionPosition.id && <button type="button" className={actionMode !== "add" ? "is-active" : ""} onClick={() => { setActionMode("withdraw_partial"); setActionAmount(""); }}><i className="material-symbols-outlined">download</i>Withdraw funds</button>}</div><span>{actionMode === "add" ? "Amount to add" : "Amount to withdraw"}</span></div>
+          <label className="grow-live-action-input"><div><b>$</b><input type="number" min="0" step="0.01" value={actionAmount} onChange={(event) => { setActionAmount(event.target.value); if (actionMode === "withdraw_all") setActionMode("withdraw_partial"); }} /></div><small>{actionMode === "add" ? "Available balance" : "Position balance"}: <strong>{money(limitRaw)}</strong></small></label>
           <div className="grow-live-presets">{[25, 50, 75, 100].map((item) => <button key={item} type="button" onClick={() => { setActionAmount(rawToInput(raw(limitRaw) * BigInt(item) / 100n)); if (actionMode !== "add") setActionMode(item === 100 ? "withdraw_all" : "withdraw_partial"); }}>{item === 100 ? "MAX" : `${item}%`}</button>)}</div>
           {actionValueRaw > actionLimitRaw && <p className="grow-live-action-message is-error">That amount is higher than your available balance.</p>}
           {actionMode === "add" && actionValueRaw > 0n && actionValueRaw < raw(strategy?.minDepositRaw) && <p className="grow-live-action-message is-error">The minimum for this option is {money(strategy?.minDepositRaw)}.</p>}
           {actionMode !== "add" && <div className="grow-live-modal-note"><span className="material-symbols-outlined">info</span><p>You can request this withdrawal now. The final amount can differ from the displayed balance, and completion depends on current network and market conditions.</p></div>}
           {!controlsEnabled && <div className="grow-live-paused"><span className="material-symbols-outlined">lock</span>The provider transaction route is not enabled yet. No wallet request will be created.</div>}
-          {actionMessage && <p className="grow-live-action-message">{actionMessage}</p>}
+          {actionMessage && <p className={`grow-live-action-message is-${actionMessageTone}`}><span className="material-symbols-outlined">{actionMessageTone === "success" ? "check_circle" : actionMessageTone === "error" ? "error" : "info"}</span>{actionMessage}</p>}
           <div className="grow-live-modal-actions"><button type="button" onClick={() => setActionPosition(null)}>Cancel</button><button type="button" disabled={!controlsEnabled || !actionAmountValid || submittingAction} onClick={() => void submitAction()}><i className={`material-symbols-outlined${submittingAction ? " is-spinning" : ""}`}>{submittingAction ? "progress_activity" : "account_balance_wallet"}</i>{controlsEnabled ? submittingAction ? "Preparing…" : "Continue in wallet" : "Transactions unavailable"}</button></div>
         </section></div>;
       })()}

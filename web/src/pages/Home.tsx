@@ -151,7 +151,6 @@ export default function Home() {
   const [faqOpenSet, setFaqOpenSet] = useState<Set<number>>(() => new Set());
   const [createWalletLoading, setCreateWalletLoading] = useState(false);
   const [createWalletError, setCreateWalletError] = useState<string | null>(null);
-  const [tipperVideoReady, setTipperVideoReady] = useState(false);
   const tipAmountInputRef = useRef<HTMLInputElement>(null);
   const heroStageRef = useRef<HTMLDivElement>(null);
   const heroStoryLabelRef = useRef<HTMLSpanElement>(null);
@@ -1050,33 +1049,10 @@ export default function Home() {
           <div className="lp-how-preview">
             {howTab === "tippers" ? (
               <div className="lp-how-video-wrap">
-                {!tipperVideoReady && (
-                  <div className="lp-how-video-fallback" aria-hidden>
-                    <div className="lp-how-video-post">
-                      <div className="lp-how-video-avatar" />
-                      <div className="lp-how-video-lines">
-                        <span />
-                        <span />
-                      </div>
-                    </div>
-                    <div className="lp-how-video-actions">
-                      <span />
-                      <span />
-                      <strong>Tip</strong>
-                    </div>
-                  </div>
-                )}
-                <video
+                <img
                   className="lp-how-video"
-                  src="/Tipper.mp4"
-                  autoPlay
-                  muted
-                  loop
-                  playsInline
-                  preload="metadata"
-                  onLoadedData={() => setTipperVideoReady(true)}
-                  onCanPlay={() => setTipperVideoReady(true)}
-                  aria-label="How tipping works"
+                  src="/images/x-tipping-flow-v1.png"
+                  alt="An X conversation showing a supporter tagging the Teep Agent to send a one-dollar tip, followed by Teep's confirmation and receipt"
                 />
               </div>
             ) : (
