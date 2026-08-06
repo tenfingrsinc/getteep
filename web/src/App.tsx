@@ -23,7 +23,7 @@ import CreatorPerformance from "./pages/CreatorPerformance";
 import CreatorDashboardHome from "./pages/CreatorDashboardHome";
 import CreatorGrowLearn from "./pages/CreatorGrowLearn";
 import CreatorGrowSettings from "./pages/CreatorGrowSettings";
-import GrowTips from "./pages/GrowTips";
+import GrowTips from "./pages/GrowTipsLive";
 import AdminOps from "./pages/AdminOps";
 import NotFound from "./pages/NotFound";
 import TxReceipt from "./pages/TxReceipt";

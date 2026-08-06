@@ -6,6 +6,7 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./interfaces/IAaveV3Pool.sol";
@@ -62,6 +63,17 @@ contract AaveV3SupplyAdapter is ERC20, Ownable, Pausable, ReentrancyGuard, IStra
         return IERC20(aToken).balanceOf(address(this));
     }
 
+    function previewDeposit(uint256 assets) public view override returns (uint256 shares) {
+        uint256 supply = totalSupply();
+        uint256 managed = totalManagedAssets();
+        return supply == 0 ? assets : Math.mulDiv(assets, supply, managed);
+    }
+
+    function previewRedeem(uint256 shares) public view override returns (uint256 assets) {
+        uint256 supply = totalSupply();
+        return supply == 0 ? 0 : Math.mulDiv(shares, totalManagedAssets(), supply);
+    }
+
     function deposit(DepositParams calldata params)
         external
         override
@@ -82,7 +94,7 @@ contract AaveV3SupplyAdapter is ERC20, Ownable, Pausable, ReentrancyGuard, IStra
 
         uint256 supply = totalSupply();
         require((supply == 0) == (managedBefore == 0), "Adapter: inconsistent initial state");
-        shares = supply == 0 ? params.assets : (params.assets * supply) / managedBefore;
+        shares = supply == 0 ? params.assets : Math.mulDiv(params.assets, supply, managedBefore);
         require(shares > 0, "Adapter: zero shares");
         require(shares >= params.minShares, "Adapter: insufficient shares");
 
@@ -112,7 +124,7 @@ contract AaveV3SupplyAdapter is ERC20, Ownable, Pausable, ReentrancyGuard, IStra
 
         uint256 supply = totalSupply();
         require(params.shares <= balanceOf(msg.sender), "Adapter: insufficient shares");
-        uint256 quotedAssets = (params.shares * totalManagedAssets()) / supply;
+        uint256 quotedAssets = Math.mulDiv(params.shares, totalManagedAssets(), supply);
         require(quotedAssets >= params.minAssets, "Adapter: insufficient assets");
 
         _burn(msg.sender, params.shares);

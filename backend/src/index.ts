@@ -162,10 +162,24 @@ function assertProductionEnv() {
     throw new Error("Production backend cannot allow unsigned writes or attestations.");
   }
   if (process.env.ENABLE_DEFI_TRANSACTIONS === "true") {
-    const defiRequired = ["DEFI_STRATEGIES_JSON"];
+    const defiRequired = [
+      "STRATEGY_REGISTRY_ADDRESS",
+      "DEFI_SOULESS_STRATEGY_ID",
+      "DEFI_SOULESS_VAULT_ADDRESS",
+      "DEFI_SOULESS_ADAPTER_ADDRESS",
+      "DEFI_SOULESS_POOL_ADDRESS",
+    ];
     const missingDefi = defiRequired.filter((key) => !process.env[key]);
     if (missingDefi.length) {
       throw new Error(`Production DeFi transactions are enabled but missing env: ${missingDefi.join(", ")}`);
+    }
+    if (
+      process.env.DEFI_TRANSACTION_ROUTE_READY !== "true" ||
+      process.env.DEFI_SOULESS_STATUS !== "ready" ||
+      process.env.DEFI_SOULESS_DEPLOYMENT_VERIFIED !== "true" ||
+      process.env.DEFI_SOULESS_INDEXED !== "true"
+    ) {
+      throw new Error("Production DeFi transactions require the route, deployment, strategy, and indexer readiness gates.");
     }
   }
   if (process.env.WITHDRAWAL_REQUIRE_EMAIL_CONFIRMATION !== "false" && !process.env.WITHDRAWAL_EMAIL_WEBHOOK_URL) {
@@ -256,6 +270,19 @@ const withdrawalLimiter = rateLimit({
     });
   },
 });
+const defiIntentLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: Number(process.env.DEFI_INTENT_RATE_LIMIT_MAX || 20),
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.method === "GET",
+  handler: (_req, res) => {
+    res.status(429).json({
+      error: "Too many growth transaction attempts. Wait a moment and try again.",
+      code: "DEFI_INTENT_RATE_LIMIT",
+    });
+  },
+});
 
 // Routes
 app.use("/health", healthRouter);
@@ -269,7 +296,7 @@ app.use("/milestones", milestonesRouter);
 app.use("/profile", profileRouter);
 app.use("/stats", statsRouter);
 app.use("/leaderboard", leaderboardRouter);
-app.use("/defi", defiRouter);
+app.use("/defi", defiIntentLimiter, defiRouter);
 app.use("/internal/x-bot", xBotInternalRouter);
 app.use("/x-balance", xBalanceRouter);
 

@@ -26,6 +26,10 @@ interface IStrategyAdapter {
 
     function totalManagedAssets() external view returns (uint256);
 
+    function previewDeposit(uint256 assets) external view returns (uint256 shares);
+
+    function previewRedeem(uint256 shares) external view returns (uint256 assets);
+
     function deposit(DepositParams calldata params) external returns (uint256 shares);
 
     function redeem(RedeemParams calldata params) external returns (uint256 assets);

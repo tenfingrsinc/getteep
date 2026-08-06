@@ -1,7 +1,9 @@
 import {
   decodeEventLog,
   formatUnits,
+  keccak256,
   parseAbiItem,
+  stringToHex,
   toEventSelector,
   type Address,
   type Hex,
@@ -20,10 +22,22 @@ const CLAIM_WALLET_DEPLOYED_EVENT = parseAbiItem(
 const TRANSFER_EVENT = parseAbiItem(
   "event Transfer(address indexed from, address indexed to, uint256 value)"
 );
+const STRATEGY_ALLOCATED_EVENT = parseAbiItem(
+  "event StrategyAllocated(uint256 indexed positionId, bytes32 indexed strategyId, address indexed adapter, address asset, uint256 assets, uint256 shares)"
+);
+const STRATEGY_EXITED_EVENT = parseAbiItem(
+  "event StrategyExited(uint256 indexed positionId, bytes32 indexed strategyId, address indexed adapter, address asset, uint256 shares, uint256 principalReturned, uint256 grossAssets, uint256 realizedYield, uint256 performanceFee, uint256 netAssets)"
+);
+const FEES_HARVESTED_EVENT = parseAbiItem(
+  "event FeesHarvested(uint256 usdcCollected, uint256 pairedCollected, uint256 pairedConverted)"
+);
 
 const TIPPED_TOPIC = toEventSelector(TIPPED_EVENT).toLowerCase();
 const CLAIM_TOPIC = toEventSelector(CLAIM_WALLET_DEPLOYED_EVENT).toLowerCase();
 const TRANSFER_TOPIC = toEventSelector(TRANSFER_EVENT).toLowerCase();
+const STRATEGY_ALLOCATED_TOPIC = toEventSelector(STRATEGY_ALLOCATED_EVENT).toLowerCase();
+const STRATEGY_EXITED_TOPIC = toEventSelector(STRATEGY_EXITED_EVENT).toLowerCase();
+const FEES_HARVESTED_TOPIC = toEventSelector(FEES_HARVESTED_EVENT).toLowerCase();
 const TIP_CONTRACT_ADDRESS = process.env.TIP_CONTRACT_ADDRESS?.toLowerCase();
 const X_TIPPING_ROUTER_ADDRESS = process.env.X_TIPPING_ROUTER_ADDRESS?.toLowerCase();
 const FACTORY_ADDRESS = process.env.FACTORY_ADDRESS?.toLowerCase();
@@ -33,6 +47,12 @@ const ARC_NATIVE_USDC_TRANSFER_TOPIC = (process.env.ARC_NATIVE_USDC_TRANSFER_TOP
   "0x62f084c00a442dcf51cdbb51beed2839bf42a268da8474b0e98f38edb7db5a22").toLowerCase();
 const ARC_NATIVE_USDC_DECIMALS = Number(process.env.ARC_NATIVE_USDC_DECIMALS || "18");
 const USDC_DECIMALS = Number(process.env.USDC_DECIMALS || "6");
+const SOULESS_ADAPTER_ADDRESS = process.env.DEFI_SOULESS_ADAPTER_ADDRESS?.toLowerCase();
+const SOULESS_VAULT_ADDRESS = process.env.DEFI_SOULESS_VAULT_ADDRESS?.toLowerCase();
+const configuredStrategyId = process.env.DEFI_SOULESS_STRATEGY_ID?.trim() || "SOULESS_V3_GROWTH_73A95B_V1";
+const SOULESS_STRATEGY_ID = (/^0x[0-9a-fA-F]{64}$/.test(configuredStrategyId)
+  ? configuredStrategyId
+  : keccak256(stringToHex(configuredStrategyId))).toLowerCase();
 const PROJECT_INTERVAL_MS = Math.max(250, Number(process.env.GOLDSKY_PROJECT_INTERVAL_MS || 1_000));
 const PROJECT_BATCH_SIZE = Math.max(1, Math.min(1_000, Number(process.env.GOLDSKY_PROJECT_BATCH_SIZE || 100)));
 
@@ -152,6 +172,68 @@ export class ChainEventProjector {
            deployed_at_block = excluded.deployed_at_block,
            tx_hash = excluded.tx_hash`
       ).run(args.authorId.toString(), args.wallet.toLowerCase(), args.owner.toLowerCase(), blockNumber, txHash);
+    } else if (topic0 === STRATEGY_ALLOCATED_TOPIC && SOULESS_ADAPTER_ADDRESS) {
+      const identity = await getClaimWalletIdentity(address);
+      const decoded = decodeEventLog({ abi: [STRATEGY_ALLOCATED_EVENT], data: row.data as Hex, topics });
+      const args = decoded.args as unknown as {
+        positionId: bigint; strategyId: Hex; adapter: Address; asset: Address; assets: bigint; shares: bigint;
+      };
+      if (identity && args.strategyId.toLowerCase() === SOULESS_STRATEGY_ID && args.adapter.toLowerCase() === SOULESS_ADAPTER_ADDRESS) {
+        eventKind = "defi_allocation";
+        entityKey = `defi:${txHash}:${logIndex}`;
+        await projectStrategyAllocation({
+          eventKey: entityKey,
+          wallet: address,
+          owner: identity.owner,
+          positionId: args.positionId.toString(),
+          strategyId: args.strategyId.toLowerCase(),
+          adapter: args.adapter.toLowerCase(),
+          asset: args.asset.toLowerCase(),
+          assets: args.assets.toString(),
+          shares: args.shares.toString(),
+          txHash,
+          timestamp: normalizeTimestampMs(row.blockTimestamp),
+        });
+      }
+    } else if (topic0 === STRATEGY_EXITED_TOPIC && SOULESS_ADAPTER_ADDRESS) {
+      const identity = await getClaimWalletIdentity(address);
+      const decoded = decodeEventLog({ abi: [STRATEGY_EXITED_EVENT], data: row.data as Hex, topics });
+      const args = decoded.args as unknown as {
+        positionId: bigint; strategyId: Hex; adapter: Address; asset: Address; shares: bigint;
+        principalReturned: bigint; grossAssets: bigint; realizedYield: bigint; performanceFee: bigint; netAssets: bigint;
+      };
+      if (identity && args.strategyId.toLowerCase() === SOULESS_STRATEGY_ID && args.adapter.toLowerCase() === SOULESS_ADAPTER_ADDRESS) {
+        eventKind = "defi_exit";
+        entityKey = `defi:${txHash}:${logIndex}`;
+        await projectStrategyExit({
+          eventKey: entityKey,
+          wallet: address,
+          owner: identity.owner,
+          positionId: args.positionId.toString(),
+          strategyId: args.strategyId.toLowerCase(),
+          shares: args.shares.toString(),
+          principalReturned: args.principalReturned.toString(),
+          grossAssets: args.grossAssets.toString(),
+          realizedYield: args.realizedYield.toString(),
+          performanceFee: args.performanceFee.toString(),
+          netAssets: args.netAssets.toString(),
+          txHash,
+          timestamp: normalizeTimestampMs(row.blockTimestamp),
+        });
+      }
+    } else if (topic0 === FEES_HARVESTED_TOPIC && SOULESS_VAULT_ADDRESS && address === SOULESS_VAULT_ADDRESS) {
+      const decoded = decodeEventLog({ abi: [FEES_HARVESTED_EVENT], data: row.data as Hex, topics });
+      const args = decoded.args as unknown as { usdcCollected: bigint; pairedCollected: bigint; pairedConverted: bigint };
+      eventKind = "defi_fee_collection";
+      entityKey = `defi:${txHash}:${logIndex}`;
+      await projectStrategyFeeCollection({
+        eventKey: entityKey,
+        usdcCollected: args.usdcCollected.toString(),
+        pairedCollected: args.pairedCollected.toString(),
+        pairedConverted: args.pairedConverted.toString(),
+        txHash,
+        timestamp: normalizeTimestampMs(row.blockTimestamp),
+      });
     } else if (topic0 === TRANSFER_TOPIC && address === USDC_ADDRESS) {
       const decoded = decodeEventLog({ abi: [TRANSFER_EVENT], data: row.data as Hex, topics });
       const args = decoded.args as unknown as { from: Address; to: Address; value: bigint };
@@ -262,6 +344,164 @@ async function projectFunding(input: {
   }
 }
 
+async function ensureSoulessStrategy(strategyId: string, adapter: string) {
+  const now = Date.now();
+  await getDb().prepare(
+    `INSERT INTO defi_strategies (
+       id, provider, provider_type, strategy_type, status, source_chain_id,
+       asset_address, target_address, metadata_json, created_at, updated_at
+     ) VALUES (?, 'Souless', 'souless', 'single-chain-vault', 'ready', ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (id) DO UPDATE SET
+       target_address = excluded.target_address,
+       metadata_json = excluded.metadata_json,
+       updated_at = excluded.updated_at`
+  ).run(
+    strategyId,
+    getChainId(),
+    USDC_ADDRESS,
+    adapter,
+    JSON.stringify({ name: "Growth", verificationSource: "chain_indexer" }),
+    now,
+    now
+  );
+}
+
+async function getClaimWalletIdentity(wallet: string): Promise<{ owner: string } | null> {
+  const row = await one<{ owner: string }>(
+    `SELECT LOWER(owner_address) as owner FROM claim_wallets WHERE LOWER(wallet_address) = ? LIMIT 1`,
+    [wallet.toLowerCase()]
+  );
+  return row || null;
+}
+
+async function projectStrategyAllocation(input: {
+  eventKey: string; wallet: string; owner: string; positionId: string; strategyId: string;
+  adapter: string; asset: string; assets: string; shares: string; txHash: string; timestamp: number;
+}) {
+  await ensureSoulessStrategy(input.strategyId, input.adapter);
+  const positionKey = `${input.wallet}:${input.positionId}`;
+  const metadata = JSON.stringify({
+    claimWallet: input.wallet,
+    positionId: input.positionId,
+    positionKey,
+    eventKey: input.eventKey,
+    verificationSource: "chain_indexer",
+  });
+  await getDb().prepare(
+    `INSERT INTO defi_positions (
+       id, user_address, strategy_id, provider, source_chain_id, asset_address, target_address,
+       principal_raw, current_value_raw, yield_earned_raw, shares_raw, chain_state, metadata_json,
+       verification_source, canonical, created_at, updated_at
+     ) VALUES (?, ?, ?, 'Souless', ?, ?, ?, ?, ?, '0', ?, 'ACTIVE', ?, 'chain_indexer', TRUE, ?, ?)
+     ON CONFLICT (id) DO UPDATE SET
+       principal_raw = excluded.principal_raw,
+       current_value_raw = excluded.current_value_raw,
+       shares_raw = excluded.shares_raw,
+       chain_state = 'ACTIVE',
+       metadata_json = excluded.metadata_json,
+       verification_source = 'chain_indexer',
+       canonical = TRUE,
+       updated_at = excluded.updated_at`
+  ).run(
+    positionKey, input.owner, input.strategyId, getChainId(), input.asset, input.adapter,
+    input.assets, input.assets, input.shares, metadata, input.timestamp, input.timestamp
+  );
+  await getDb().prepare(
+    `INSERT INTO defi_transactions (
+       id, user_address, strategy_id, action, status, source_chain_id, source_tx_hash,
+       amount_raw, shares_raw, metadata_json, verification_source, canonical, created_at, updated_at
+     ) VALUES (?, ?, ?, 'grow', 'confirmed', ?, ?, ?, ?, ?, 'chain_indexer', TRUE, ?, ?)
+     ON CONFLICT (id) DO UPDATE SET canonical = TRUE, status = 'confirmed', updated_at = excluded.updated_at`
+  ).run(
+    `${input.eventKey}:grow`, input.owner, input.strategyId, getChainId(), input.txHash,
+    input.assets, input.shares, metadata, input.timestamp, input.timestamp
+  );
+}
+
+async function projectStrategyExit(input: {
+  eventKey: string; wallet: string; owner: string; positionId: string; strategyId: string;
+  shares: string; principalReturned: string; grossAssets: string; realizedYield: string;
+  performanceFee: string; netAssets: string; txHash: string; timestamp: number;
+}) {
+  const positionKey = `${input.wallet}:${input.positionId}`;
+  const netServiceFees = (BigInt(input.realizedYield) - BigInt(input.performanceFee)).toString();
+  const metadata = JSON.stringify({
+    claimWallet: input.wallet,
+    positionId: input.positionId,
+    positionKey,
+    eventKey: input.eventKey,
+    principalReturnedRaw: input.principalReturned,
+    grossAssetsRaw: input.grossAssets,
+    realizedYieldRaw: input.realizedYield,
+    performanceFeeRaw: input.performanceFee,
+    netAssetsRaw: input.netAssets,
+    principalExcluded: true,
+    verificationSource: "chain_indexer",
+  });
+  await getDb().prepare(
+    `UPDATE defi_positions SET
+       principal_raw = GREATEST(CAST(principal_raw AS NUMERIC) - CAST(? AS NUMERIC), 0)::TEXT,
+       current_value_raw = GREATEST(CAST(current_value_raw AS NUMERIC) - CAST(? AS NUMERIC), 0)::TEXT,
+       yield_earned_raw = (CAST(yield_earned_raw AS NUMERIC) + CAST(? AS NUMERIC))::TEXT,
+       shares_raw = GREATEST(CAST(COALESCE(shares_raw, '0') AS NUMERIC) - CAST(? AS NUMERIC), 0)::TEXT,
+       chain_state = CASE WHEN CAST(COALESCE(shares_raw, '0') AS NUMERIC) <= CAST(? AS NUMERIC) THEN 'EXITED' ELSE 'ACTIVE' END,
+       canonical = TRUE,
+       updated_at = ?
+     WHERE id = ? AND strategy_id = ?`
+  ).run(
+    input.principalReturned, input.grossAssets, netServiceFees, input.shares, input.shares,
+    input.timestamp, positionKey, input.strategyId
+  );
+  await getDb().prepare(
+    `INSERT INTO defi_transactions (
+       id, user_address, strategy_id, action, status, source_chain_id, source_tx_hash,
+       amount_raw, shares_raw, metadata_json, verification_source, canonical, created_at, updated_at
+     ) VALUES (?, ?, ?, 'withdraw', 'confirmed', ?, ?, ?, ?, ?, 'chain_indexer', TRUE, ?, ?)
+     ON CONFLICT (id) DO UPDATE SET canonical = TRUE, status = 'confirmed', updated_at = excluded.updated_at`
+  ).run(
+    `${input.eventKey}:withdraw`, input.owner, input.strategyId, getChainId(), input.txHash,
+    input.netAssets, input.shares, metadata, input.timestamp, input.timestamp
+  );
+  if (BigInt(netServiceFees) > 0n) {
+    await getDb().prepare(
+      `INSERT INTO defi_transactions (
+         id, user_address, strategy_id, action, status, source_chain_id, source_tx_hash,
+         amount_raw, metadata_json, evidence_type, verification_source, canonical, created_at, updated_at
+       ) VALUES (?, ?, ?, 'yield', 'confirmed', ?, ?, ?, ?, 'realized_service_fee', 'chain_indexer', TRUE, ?, ?)
+       ON CONFLICT (id) DO UPDATE SET canonical = TRUE, status = 'confirmed', updated_at = excluded.updated_at`
+    ).run(
+      `${input.eventKey}:yield`, input.owner, input.strategyId, getChainId(), input.txHash,
+      netServiceFees, metadata, input.timestamp, input.timestamp
+    );
+  }
+}
+
+async function projectStrategyFeeCollection(input: {
+  eventKey: string; usdcCollected: string; pairedCollected: string; pairedConverted: string;
+  txHash: string; timestamp: number;
+}) {
+  const amount = (BigInt(input.usdcCollected) + BigInt(input.pairedConverted)).toString();
+  await getDb().prepare(
+    `INSERT INTO defi_transactions (
+       id, user_address, strategy_id, action, status, source_chain_id, source_tx_hash,
+       amount_raw, metadata_json, evidence_type, verification_source, canonical, created_at, updated_at
+     ) VALUES (?, ?, ?, 'harvest', 'confirmed', ?, ?, ?, ?, 'service_fee_collected', 'chain_indexer', TRUE, ?, ?)
+     ON CONFLICT (id) DO UPDATE SET canonical = TRUE, status = 'confirmed', updated_at = excluded.updated_at`
+  ).run(
+    `${input.eventKey}:harvest`, SOULESS_VAULT_ADDRESS || "", SOULESS_STRATEGY_ID,
+    getChainId(), input.txHash, amount,
+    JSON.stringify({
+      usdcCollectedRaw: input.usdcCollected,
+      pairedCollectedRaw: input.pairedCollected,
+      pairedConvertedRaw: input.pairedConverted,
+      paidToCreators: false,
+      verificationSource: "chain_indexer",
+    }),
+    input.timestamp,
+    input.timestamp
+  );
+}
+
 async function reverseProjection(eventId: string, txHash: string, logIndex: number) {
   const projection = await one<{ eventKind: string; entityKey: string | null }>(
     `SELECT event_kind as "eventKind", entity_key as "entityKey"
@@ -274,6 +514,16 @@ async function reverseProjection(eventId: string, txHash: string, logIndex: numb
     await run("DELETE FROM claim_wallets WHERE LOWER(tx_hash) = ?", [txHash]);
   } else if (projection?.eventKind === "funding" && projection.entityKey) {
     await run("DELETE FROM funding_provider_sessions WHERE id = ?", [projection.entityKey]);
+  } else if (projection?.eventKind.startsWith("defi_") && projection.entityKey) {
+    await run("UPDATE defi_transactions SET canonical = FALSE, updated_at = ? WHERE id LIKE ?", [Date.now(), `${projection.entityKey}:%`]);
+    await run(
+      `UPDATE defi_positions SET canonical = FALSE, updated_at = ?
+       WHERE id IN (
+         SELECT metadata_json::jsonb ->> 'positionKey' FROM defi_transactions
+         WHERE id LIKE ? AND metadata_json IS NOT NULL
+       )`,
+      [Date.now(), `${projection.entityKey}:%`]
+    );
   }
   await run(
     `UPDATE chain_event_projections
@@ -300,6 +550,16 @@ async function reconcileRemovedEvents() {
       await run("DELETE FROM funding_provider_sessions WHERE id = ?", [projection.entityKey]);
     } else if (projection.eventKind === "claim_wallet" && projection.entityKey) {
       await run("DELETE FROM claim_wallets WHERE LOWER(tx_hash) = ?", [projection.entityKey]);
+    } else if (projection.eventKind.startsWith("defi_") && projection.entityKey) {
+      await run("UPDATE defi_transactions SET canonical = FALSE, updated_at = ? WHERE id LIKE ?", [Date.now(), `${projection.entityKey}:%`]);
+      await run(
+        `UPDATE defi_positions SET canonical = FALSE, updated_at = ?
+         WHERE id IN (
+           SELECT metadata_json::jsonb ->> 'positionKey' FROM defi_transactions
+           WHERE id LIKE ? AND metadata_json IS NOT NULL
+         )`,
+        [Date.now(), `${projection.entityKey}:%`]
+      );
     }
     await run(
       "UPDATE chain_event_projections SET canonical = FALSE, projected_at = ? WHERE event_id = ?",

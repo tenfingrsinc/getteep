@@ -7,9 +7,24 @@ apiVersion: 3
 sources:
   arc_logs:
     type: dataset
-    dataset_name: arc-testnet.raw_logs
+    dataset_name: arc_testnet.raw_logs
     version: 1.0.0
     start_at: earliest
+    # Fast Scan keeps dynamic ClaimWallet strategy events by topic while all
+    # fixed Teep/provider contracts remain address-filtered.
+    filter: |
+      block_number >= __START_BLOCK__
+      AND (
+        address = '__TIP_CONTRACT_ADDRESS__'
+        OR address = '__X_TIPPING_ROUTER_ADDRESS__'
+        OR address = '__FACTORY_ADDRESS__'
+        OR address = '__USDC_ADDRESS__'
+        OR address = '__ARC_NATIVE_USDC_EVENT_ADDRESS__'
+        OR address = '__SOULESS_VAULT_ADDRESS__'
+        OR address = '__SOULESS_ADAPTER_ADDRESS__'
+        OR topics LIKE '0x2fb6e600957ae4c70eb15e116c83bb9444be19622bdd55c79d45e966e241c9ff%'
+        OR topics LIKE '0xc5048e0971cc45ac9033b3342559f03387ded119f81fee141e688bc11cad75d1%'
+      )
 
 transforms:
   teep_logs:
@@ -29,12 +44,18 @@ transforms:
         TRUE AS canonical
       FROM arc_logs
       WHERE block_number >= __START_BLOCK__
-        AND LOWER(address) IN (
-          LOWER('__TIP_CONTRACT_ADDRESS__'),
-          LOWER('__X_TIPPING_ROUTER_ADDRESS__'),
-          LOWER('__FACTORY_ADDRESS__'),
-          LOWER('__USDC_ADDRESS__'),
-          LOWER('__ARC_NATIVE_USDC_EVENT_ADDRESS__')
+        AND (
+          LOWER(address) IN (
+            LOWER('__TIP_CONTRACT_ADDRESS__'),
+            LOWER('__X_TIPPING_ROUTER_ADDRESS__'),
+            LOWER('__FACTORY_ADDRESS__'),
+            LOWER('__USDC_ADDRESS__'),
+            LOWER('__ARC_NATIVE_USDC_EVENT_ADDRESS__'),
+            LOWER('__SOULESS_VAULT_ADDRESS__'),
+            LOWER('__SOULESS_ADAPTER_ADDRESS__')
+          )
+          OR topics LIKE '0x2fb6e600957ae4c70eb15e116c83bb9444be19622bdd55c79d45e966e241c9ff%'
+          OR topics LIKE '0xc5048e0971cc45ac9033b3342559f03387ded119f81fee141e688bc11cad75d1%'
         )
 
 sinks:

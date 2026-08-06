@@ -10,6 +10,10 @@
     "deploy:arc-testnet": "hardhat run scripts/deploy.ts --network arcTestnet",
     "deploy:x-router:arc-testnet": "hardhat run scripts/deploy-x-tipping-router-only.ts --network arcTestnet",
     "deploy:defi:arc-testnet": "hardhat run scripts/deploy-defi.ts --network arcTestnet",
+    "deploy:souless-adapter:arc-testnet": "hardhat run scripts/deploy-souless-adapter.ts --network arcTestnet",
+    "deploy:souless-v3-strategy:arc-testnet": "hardhat run scripts/deploy-souless-v3-strategy.ts --network arcTestnet",
+    "activate:souless-strategy:arc-testnet": "hardhat run scripts/activate-souless-strategy.ts --network arcTestnet",
+    "prepare:souless-v3-pool:arc-testnet": "hardhat run scripts/prepare-souless-v3-pool.ts --network arcTestnet",
     "deploy:base-sepolia": "hardhat run scripts/deploy.ts --network baseSepolia",
     "deploy:mainnet": "hardhat run scripts/deploy.ts --network base",
     "deploy:referral": "hardhat run scripts/deploy-referral-only.ts --network baseSepolia"

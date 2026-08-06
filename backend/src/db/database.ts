@@ -532,6 +532,9 @@ const schemaSql = `
   CREATE INDEX IF NOT EXISTS idx_defi_positions_user ON defi_positions(user_address, updated_at DESC);
   CREATE INDEX IF NOT EXISTS idx_defi_positions_strategy ON defi_positions(strategy_id);
 
+  ALTER TABLE defi_positions ADD COLUMN IF NOT EXISTS verification_source TEXT;
+  ALTER TABLE defi_positions ADD COLUMN IF NOT EXISTS canonical BOOLEAN NOT NULL DEFAULT TRUE;
+
   CREATE TABLE IF NOT EXISTS defi_transactions (
     id TEXT PRIMARY KEY,
     user_address TEXT NOT NULL,
@@ -553,6 +556,12 @@ const schemaSql = `
 
   CREATE INDEX IF NOT EXISTS idx_defi_transactions_user ON defi_transactions(user_address, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_defi_transactions_status ON defi_transactions(status, updated_at DESC);
+
+  ALTER TABLE defi_transactions ADD COLUMN IF NOT EXISTS evidence_type TEXT;
+  ALTER TABLE defi_transactions ADD COLUMN IF NOT EXISTS verification_source TEXT;
+  ALTER TABLE defi_transactions ADD COLUMN IF NOT EXISTS canonical BOOLEAN NOT NULL DEFAULT TRUE;
+  CREATE INDEX IF NOT EXISTS idx_defi_transactions_evidence
+    ON defi_transactions(strategy_id, evidence_type, verification_source, canonical);
 
   CREATE TABLE IF NOT EXISTS x_accounts (
     x_user_id TEXT PRIMARY KEY,

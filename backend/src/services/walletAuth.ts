@@ -16,6 +16,7 @@ const allowedPurposes = new Set([
   "funding",
   "supporter-thank",
   "withdrawal",
+  "defi-intent",
   "x-tipping-link",
 ]);
 
