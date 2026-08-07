@@ -182,6 +182,38 @@ function actionIcon(action: GrowActivity["action"]) {
   return "visibility";
 }
 
+type StrategyFilterOption<T extends string> = { value: T; label: string };
+
+function StrategyFilterSelect<T extends string>({
+  label,
+  icon,
+  value,
+  options,
+  onChange,
+  className = "",
+}: {
+  label: string;
+  icon: string;
+  value: T;
+  options: readonly StrategyFilterOption<T>[];
+  onChange: (value: T) => void;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const selected = options.find((option) => option.value === value) || options[0];
+
+  return <div className={`grow-live-strategy-filter${open ? " is-open" : ""}${className ? ` ${className}` : ""}`} onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false); }} onKeyDown={(event) => { if (event.key === "Escape") setOpen(false); }}>
+    <button type="button" className="grow-live-strategy-filter-trigger" aria-label={`${label}: ${selected.label}`} aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((current) => !current)}>
+      <span className="material-symbols-outlined">{icon}</span>
+      <span><small>{label}</small><strong>{selected.label}</strong></span>
+      <span className="material-symbols-outlined">{open ? "expand_less" : "expand_more"}</span>
+    </button>
+    {open && <div className="grow-live-strategy-filter-menu" role="listbox" aria-label={label}>
+      {options.map((option) => <button key={option.value} type="button" role="option" aria-selected={option.value === value} onClick={() => { onChange(option.value); setOpen(false); }}><span>{option.label}</span>{option.value === value && <span className="material-symbols-outlined">check</span>}</button>)}
+    </div>}
+  </div>;
+}
+
 export default function GrowTipsLive() {
   const { ready, authenticated, login } = usePrivy();
   const { client: smartWalletClient } = useSmartWallets();
@@ -213,6 +245,7 @@ export default function GrowTipsLive() {
   const [accessFilter, setAccessFilter] = useState<StrategyAccessFilter>("all");
   const [activityFilter, setActivityFilter] = useState<StrategyActivityFilter>("all");
   const [strategySort, setStrategySort] = useState<StrategySort>("recommended");
+  const [strategyFiltersOpen, setStrategyFiltersOpen] = useState(false);
 
   const loadStrategies = useCallback(async () => {
     setLoadingStrategies(true);
@@ -352,13 +385,19 @@ export default function GrowTipsLive() {
       })
       .map(({ strategy }) => strategy);
   }, [accessFilter, activeStrategyIds, activityFilter, availabilityFilter, riskFilter, strategies, strategySort]);
-  const filtersActive = availabilityFilter !== "all" || riskFilter !== "all" || accessFilter !== "all" || activityFilter !== "all";
+  const activeFilterCount = [availabilityFilter, riskFilter, accessFilter, activityFilter].filter((value) => value !== "all").length
+    + (strategySort !== "recommended" ? 1 : 0);
+  const filtersActive = activeFilterCount > 0;
+  const strategyChoiceLabel = filteredStrategies.length === strategies.length
+    ? `${strategies.length} ${strategies.length === 1 ? "choice" : "choices"}`
+    : `${filteredStrategies.length} of ${strategies.length} choices`;
 
   const clearStrategyFilters = () => {
     setAvailabilityFilter("all");
     setRiskFilter("all");
     setAccessFilter("all");
     setActivityFilter("all");
+    setStrategySort("recommended");
   };
 
   const scrollToStrategies = () => document.querySelector("#grow-live-strategies")?.scrollIntoView({ behavior: "smooth" });
@@ -520,16 +559,16 @@ export default function GrowTipsLive() {
         </section>
 
         <section className="grow-live-strategies" id="grow-live-strategies">
-          <div className="grow-live-section-head"><div><h2>Choose a way to grow</h2><p>Compare what each option is best for, how balances may move, and expected access time.</p></div>{!loadingStrategies && <span>{filteredStrategies.length === strategies.length ? strategies.length : `${filteredStrategies.length} of ${strategies.length}`} choices</span>}</div>
+          <div className="grow-live-section-head"><div><h2>Choose a way to grow</h2><p>Compare what each option is best for, how balances may move, and expected access time.</p></div>{!loadingStrategies && <span>{strategyChoiceLabel}</span>}</div>
           {loadingStrategies ? <div className="grow-live-state"><span className="material-symbols-outlined is-spinning">progress_activity</span><strong>Loading strategies…</strong></div>
             : strategyError ? <div className="grow-live-state is-error"><span className="material-symbols-outlined">cloud_off</span><strong>{strategyError}</strong><button type="button" onClick={() => void loadStrategies()}>Try again</button></div>
             : strategies.length === 0 ? <div className="grow-live-state"><span className="material-symbols-outlined">hourglass_empty</span><strong>No strategies are available right now.</strong><p>Check back after a provider strategy has been verified.</p></div>
-            : <><div className="grow-live-strategy-filters" aria-label="Strategy filters">
-              <label><span className="material-symbols-outlined">toggle_on</span><small>Availability</small><select value={availabilityFilter} onChange={(event) => setAvailabilityFilter(event.target.value as StrategyAvailabilityFilter)}><option value="all">All</option><option value="live">Available now</option><option value="preview">Preview</option><option value="paused">Paused</option></select></label>
-              <label><span className="material-symbols-outlined">shield</span><small>Risk</small><select value={riskFilter} onChange={(event) => setRiskFilter(event.target.value as StrategyRiskFilter)}><option value="all">All levels</option><option value="low">Lower</option><option value="medium">Moderate</option><option value="high">Higher</option></select></label>
-              <label><span className="material-symbols-outlined">schedule</span><small>Access</small><select value={accessFilter} onChange={(event) => setAccessFilter(event.target.value as StrategyAccessFilter)}><option value="all">Any speed</option><option value="fast">Fastest</option><option value="moderate">Moderate</option><option value="longer">Longer</option></select></label>
-              <label><span className="material-symbols-outlined">account_balance_wallet</span><small>My activity</small><select value={activityFilter} onChange={(event) => setActivityFilter(event.target.value as StrategyActivityFilter)}><option value="all">All strategies</option><option value="using">Using</option><option value="not_using">Not using</option></select></label>
-              <label><span className="material-symbols-outlined">sort</span><small>Sort</small><select value={strategySort} onChange={(event) => setStrategySort(event.target.value as StrategySort)}><option value="recommended">Recommended</option><option value="risk">Lowest risk</option><option value="access">Fastest access</option><option value="rate">Highest estimated rate</option></select></label>
+            : <><div className="grow-live-filter-mobile-trigger"><button type="button" aria-expanded={strategyFiltersOpen} aria-controls="grow-live-strategy-filters" onClick={() => setStrategyFiltersOpen((open) => !open)}><span><i className="material-symbols-outlined">tune</i><strong>Filters &amp; sort</strong>{activeFilterCount > 0 && <b>{activeFilterCount}</b>}</span><small>{filtersActive ? "Custom view" : "All strategies"}</small><i className="material-symbols-outlined">{strategyFiltersOpen ? "expand_less" : "expand_more"}</i></button></div><div id="grow-live-strategy-filters" className={`grow-live-strategy-filters${strategyFiltersOpen ? " is-open" : ""}`} aria-label="Strategy filters">
+              <StrategyFilterSelect label="Availability" icon="toggle_on" value={availabilityFilter} onChange={setAvailabilityFilter} options={[{ value: "all", label: "All" }, { value: "live", label: "Available now" }, { value: "preview", label: "Preview" }, { value: "paused", label: "Paused" }]} />
+              <StrategyFilterSelect label="Risk" icon="shield" value={riskFilter} onChange={setRiskFilter} options={[{ value: "all", label: "All levels" }, { value: "low", label: "Lower" }, { value: "medium", label: "Moderate" }, { value: "high", label: "Higher" }]} />
+              <StrategyFilterSelect label="Access" icon="schedule" value={accessFilter} onChange={setAccessFilter} options={[{ value: "all", label: "Any speed" }, { value: "fast", label: "Fastest" }, { value: "moderate", label: "Moderate" }, { value: "longer", label: "Longer" }]} />
+              <StrategyFilterSelect label="My activity" icon="account_balance_wallet" value={activityFilter} onChange={setActivityFilter} options={[{ value: "all", label: "All strategies" }, { value: "using", label: "Using" }, { value: "not_using", label: "Not using" }]} />
+              <StrategyFilterSelect className="is-sort" label="Sort" icon="sort" value={strategySort} onChange={setStrategySort} options={[{ value: "recommended", label: "Recommended" }, { value: "risk", label: "Lowest risk" }, { value: "access", label: "Fastest access" }, { value: "rate", label: "Highest estimated rate" }]} />
               {filtersActive && <button type="button" onClick={clearStrategyFilters}><span className="material-symbols-outlined">filter_alt_off</span>Clear</button>}
             </div>
             {filteredStrategies.length === 0 ? <div className="grow-live-state"><span className="material-symbols-outlined">filter_alt_off</span><strong>No strategies match these filters.</strong><p>Clear the filters to see every available choice.</p><button type="button" onClick={clearStrategyFilters}>Clear filters</button></div>
