@@ -18434,6 +18434,45 @@ a.creator-workspace-post-link:hover {
   }
 }
 
+/* Lift only the balance above the workspace on tablet/small-desktop widths.
+   Supporter pulse and top posts remain in their lower supporting row. */
+@media (min-width: 769px) and (max-width: 1180px) {
+  .creator-workspace-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-areas:
+      "balance balance"
+      "main main"
+      "pulse posts";
+  }
+
+  .creator-workspace-main {
+    grid-area: main;
+  }
+
+  .creator-workspace-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .creator-workspace-rail {
+    display: contents;
+  }
+
+  .creator-workspace-withdraw {
+    grid-area: balance;
+  }
+
+  .creator-workspace-rail-section:nth-of-type(2) {
+    grid-area: pulse;
+  }
+
+  .creator-workspace-rail-section:nth-of-type(3) {
+    grid-area: posts;
+    grid-column: auto;
+    padding-top: 0;
+    border-top: 0;
+  }
+}
+
 @media (max-width: 768px) {
   .creator-workspace {
     gap: var(--space-5);
