@@ -33,6 +33,7 @@ import {
   USDC_ADDRESS,
   WEB_APP_URL,
 } from "../config";
+import { useDashboardLiveUpdates } from "../hooks/useDashboardLiveUpdates";
 
 /** Format raw USDC (6 decimals) to USD string */
 function formatUsdRaw(raw: string): string {
@@ -907,13 +908,13 @@ export default function Dashboard({ mode = "auto" }: { mode?: DashboardMode }) {
     return { message: challenge.message, signature };
   }, [address, smartWalletClient]);
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (options?: { background?: boolean }) => {
     const targetAddress = address;
     if (!targetAddress) {
       setLoading(true);
       return;
     }
-    setLoading(true);
+    if (!options?.background) setLoading(true);
     const timeoutMs = 12000;
     const timeoutPromise = new Promise<null>((_, reject) => setTimeout(() => reject(new Error("timeout")), timeoutMs));
     try {
@@ -986,13 +987,17 @@ export default function Dashboard({ mode = "auto" }: { mode?: DashboardMode }) {
       setIsCreator(false);
       setHistory([]);
     } finally {
-      if (activeAddressRef.current === targetAddress) setLoading(false);
+      if (activeAddressRef.current === targetAddress && !options?.background) setLoading(false);
     }
   }, [address, mode]);
 
   useEffect(() => {
     if (address) loadData();
   }, [address, loadData]);
+
+  useDashboardLiveUpdates(address, () => {
+    void loadData({ background: true });
+  });
 
   const checkCreatorClaim = useCallback(async (options?: { quiet?: boolean }) => {
     if (!address) return false;

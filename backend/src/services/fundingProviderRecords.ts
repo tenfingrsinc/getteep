@@ -1,8 +1,8 @@
 import { randomUUID } from "crypto";
-import { run } from "../db/database";
+import { getDb, run } from "../db/database";
 
 type ProviderKind = "faucet" | "crypto_receive" | "fiat_onramp" | "fiat_offramp";
-type ProviderStatus = "created" | "pending" | "completed" | "failed" | "cancelled";
+export type ProviderStatus = "created" | "pending" | "processing" | "completed" | "failed" | "cancelled" | "expired";
 
 interface CreateFundingProviderSessionInput {
   id?: string;
@@ -85,13 +85,14 @@ export async function updateFundingProviderSession(input: {
   ]);
 }
 
-export async function recordFundingProviderWebhook(input: RecordFundingProviderWebhookInput): Promise<void> {
-  await run(`
+export async function recordFundingProviderWebhook(input: RecordFundingProviderWebhookInput): Promise<{ inserted: boolean; id: string | null }> {
+  const row = await getDb().prepare(`
     INSERT INTO funding_provider_webhooks (
       provider, provider_event_id, event_type, session_id, status, metadata_json, received_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (provider, provider_event_id) DO NOTHING
-  `, [
+    RETURNING id
+  `).get(
     input.provider,
     input.providerEventId || null,
     input.eventType,
@@ -99,5 +100,14 @@ export async function recordFundingProviderWebhook(input: RecordFundingProviderW
     input.status || "received",
     safeJson(input.metadata),
     Date.now()
-  ]);
+  ) as { id?: string | number } | undefined;
+  return { inserted: Boolean(row?.id), id: row?.id == null ? null : String(row.id) };
+}
+
+export async function updateFundingProviderWebhookStatus(provider: string, providerEventId: string, status: string): Promise<void> {
+  await run(`
+    UPDATE funding_provider_webhooks
+    SET status = ?
+    WHERE provider = ? AND provider_event_id = ?
+  `, [status, provider, providerEventId]);
 }

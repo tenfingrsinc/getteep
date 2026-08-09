@@ -4,6 +4,7 @@ import { usePrivy } from "@privy-io/react-auth";
 import { useSmartWallets } from "@privy-io/react-auth/smart-wallets";
 import CreatorDashboardShell from "../components/CreatorDashboardShell";
 import { API_BASE, RECEIPT_BASE_URL } from "../config";
+import { useDashboardLiveUpdates } from "../hooks/useDashboardLiveUpdates";
 
 type Period = "7d" | "30d" | "90d";
 type SupporterTab = "top" | "recent" | "repeat";
@@ -244,6 +245,10 @@ export default function CreatorDashboardHome() {
   const [postPreviews, setPostPreviews] = useState<Record<string, PostPreview>>({});
   const [reloadKey, setReloadKey] = useState(0);
 
+  useDashboardLiveUpdates(address, () => {
+    setReloadKey((value) => value + 1);
+  });
+
   useEffect(() => {
     if (!openAction) return;
     const closeMenu = (event: MouseEvent) => {
@@ -404,7 +409,7 @@ export default function CreatorDashboardHome() {
   }, [account]);
 
   const retry = useCallback(() => setReloadKey((value) => value + 1), []);
-  const initialLoading = accountLoading || Boolean(claim && performanceLoading && !data);
+  const initialLoading = Boolean(accountLoading && !claim && !data) || Boolean(claim && performanceLoading && !data);
   const pageCount = data?.recentSupportPage?.pageCount || 1;
   const safeActivityPage = Math.min(activityPage, pageCount);
   const chartDelta = chartReport?.summary.delta.totalPercent;

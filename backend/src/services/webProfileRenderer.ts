@@ -289,7 +289,10 @@ function setWebShellHeaders(res: Response): void {
     ].join("; "),
   );
   res.set("Referrer-Policy", "strict-origin-when-cross-origin");
-  res.set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
+  res.set(
+    "Permissions-Policy",
+    'camera=(), microphone=(), geolocation=(), payment=(self "https://staging.crossmint.com" "https://www.crossmint.com")',
+  );
   res.set("X-Content-Type-Options", "nosniff");
   res.set("X-Frame-Options", "SAMEORIGIN");
 }
@@ -328,6 +331,19 @@ export function mountWebProfileRenderer(app: Express): void {
   }
 
   const indexHtml = fs.readFileSync(path.join(webDistDir, "index.html"), "utf8");
+  const applePayAssociationPath = path.join(
+    webDistDir,
+    ".well-known",
+    "apple-developer-merchantid-domain-association",
+  );
+
+  if (fs.existsSync(applePayAssociationPath)) {
+    app.get("/.well-known/apple-developer-merchantid-domain-association", (_req: Request, res: Response) => {
+      res.set("Cache-Control", "public, max-age=3600");
+      res.set("X-Content-Type-Options", "nosniff");
+      res.type("text/plain").sendFile(applePayAssociationPath);
+    });
+  }
 
   app.use(express.static(webDistDir, {
     index: false,

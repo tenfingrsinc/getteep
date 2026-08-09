@@ -14,14 +14,19 @@ import {
   CrossmintProviderError,
   fetchCrossmintOrderStatus,
   getCrossmintPublicStatus,
+  normalizeCrossmintStatus,
   normalizeOnrampAmountRaw,
+  parseCrossmintWebhook,
   rawUsdcToUsdString,
   sanitizeProviderPayload,
+  verifyCrossmintWebhook,
 } from "../services/crossmint";
 import {
   createFundingProviderSession,
+  recordFundingProviderWebhook,
   updateFundingProviderSession,
   updateFundingProviderSessionStatus,
+  updateFundingProviderWebhookStatus,
 } from "../services/fundingProviderRecords";
 import {
   FEE_BPS,
@@ -221,6 +226,102 @@ router.get("/status", (_req: Request, res: Response) => {
   res.json(getCrossmintPublicStatus());
 });
 
+router.post("/webhooks", async (req: Request, res: Response) => {
+  const rawBody = (req as Request & { rawBody?: Buffer }).rawBody;
+  if (!rawBody) {
+    res.status(500).json({ error: "Crossmint webhook raw-body capture is not configured." });
+    return;
+  }
+
+  let eventId = "";
+  try {
+    const verified = verifyCrossmintWebhook(rawBody, {
+      id: req.get("svix-id") || undefined,
+      timestamp: req.get("svix-timestamp") || undefined,
+      signature: req.get("svix-signature") || undefined,
+    });
+    eventId = verified.eventId;
+    const event = parseCrossmintWebhook(req.body, verified);
+    const recorded = await recordFundingProviderWebhook({
+      provider: "Crossmint",
+      providerEventId: event.eventId,
+      eventType: event.eventType,
+      sessionId: event.sessionId,
+      status: "received",
+      metadata: {
+        providerOrderId: event.providerOrderId,
+        providerStatus: event.providerStatus,
+      },
+    });
+
+    if (!recorded.inserted) {
+      const existing = await getDb().prepare(
+        "SELECT status FROM funding_provider_webhooks WHERE provider = 'Crossmint' AND provider_event_id = ?"
+      ).get(event.eventId) as { status: string } | undefined;
+      if (existing?.status !== "failed") {
+        res.json({ received: true, duplicate: true });
+        return;
+      }
+    }
+
+    const db = getDb();
+    const session = await db.prepare(`
+      SELECT id, provider_session_id as "providerSessionId", status, metadata_json as "metadataJson"
+      FROM funding_provider_sessions
+      WHERE provider = 'Crossmint'
+        AND ((? IS NOT NULL AND id = ?) OR (? IS NOT NULL AND provider_session_id = ?))
+      ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END
+      LIMIT 1
+    `).get(
+      event.sessionId, event.sessionId,
+      event.providerOrderId, event.providerOrderId,
+      event.sessionId,
+    ) as { id: string; providerSessionId: string | null; status: string; metadataJson: string | null } | undefined;
+
+    if (!session) {
+      await updateFundingProviderWebhookStatus("Crossmint", event.eventId, "unmatched");
+      res.json({ received: true, matched: false });
+      return;
+    }
+    if (event.providerOrderId && session.providerSessionId && event.providerOrderId !== session.providerSessionId) {
+      await updateFundingProviderWebhookStatus("Crossmint", event.eventId, "ignored_order_mismatch");
+      res.json({ received: true, matched: false });
+      return;
+    }
+
+    await db.prepare(`
+      UPDATE funding_provider_webhooks
+      SET session_id = ?
+      WHERE provider = 'Crossmint' AND provider_event_id = ?
+    `).run(session.id, event.eventId);
+
+    const metadata = session.metadataJson ? JSON.parse(session.metadataJson) : {};
+    // A provider may allow payment retry after a payment failure. Completion,
+    // cancellation, and expiry are irreversible; a generic failure is not.
+    const terminal = ["completed", "cancelled", "expired"].includes(session.status);
+    const nextStatus = terminal && event.status !== "completed" ? session.status : event.status;
+    await updateFundingProviderSession({
+      id: session.id,
+      status: nextStatus as any,
+      providerSessionId: event.providerOrderId,
+      metadata: {
+        ...metadata,
+        providerStatus: event.providerStatus,
+        lastProviderEventType: event.eventType,
+        lastProviderEventId: event.eventId,
+        lastProviderEventAt: Date.now(),
+      },
+    });
+    await updateFundingProviderWebhookStatus("Crossmint", event.eventId, "processed");
+    res.json({ received: true, matched: true });
+  } catch (error) {
+    if (eventId) {
+      await updateFundingProviderWebhookStatus("Crossmint", eventId, "failed").catch(() => undefined);
+    }
+    providerError(res, error);
+  }
+});
+
 router.post("/onramp/orders", async (req: Request, res: Response) => {
   const ownerAddress = String(req.body?.ownerAddress || req.body?.walletAddress || "").toLowerCase();
   const walletAddress = String(req.body?.walletAddress || ownerAddress || "").toLowerCase();
@@ -265,7 +366,7 @@ router.post("/onramp/orders", async (req: Request, res: Response) => {
     const order = await createCrossmintOrder("onramp", payload, sessionId);
     await updateFundingProviderSession({
       id: sessionId,
-      status: order.status === "completed" ? "completed" : "pending",
+      status: normalizeCrossmintStatus(order.status),
       providerSessionId: order.providerOrderId,
       redirectUrl: order.redirectUrl,
       metadata: {
@@ -381,7 +482,7 @@ router.post("/offramp/orders", async (req: Request, res: Response) => {
 
     await updateFundingProviderSession({
       id: sessionId,
-      status: order.status === "completed" ? "completed" : "pending",
+      status: normalizeCrossmintStatus(order.status),
       providerSessionId: order.providerOrderId,
       redirectUrl: order.redirectUrl,
       metadata: {
@@ -494,7 +595,7 @@ router.get("/sessions/:sessionId", async (req: Request, res: Response) => {
 
   const db = getDb();
   const session = await db.prepare(
-    `SELECT id, provider_session_id as providerSessionId, kind, status, redirect_url as redirectUrl, metadata_json as metadataJson, created_at as createdAt, updated_at as updatedAt
+    `SELECT id, provider_session_id as "providerSessionId", kind, status, redirect_url as "redirectUrl", metadata_json as "metadataJson", created_at as "createdAt", updated_at as "updatedAt"
      FROM funding_provider_sessions
      WHERE id = ? AND user_address = ? AND provider = 'Crossmint'`
   ).get(sessionId, ownerAddress) as {
@@ -517,11 +618,14 @@ router.get("/sessions/:sessionId", async (req: Request, res: Response) => {
     try {
       const kind = session.kind === "fiat_offramp" ? "offramp" : "onramp";
       const order = await fetchCrossmintOrderStatus(kind, session.providerSessionId);
+      const syncedStatus = normalizeCrossmintStatus(order.status);
       await updateFundingProviderSession({
         id: session.id,
-        status: order.status === "completed" ? "completed" : session.status as any,
+        status: syncedStatus,
         metadata: { ...metadata, providerStatus: order.status, lastStatusSyncAt: Date.now() },
       });
+      session.status = syncedStatus;
+      session.updatedAt = Date.now();
       metadata.providerStatus = order.status;
       metadata.lastStatusSyncAt = Date.now();
     } catch {

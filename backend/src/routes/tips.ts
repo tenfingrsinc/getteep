@@ -7,6 +7,8 @@ import { createReceiptReadyNotification } from "../services/notifications";
 import { getUserSettings, publicIdentity } from "../services/userSettings";
 import { getAccountActivity } from "../services/accountActivity";
 import { verifyWalletProof } from "../services/walletAuth";
+import { publishDashboardUpdate } from "../services/dashboardUpdates";
+import { invalidateDisplayUsdcBalances } from "../services/balanceSnapshots";
 
 const router = Router();
 
@@ -826,6 +828,11 @@ router.post("/activity", async (req: Request, res: Response) => {
       amountRaw: amount,
       authorHandle: handle,
     });
+    invalidateDisplayUsdcBalances([fromAddress, toAddress]);
+    await publishDashboardUpdate({
+      reason: "activity_recorded",
+      addresses: [fromAddress, toAddress],
+    }).catch((error) => console.error("[Dashboard live] Could not publish activity update:", error));
     res.json({ success: true });
   } catch (err: any) {
     console.error("[Tips] Error storing activity:", err);

@@ -11,6 +11,8 @@ import {
 import { ARC_TESTNET_USDC, getChainId } from "../config/chain";
 import { getDb, one, run } from "../db/database";
 import { createDepositConfirmedNotification } from "./notifications";
+import { publishDashboardUpdate } from "./dashboardUpdates";
+import { invalidateDisplayUsdcBalances } from "./balanceSnapshots";
 import { recordServiceFailure, recordServiceSuccess } from "./serviceHealth";
 
 const TIPPED_EVENT = parseAbiItem(
@@ -163,7 +165,7 @@ export class ChainEventProjector {
       const args = decoded.args as unknown as { authorId: bigint; wallet: Address; owner: Address };
       eventKind = "claim_wallet";
       entityKey = txHash;
-      await getDb().prepare(
+      const claimResult = await getDb().prepare(
         `INSERT INTO claim_wallets (author_id, wallet_address, owner_address, deployed_at_block, tx_hash)
          VALUES (?, ?, ?, ?, ?)
          ON CONFLICT (author_id) DO UPDATE SET
@@ -172,6 +174,13 @@ export class ChainEventProjector {
            deployed_at_block = excluded.deployed_at_block,
            tx_hash = excluded.tx_hash`
       ).run(args.authorId.toString(), args.wallet.toLowerCase(), args.owner.toLowerCase(), blockNumber, txHash);
+      if (claimResult.changes > 0) {
+        await publishDashboardUpdate({
+          reason: "claim_wallet_deployed",
+          addresses: [args.owner.toLowerCase(), args.wallet.toLowerCase()],
+          authorIds: [args.authorId.toString()],
+        }).catch((error) => console.error("[Dashboard live] Could not publish claim update:", error));
+      }
     } else if (topic0 === STRATEGY_ALLOCATED_TOPIC && SOULESS_ADAPTER_ADDRESS) {
       const identity = await getClaimWalletIdentity(address);
       const decoded = decodeEventLog({ abi: [STRATEGY_ALLOCATED_EVENT], data: row.data as Hex, topics });
@@ -293,7 +302,7 @@ async function projectTip(input: {
   contentId: string; authorId: string; from: string; to: string; amount: string;
   txHash: string; blockNumber: number; logIndex: number; timestamp: number; contractAddress: string;
 }) {
-  await getDb().prepare(
+  const result = await getDb().prepare(
     `INSERT INTO tips (
        content_id, author_id, from_address, to_address, amount, tx_hash,
        block_number, log_index, timestamp, tip_contract_address
@@ -303,6 +312,14 @@ async function projectTip(input: {
     input.contentId, input.authorId, input.from, input.to, input.amount, input.txHash,
     input.blockNumber, input.logIndex, input.timestamp, input.contractAddress
   );
+  if (result.changes > 0) {
+    invalidateDisplayUsdcBalances([input.from, input.to]);
+    await publishDashboardUpdate({
+      reason: "tip_confirmed",
+      addresses: [input.from, input.to],
+      authorIds: [input.authorId],
+    }).catch((error) => console.error("[Dashboard live] Could not publish tip update:", error));
+  }
 }
 
 async function projectFunding(input: {
@@ -340,7 +357,12 @@ async function projectFunding(input: {
     ]
   );
   if (changes > 0) {
+    invalidateDisplayUsdcBalances([input.from, input.to]);
     await createDepositConfirmedNotification({ userAddress: input.to, amountRaw: amountRawUsdc, txHash: input.txHash });
+    await publishDashboardUpdate({
+      reason: "funding_confirmed",
+      addresses: [input.from, input.to],
+    }).catch((error) => console.error("[Dashboard live] Could not publish funding update:", error));
   }
 }
 

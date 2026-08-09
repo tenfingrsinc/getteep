@@ -6,6 +6,8 @@ import { inspectTipForAbuse } from "./abuse";
 import { recordOpsEvent } from "./ops";
 import { createClaimWalletActivityNotification, createNewTipReceivedNotification, createReceiptReadyNotification, createRepeatSupporterNotification } from "./notifications";
 import { createBackendPublicClient, isInsecureRpcTlsEnabled, warnIfInsecureRpcTlsEnabled } from "./rpcClient";
+import { publishDashboardUpdate } from "./dashboardUpdates";
+import { invalidateDisplayUsdcBalances } from "./balanceSnapshots";
 
 // ABI for the Tipped event
 const TIPPED_EVENT = parseAbiItem(
@@ -200,6 +202,8 @@ export class Indexer {
 
   private async processTipLogs(logs: Log[]): Promise<void> {
     const db = getDb();
+    const changedAddresses: string[] = [];
+    const changedAuthorIds: string[] = [];
 
     const tx = db.transaction(async (txDb) => {
       for (const log of logs) {
@@ -228,6 +232,8 @@ export class Indexer {
           contractAddr || null
         );
         if (result.changes > 0) {
+          changedAddresses.push(from, to);
+          changedAuthorIds.push(authorId);
           await inspectTipForAbuse({
             fromAddress: from,
             toAddress: to,
@@ -275,10 +281,19 @@ export class Indexer {
     });
 
     await tx();
+    if (changedAddresses.length) {
+      invalidateDisplayUsdcBalances(changedAddresses);
+      await publishDashboardUpdate({
+        reason: "tip_confirmed",
+        addresses: changedAddresses,
+        authorIds: changedAuthorIds,
+      }).catch((error) => console.error("[Dashboard live] Could not publish RPC tip update:", error));
+    }
   }
 
   private async processClaimLogs(logs: Log[]): Promise<void> {
     const db = getDb();
+    const changedOwners: string[] = [];
 
     const tx = db.transaction(async (txDb) => {
       for (const log of logs) {
@@ -298,6 +313,7 @@ export class Indexer {
           log.transactionHash
         );
         if (result.changes > 0) {
+          changedOwners.push(ownerAddress);
           await createClaimWalletActivityNotification({
             creatorOwnerAddress: ownerAddress,
             authorId,
@@ -309,6 +325,12 @@ export class Indexer {
     });
 
     await tx();
+    if (changedOwners.length) {
+      await publishDashboardUpdate({
+        reason: "claim_wallet_deployed",
+        addresses: changedOwners,
+      }).catch((error) => console.error("[Dashboard live] Could not publish RPC claim update:", error));
+    }
   }
 
   private async prepareStartState(): Promise<void> {

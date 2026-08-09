@@ -8,6 +8,8 @@ import { recordSecurityEvent } from "../services/ops";
 import { getConfiguredChain } from "../config/chain";
 import { createReferralEarnedNotification, createWithdrawalConfirmedNotification } from "../services/notifications";
 import { claimWalletBelongsToOwner } from "../services/claimWalletProvisioner";
+import { publishDashboardUpdate } from "../services/dashboardUpdates";
+import { invalidateDisplayUsdcBalances } from "../services/balanceSnapshots";
 import {
   FEE_BPS,
   REFERRER_SHARE_BPS,
@@ -527,6 +529,11 @@ router.post("/record", async (req: Request, res: Response) => {
     if (referrerAddress && referrerAmount > 0n) {
       await createReferralEarnedNotification({ userAddress: referrerAddress, amountRaw: referrerAmount.toString(), txHash, referredAddress: ownerAddress });
     }
+    invalidateDisplayUsdcBalances([ownerAddress, row.destination_address, referrerAddress]);
+    await publishDashboardUpdate({
+      reason: "withdrawal_confirmed",
+      addresses: [ownerAddress, row.destination_address, referrerAddress],
+    }).catch((error) => console.error("[Dashboard live] Could not publish withdrawal update:", error));
     res.json({ recorded: true });
   } catch (err: any) {
     if (String(err.message || "").includes("UNIQUE")) {

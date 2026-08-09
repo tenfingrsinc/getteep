@@ -32,6 +32,13 @@ type MemoryEntry = { balanceRaw: string; observedAt: number };
 const memory = new Map<string, MemoryEntry>();
 const inFlight = new Map<string, Promise<BalanceResult>>();
 
+export function invalidateDisplayUsdcBalances(addresses: Array<string | null | undefined>): void {
+  for (const address of addresses) {
+    const normalized = (address || "").trim().toLowerCase();
+    if (normalized) memory.delete(normalized);
+  }
+}
+
 export async function readDisplayUsdcBalance(addressInput: string): Promise<BalanceResult> {
   const address = addressInput.toLowerCase() as Address;
   const cached = memory.get(address);

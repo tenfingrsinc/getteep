@@ -25,7 +25,9 @@ import defiRouter from "./routes/defi";
 import crossmintRouter from "./routes/crossmint";
 import xBotInternalRouter from "./routes/x-bot-internal";
 import xBalanceRouter from "./routes/x-balance";
+import liveRouter from "./routes/live";
 import { mountWebProfileRenderer } from "./services/webProfileRenderer";
+import { CrossmintReconciler } from "./services/crossmintReconciliation";
 
 const PORT = parseInt(process.env.PORT || "3001");
 const LOCAL_URL_RE = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/|$)/i;
@@ -208,6 +210,26 @@ function assertProductionEnv() {
     if (process.env.CROSSMINT_ENABLE_OFFRAMP === "true" && !process.env.CROSSMINT_OFFRAMP_ORDER_BODY_TEMPLATE) {
       throw new Error("Crossmint off-ramp requires CROSSMINT_OFFRAMP_ORDER_BODY_TEMPLATE.");
     }
+    if (!process.env.CROSSMINT_WEBHOOK_SIGNING_SECRET?.startsWith("whsec_")) {
+      throw new Error("Enabled Crossmint flows require a valid CROSSMINT_WEBHOOK_SIGNING_SECRET.");
+    }
+    if (process.env.CROSSMINT_ENABLE_RECONCILIATION !== "true") {
+      throw new Error("Enabled Crossmint flows require CROSSMINT_ENABLE_RECONCILIATION=true.");
+    }
+    if (
+      process.env.CROSSMINT_ENABLE_ONRAMP === "true" &&
+      !process.env.CROSSMINT_ONRAMP_ORDER_STATUS_PATH_TEMPLATE &&
+      !process.env.CROSSMINT_ORDER_STATUS_PATH_TEMPLATE
+    ) {
+      throw new Error("Crossmint on-ramp requires an on-ramp order status path template.");
+    }
+    if (
+      process.env.CROSSMINT_ENABLE_OFFRAMP === "true" &&
+      !process.env.CROSSMINT_OFFRAMP_ORDER_STATUS_PATH_TEMPLATE &&
+      !process.env.CROSSMINT_ORDER_STATUS_PATH_TEMPLATE
+    ) {
+      throw new Error("Crossmint off-ramp requires an off-ramp order status path template.");
+    }
   }
   if (!process.env.OPS_TOKEN) {
     throw new Error("Production backend requires OPS_TOKEN.");
@@ -228,7 +250,15 @@ app.set("trust proxy", trustProxy);
 app.use(helmet() as any);
 app.use(cors(corsOptions) as any);
 app.options("*", cors(corsOptions) as any);
-app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || "64kb" }));
+app.use(express.json({
+  limit: process.env.JSON_BODY_LIMIT || "64kb",
+  verify: (req, _res, buffer) => {
+    const expressRequest = req as express.Request & { rawBody?: Buffer };
+    if (expressRequest.originalUrl.startsWith("/crossmint/webhooks")) {
+      expressRequest.rawBody = Buffer.from(buffer);
+    }
+  },
+}));
 
 // Rate limiting
 const limiter = rateLimit({
@@ -262,7 +292,8 @@ const withdrawalLimiter = rateLimit({
   max: Number(process.env.WITHDRAWAL_RATE_LIMIT_MAX || 10),
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => req.method === "GET",
+  // Provider webhook deliveries are authenticated and retried independently.
+  skip: (req) => req.method === "GET" || req.path.startsWith("/webhooks"),
   handler: (_req, res) => {
     res.status(429).json({
       error: "Too many withdrawal attempts. Wait a moment and try again.",
@@ -299,6 +330,7 @@ app.use("/leaderboard", leaderboardRouter);
 app.use("/defi", defiIntentLimiter, defiRouter);
 app.use("/internal/x-bot", xBotInternalRouter);
 app.use("/x-balance", xBalanceRouter);
+app.use("/live", liveRouter);
 
 // External API (versioned, documented)
 const apiLimiter = rateLimit({
@@ -340,6 +372,8 @@ async function main() {
   if (indexer) await indexer.start();
   if (projector) await projector.start();
   console.log(`[Chain data] Mode: ${indexerMode}`);
+  const crossmintReconciler = new CrossmintReconciler();
+  crossmintReconciler.start();
 
   // Start HTTP server
   app.listen(PORT, () => {
@@ -352,6 +386,7 @@ async function main() {
     console.log("\n[Server] Shutting down...");
     indexer?.stop();
     projector?.stop();
+    crossmintReconciler.stop();
     process.exit(0);
   });
 }

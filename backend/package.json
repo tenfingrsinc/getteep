@@ -13,7 +13,8 @@
     "ops:claim-wallet": "ts-node src/scripts/claimWalletConsistency.ts",
     "ops:provision-claim-wallets": "ts-node src/scripts/provisionMissingClaimWallets.ts",
     "ops:reconcile-x-bot": "ts-node src/scripts/reconcileXBotTips.ts",
-    "test:defi-intents": "node --test -r ts-node/register src/services/defiIntents.test.ts"
+    "test:defi-intents": "node --test -r ts-node/register src/services/defiIntents.test.ts",
+    "test:crossmint": "node --test -r ts-node/register src/services/crossmint.test.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",

@@ -28,6 +28,8 @@ import {
   buildSuccessReply,
 } from "./replies";
 import type { ProcessPostResult, TipIntent, XIncomingPost, XTipKind } from "./types";
+import { publishDashboardUpdate } from "../dashboardUpdates";
+import { invalidateDisplayUsdcBalances } from "../balanceSnapshots";
 
 const MIN_TIP_RAW = BigInt(process.env.X_BOT_MIN_TIP_RAW || "10000");
 const PROCESSING_STALE_MS = Number(process.env.X_BOT_PROCESSING_STALE_MS || "300000");
@@ -524,6 +526,13 @@ export async function processIncomingPost(post: XIncomingPost): Promise<ProcessP
         );
       }
     })();
+
+    invalidateDisplayUsdcBalances([sender.userAddress, ...relayed.map((tip) => tip.claimWallet)]);
+    await publishDashboardUpdate({
+      reason: "x_tip_confirmed",
+      addresses: [sender.userAddress, ...relayed.map((tip) => tip.recipient.userAddress)],
+      authorIds: relayed.map((tip) => tip.recipient.xUserId),
+    }).catch((error) => console.error("[Dashboard live] Could not publish X tip update:", error));
 
     const completed = relayed.filter((tip) => tip.recipient.userAddress);
     const reserved = relayed.filter((tip) => !tip.recipient.userAddress);

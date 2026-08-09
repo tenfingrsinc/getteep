@@ -30,8 +30,42 @@ function usdToRaw(value: string) {
   return BigInt(whole) * 1_000_000n + BigInt(fraction.padEnd(6, "0"));
 }
 
+type CrossmintFundingSession = {
+  id: string;
+  status: string;
+  redirectUrl?: string | null;
+  providerStatus?: string | null;
+};
+
+function fundingStatusCopy(status: string) {
+  const normalized = status.toLowerCase();
+  if (normalized === "completed") return { icon: "check_circle", title: "Funds delivered", detail: "Crossmint completed this funding order." };
+  if (["failed", "cancelled", "expired"].includes(normalized)) return { icon: "error", title: `Funding ${normalized}`, detail: "No further action will be taken for this order. You can start a new one." };
+  if (normalized === "processing") return { icon: "sync", title: "Funding in progress", detail: "Crossmint is processing payment and delivery. You can safely leave this page." };
+  return { icon: "schedule", title: "Waiting for payment", detail: "Complete the Crossmint checkout to continue." };
+}
+
+function crossmintCheckoutUrl(value: unknown): string | null {
+  if (typeof value !== "string" || !value) return null;
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    return url.protocol === "https:" && (host === "crossmint.com" || host.endsWith(".crossmint.com"))
+      ? url.toString()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function openCrossmintCheckout(value: unknown) {
+  const url = crossmintCheckoutUrl(value);
+  return url ? window.open(url, "_blank", "noopener,noreferrer") : null;
+}
+
 export default function FundAccount() {
   const [searchParams] = useSearchParams();
+  const crossmintResult = searchParams.get("provider") === "crossmint" ? searchParams.get("result") : null;
   const { ready, authenticated, user, login } = usePrivy();
   const { wallets } = useWallets();
   const { client: smartWalletClient } = useSmartWallets();
@@ -63,7 +97,16 @@ export default function FundAccount() {
   const hasEnoughForTip = hasXTipContext && BigInt(balanceRaw || "0") >= requiredTipRaw;
   const [fiatAmount, setFiatAmount] = useState(hasXTipContext ? amount : "10.00");
   const [onrampLoading, setOnrampLoading] = useState(false);
-  const [onrampStatus, setOnrampStatus] = useState("");
+  const [onrampStatus, setOnrampStatus] = useState(() => {
+    if (crossmintResult === "success") {
+      return "Crossmint checkout finished. Teep is confirming delivery; this page will update automatically.";
+    }
+    if (crossmintResult === "failure") {
+      return "Crossmint checkout was not completed. No delivery is assumed; you can continue the existing checkout or start again.";
+    }
+    return "";
+  });
+  const [activeOnramp, setActiveOnramp] = useState<CrossmintFundingSession | null>(null);
   const fundingPolicy = buildFundingPolicy({
     environment: FUNDING_ENV,
     faucetUrl: FAUCET_URL,
@@ -92,6 +135,45 @@ export default function FundAccount() {
     } as any);
     return { message: challenge.message, signature };
   }, [address, smartWalletClient]);
+
+  useEffect(() => {
+    if (!address) return;
+    try {
+      const saved = window.localStorage.getItem(`teep:crossmint:onramp:${address}`);
+      const parsed = saved ? JSON.parse(saved) as CrossmintFundingSession : null;
+      setActiveOnramp(parsed?.id ? { ...parsed, redirectUrl: crossmintCheckoutUrl(parsed.redirectUrl) } : null);
+    } catch {
+      setActiveOnramp(null);
+    }
+  }, [address]);
+
+  useEffect(() => {
+    if (!address || !activeOnramp?.id || ["completed", "failed", "cancelled", "expired"].includes(activeOnramp.status)) return;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const response = await fetch(`${API_BASE}/crossmint/sessions/${encodeURIComponent(activeOnramp.id)}?ownerAddress=${encodeURIComponent(address)}`, { cache: "no-store" });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || cancelled) return;
+        const next: CrossmintFundingSession = {
+          id: activeOnramp.id,
+          status: String(payload.status || "pending"),
+          redirectUrl: crossmintCheckoutUrl(payload.redirectUrl) || activeOnramp.redirectUrl,
+          providerStatus: payload.metadata?.providerStatus || null,
+        };
+        setActiveOnramp(next);
+        window.localStorage.setItem(`teep:crossmint:onramp:${address}`, JSON.stringify(next));
+      } catch {
+        // The persisted state remains visible and the next poll can recover.
+      }
+    };
+    void refresh();
+    const interval = window.setInterval(() => void refresh(), 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [activeOnramp?.id, activeOnramp?.status, activeOnramp?.redirectUrl, address]);
 
   useEffect(() => {
     if (!address) return;
@@ -171,9 +253,18 @@ export default function FundAccount() {
       if (!response.ok) {
         throw new Error(payload?.error || "Could not start Crossmint funding.");
       }
+      const session: CrossmintFundingSession = {
+        id: String(payload.sessionId),
+        status: String(payload.status || "pending"),
+        redirectUrl: crossmintCheckoutUrl(payload.redirectUrl),
+      };
+      setActiveOnramp(session);
+      window.localStorage.setItem(`teep:crossmint:onramp:${address}`, JSON.stringify(session));
       if (payload.redirectUrl) {
-        window.open(payload.redirectUrl, "_blank", "noopener,noreferrer");
-        setOnrampStatus("Crossmint staging opened. Complete the provider flow there.");
+        const checkout = openCrossmintCheckout(payload.redirectUrl);
+        setOnrampStatus(checkout
+          ? "Crossmint staging opened. Complete the provider flow there."
+          : "Your browser blocked the checkout window. Use Continue checkout below.");
       } else {
         setOnrampStatus(payload.orderId
           ? "Crossmint order created. Embedded checkout is not configured for this build yet."
@@ -253,6 +344,21 @@ export default function FundAccount() {
       )}
 
       {!hasEnoughForTip && <div className="dashboard-funding-options" style={{ display: "grid", gap: "var(--space-3)" }}>
+        {activeOnramp && (() => {
+          const copy = fundingStatusCopy(activeOnramp.status);
+          return (
+            <div className="x-tip-funding-ready" role="status" style={{ alignItems: "flex-start" }}>
+              <span className="material-symbols-outlined" aria-hidden>{copy.icon}</span>
+              <div style={{ flex: 1 }}>
+                <strong>{copy.title}</strong>
+                <span>{copy.detail}</span>
+              </div>
+              {activeOnramp.redirectUrl && !["completed", "failed", "cancelled", "expired"].includes(activeOnramp.status) && (
+                <button type="button" className="btn-secondary" onClick={() => openCrossmintCheckout(activeOnramp.redirectUrl)}>Continue checkout</button>
+              )}
+            </div>
+          );
+        })()}
         {fundingPolicy.providers.fiatOnramp.enabled ? (
           <>
           <label style={{ display: "grid", gap: 8 }}>

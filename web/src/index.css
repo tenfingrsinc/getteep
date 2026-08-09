@@ -2199,9 +2199,9 @@ a:hover {
 .grow-live-modal-actions button:last-child { border-color: transparent; background: var(--accent); }
 .grow-live-modal-actions button:disabled { cursor: not-allowed; opacity: .45; }
 .grow-live-modal-actions i { font-size: 17px; font-style: normal; }
-.grow-live-action-control-row { display: flex; align-items: center; gap: 12px; padding: var(--space-5) var(--space-6) 0; }
-.grow-live-action-control-row > span { color: var(--text-secondary); font-size: 11px; font-weight: 800; }
-.grow-live-action-tabs { display: flex; gap: 6px; }
+.grow-live-action-control-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: var(--space-5) var(--space-6) 0; }
+.grow-live-action-control-row > span { flex-shrink: 0; color: var(--text-secondary); font-size: 11px; font-weight: 800; }
+.grow-live-action-tabs { display: flex; gap: 6px; margin-left: auto; }
 .grow-live-action-tabs button { min-height: 34px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 11px; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-secondary); background: transparent; font-size: 11px; font-weight: 900; cursor: pointer; }
 .grow-live-action-tabs button.is-active { border-color: rgba(167,139,250,.55); color: var(--accent-subtle); background: var(--accent-muted); }
 .grow-live-action-tabs i { font-size: 15px; font-style: normal; }
@@ -2271,7 +2271,6 @@ a:hover {
   .grow-live-modal-note { margin-left: var(--space-4); margin-right: var(--space-4); }
   .grow-live-disclosures { margin-left: var(--space-4); margin-right: var(--space-4); }
   .grow-live-modal-actions { display: grid; grid-template-columns: 1fr; padding-left: var(--space-4); padding-right: var(--space-4); }
-  .grow-live-action-tabs,
   .grow-live-action-control-row,
   .grow-live-action-input { padding-left: var(--space-4); padding-right: var(--space-4); }
   .grow-live-presets { padding-left: var(--space-4); padding-right: var(--space-4); flex-wrap: wrap; }
