@@ -1,5 +1,10 @@
 import { assertConfig, config } from "./config";
-import { processPostOnBackend, reportReplyResult } from "./client/teepBackend";
+import {
+  claimPendingOfferReply,
+  processPostOnBackend,
+  reportOfferReplyResult,
+  reportReplyResult,
+} from "./client/teepBackend";
 import { pollMentions, type PollingState } from "./listeners/xPollingListener";
 import { startFilteredStream } from "./listeners/xStreamListener";
 import { parseTipCommand } from "./parser/parseTipCommand";
@@ -17,6 +22,11 @@ async function handlePost(post: Awaited<ReturnType<typeof pollMentions>>["posts"
   console.log(`[x-agent] Processing tweet ${post.id} from @${post.authorUsername || post.authorId}`);
 
   const result = await processPostOnBackend(post);
+  console.log(
+    `[x-agent] Backend outcome for ${post.id}: ${result.status}` +
+    `${result.code ? ` (${result.code})` : ""}` +
+    `${result.txHash ? ` ${result.txHash}` : ""}`
+  );
   if (!result.replyText) {
     console.log(`[x-agent] Tweet ${post.id}: ${result.status}${result.code ? ` (${result.code})` : ""}`);
     return;
@@ -75,8 +85,37 @@ async function runPollingLoop() {
       for (const post of posts) {
         await handlePost(post);
       }
+      await deliverPendingOfferReplies();
     } catch (err: unknown) {
       console.error("[x-agent] Poll cycle failed:", err instanceof Error ? err.message : err);
+    }
+    await new Promise((resolve) => setTimeout(resolve, config.pollIntervalMs));
+  }
+}
+
+async function deliverPendingOfferReplies() {
+  for (let delivered = 0; delivered < 5; delivered += 1) {
+    const notification = await claimPendingOfferReply();
+    if (!notification) return;
+    try {
+      const replyTweetId = await postReplyToX(notification.sourceTweetId, notification.replyText);
+      await reportOfferReplyResult({ id: notification.id, replyTweetId });
+      console.log(`[x-agent] Replied to ${notification.sourceTweetId} with creator offer ${replyTweetId}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await reportOfferReplyResult({ id: notification.id, error: message }).catch(() => undefined);
+      console.error(`[x-agent] Creator offer reply failed for ${notification.sourceTweetId}:`, message);
+      return;
+    }
+  }
+}
+
+async function runOfferReplyLoop() {
+  for (;;) {
+    try {
+      await deliverPendingOfferReplies();
+    } catch (error) {
+      console.error("[x-agent] Creator offer reply loop failed:", error instanceof Error ? error.message : error);
     }
     await new Promise((resolve) => setTimeout(resolve, config.pollIntervalMs));
   }
@@ -87,6 +126,7 @@ async function main() {
   console.log(`[x-agent] Teep X agent starting (backend: ${config.backendUrl})`);
 
   if (config.useFilteredStream) {
+    void runOfferReplyLoop();
     await startFilteredStream(async (post) => {
       await handlePost(post as Parameters<typeof handlePost>[0]);
     });

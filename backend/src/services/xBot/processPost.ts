@@ -14,11 +14,13 @@ import {
   getOnchainTeepBalance,
   getOnchainXTippingReadiness,
   relayXTip,
+  XTipConfirmationPendingError,
+  XTipRevertedError,
+  type XTipSubmission,
 } from "../xTippingRouter";
 import { amountToRaw, classifyIgnoredMention, formatUsdcRaw, parseTipCommand } from "./parseTipCommand";
 import {
   buildBalanceReply,
-  buildBatchSuccessReply,
   buildAlreadyProcessedReply,
   buildClaimableReply,
   buildConnectReply,
@@ -27,10 +29,14 @@ import {
   buildInvalidCommandReply,
   buildInsufficientBalanceReply,
   buildSuccessReply,
+  buildSubmittedReply,
+  buildUncertainSubmissionReply,
 } from "./replies";
 import type { ProcessPostResult, TipIntent, XIncomingPost, XTipKind } from "./types";
 import { publishDashboardUpdate } from "../dashboardUpdates";
 import { invalidateDisplayUsdcBalances } from "../balanceSnapshots";
+import { requeueOfferEvaluationsForContent } from "../creatorOffers";
+import { sanitizeOperationalError } from "../serviceHealth";
 
 const MIN_TIP_RAW = BigInt(process.env.X_BOT_MIN_TIP_RAW || "10000");
 const PROCESSING_STALE_MS = Number(process.env.X_BOT_PROCESSING_STALE_MS || "300000");
@@ -63,6 +69,85 @@ type PreparedTip = {
   contextAuthorName?: string | null;
   contextAuthorProfileImageUrl?: string | null;
 };
+
+async function persistXTipRecord(params: {
+  tip: PreparedTip;
+  sender: SenderAccount;
+  tokenAddress: string;
+  submission: XTipSubmission;
+  status: "submitted" | "completed" | "failed";
+  lastError?: string;
+}) {
+  const now = nowMs();
+  await getDb().transaction(async (txDb) => {
+    await txDb.prepare(
+      `INSERT INTO tip_metadata (content_id, author_handle, tweet_id, kind)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(content_id) DO UPDATE SET
+         author_handle = excluded.author_handle,
+         tweet_id = excluded.tweet_id,
+         kind = excluded.kind`
+    ).run(
+      params.tip.contentId,
+      params.tip.tipKind === "direct_creator_tip" ? params.tip.recipient.xUsername : params.tip.contextAuthorUsername,
+      params.tip.tipKind === "direct_creator_tip" ? null : params.tip.contextTweetId,
+      params.tip.tipKind,
+    );
+    await txDb.prepare(
+      `INSERT INTO x_bot_tips (
+        id, sender_address, recipient_address, recipient_x_user_id, recipient_x_username,
+        token_address, amount_raw, source_tweet_id, receipt_id, tx_hash, status, created_at,
+        tip_kind, content_id, context_tweet_id, context_author_id, context_author_username,
+        context_author_name, context_author_profile_image_url, updated_at, confirmed_at, last_error
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(source_tweet_id) DO UPDATE SET
+        recipient_address = excluded.recipient_address,
+        tx_hash = excluded.tx_hash,
+        status = CASE
+          WHEN x_bot_tips.status IN ('completed', 'failed') AND excluded.status = 'submitted'
+            THEN x_bot_tips.status
+          ELSE excluded.status
+        END,
+        tip_kind = excluded.tip_kind,
+        content_id = excluded.content_id,
+        context_tweet_id = excluded.context_tweet_id,
+        context_author_id = excluded.context_author_id,
+        context_author_username = excluded.context_author_username,
+        context_author_name = excluded.context_author_name,
+        context_author_profile_image_url = excluded.context_author_profile_image_url,
+        updated_at = excluded.updated_at,
+        confirmed_at = COALESCE(x_bot_tips.confirmed_at, excluded.confirmed_at),
+        last_error = CASE
+          WHEN x_bot_tips.status IN ('completed', 'failed') AND excluded.status = 'submitted'
+            THEN x_bot_tips.last_error
+          ELSE excluded.last_error
+        END`
+    ).run(
+      params.tip.tipId,
+      params.sender.userAddress,
+      params.submission.claimWallet,
+      params.tip.recipient.xUserId,
+      params.tip.recipient.xUsername,
+      params.tokenAddress,
+      params.tip.amountRaw.toString(),
+      params.tip.sourceTweetId,
+      params.tip.receiptId,
+      params.submission.txHash,
+      params.status,
+      now,
+      params.tip.tipKind,
+      params.tip.contentId,
+      params.tip.contextTweetId,
+      params.tip.contextAuthorId,
+      params.tip.contextAuthorUsername,
+      params.tip.contextAuthorName ?? null,
+      params.tip.contextAuthorProfileImageUrl ?? null,
+      now,
+      params.status === "completed" ? now : null,
+      params.lastError ?? null,
+    );
+  });
+}
 
 function dbBool(value: unknown) {
   return value === true || value === 1;
@@ -383,8 +468,17 @@ async function validateBatch(params: {
     };
   }
 
-  const onchain = await getOnchainXTippingReadiness({ senderAddress: params.senderAddress, totalRaw });
-  if (!onchain.ok) return onchain;
+  try {
+    const onchain = await getOnchainXTippingReadiness({ senderAddress: params.senderAddress, totalRaw });
+    if (!onchain.ok) return onchain;
+  } catch (error) {
+    console.error(`[XBot] Arc readiness unavailable: ${sanitizeOperationalError(error)}`);
+    return {
+      ok: false as const,
+      code: "ARC_RPC_UNAVAILABLE",
+      reason: "Arc is temporarily unavailable. No tip was submitted; try again later.",
+    };
+  }
 
   return { ok: true as const };
 }
@@ -439,7 +533,6 @@ function firstIntentContext(post: XIncomingPost, intent?: TipIntent) {
 }
 
 export async function processIncomingPost(post: XIncomingPost): Promise<ProcessPostResult> {
-  const db = getDb();
   if (BOT_USER_ID && post.authorId === BOT_USER_ID) {
     await markProcessed(post.id, post.authorId, "ignored", "BOT_SELF_POST");
     return { tweetId: post.id, status: "ignored", code: "BOT_SELF_POST" };
@@ -497,7 +590,15 @@ export async function processIncomingPost(post: XIncomingPost): Promise<ProcessP
       await markProcessed(post.id, post.authorId, "failed", "SENDER_NOT_REGISTERED", undefined, replyText);
       return { tweetId: post.id, status: "failed", code: "SENDER_NOT_REGISTERED", replyText };
     }
-    const balance = await getOnchainTeepBalance(sender.userAddress);
+    let balance: bigint;
+    try {
+      balance = await getOnchainTeepBalance(sender.userAddress);
+    } catch (error) {
+      console.error(`[XBot] Balance RPC unavailable for tweet ${post.id}: ${sanitizeOperationalError(error)}`);
+      const replyText = buildFailureReply("Arc is temporarily unavailable. Try checking your balance again later.");
+      await markProcessed(post.id, post.authorId, "failed", "ARC_RPC_UNAVAILABLE", undefined, replyText);
+      return { tweetId: post.id, status: "failed", code: "ARC_RPC_UNAVAILABLE", replyText };
+    }
     const replyText = buildBalanceReply(sender.xUsername, balance);
     await markProcessed(post.id, post.authorId, "completed", "BALANCE", undefined, replyText);
     return { tweetId: post.id, status: "completed", replyText };
@@ -577,140 +678,147 @@ export async function processIncomingPost(post: XIncomingPost): Promise<ProcessP
     });
   }
 
+  const tip = prepared[0];
+  let confirmedSubmission: XTipSubmission | undefined;
   try {
-    const relayed: Array<PreparedTip & { txHash: string; claimWallet: string; contentId: Hex }> = [];
-    for (const tip of prepared) {
-      const result = await relayXTip({
-        senderAddress: sender.userAddress,
-        recipientXUserId: tip.recipient.xUserId,
-        commandTweetId: tip.sourceTweetId,
-        contentId: tip.contentId,
-        amountRaw: tip.amountRaw,
-      });
-      relayed.push({ ...tip, txHash: result.txHash, claimWallet: result.claimWallet, contentId: result.contentId });
-    }
+    const submission = await relayXTip({
+      senderAddress: sender.userAddress,
+      recipientXUserId: tip.recipient.xUserId,
+      commandTweetId: tip.sourceTweetId,
+      contentId: tip.contentId,
+      amountRaw: tip.amountRaw,
+    }, {
+      onSubmitted: (submitted) => persistXTipRecord({
+        tip,
+        sender,
+        tokenAddress,
+        submission: submitted,
+        status: "submitted",
+      }),
+    });
+    confirmedSubmission = submission;
 
-    await db.transaction(async (txDb) => {
-      for (const tip of relayed) {
-        await txDb.prepare(
-          `INSERT INTO tip_metadata (content_id, author_handle, tweet_id, kind)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT(content_id) DO UPDATE SET
-             author_handle = excluded.author_handle,
-             tweet_id = excluded.tweet_id,
-             kind = excluded.kind`
-        ).run(
-          tip.contentId,
-          tip.tipKind === "direct_creator_tip" ? tip.recipient.xUsername : tip.contextAuthorUsername,
-          tip.tipKind === "direct_creator_tip" ? null : tip.contextTweetId,
-          tip.tipKind,
-        );
-        await txDb.prepare(
-          `INSERT INTO x_bot_tips (
-            id, sender_address, recipient_address, recipient_x_user_id, recipient_x_username,
-            token_address, amount_raw, source_tweet_id, receipt_id, tx_hash, status, created_at,
-            tip_kind, content_id, context_tweet_id, context_author_id, context_author_username,
-            context_author_name, context_author_profile_image_url
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(source_tweet_id) DO UPDATE SET
-            tx_hash = excluded.tx_hash,
-            status = excluded.status,
-            tip_kind = excluded.tip_kind,
-            content_id = excluded.content_id,
-            context_tweet_id = excluded.context_tweet_id,
-            context_author_id = excluded.context_author_id,
-            context_author_username = excluded.context_author_username,
-            context_author_name = excluded.context_author_name,
-            context_author_profile_image_url = excluded.context_author_profile_image_url`
-        ).run(
-          tip.tipId,
-          sender.userAddress,
-          tip.claimWallet,
-          tip.recipient.xUserId,
-          tip.recipient.xUsername,
-          tokenAddress,
-          tip.amountRaw.toString(),
-          tip.sourceTweetId,
-          tip.receiptId,
-          tip.txHash,
-          nowMs(),
-          tip.tipKind,
-          tip.contentId,
-          tip.contextTweetId,
-          tip.contextAuthorId,
-          tip.contextAuthorUsername,
-          tip.contextAuthorName ?? null,
-          tip.contextAuthorProfileImageUrl ?? null
-        );
-      }
-    })();
+    await persistXTipRecord({ tip, sender, tokenAddress, submission, status: "completed" });
+    await requeueOfferEvaluationsForContent(tip.contentId).catch((error) => {
+      console.error("[Creator offers] Could not requeue X tip evaluation:", error);
+    });
 
-    invalidateDisplayUsdcBalances([sender.userAddress, ...relayed.map((tip) => tip.claimWallet)]);
+    invalidateDisplayUsdcBalances([sender.userAddress, submission.claimWallet]);
     await publishDashboardUpdate({
       reason: "x_tip_confirmed",
-      addresses: [sender.userAddress, ...relayed.map((tip) => tip.recipient.userAddress)],
-      authorIds: relayed.map((tip) => tip.recipient.xUserId),
+      addresses: [sender.userAddress, tip.recipient.userAddress],
+      authorIds: [tip.recipient.xUserId],
     }).catch((error) => console.error("[Dashboard live] Could not publish X tip update:", error));
 
-    const completed = relayed.filter((tip) => tip.recipient.userAddress);
-    const reserved = relayed.filter((tip) => !tip.recipient.userAddress);
-    const firstReceiptId = relayed[0]?.receiptId;
+    const replyText = tip.recipient.userAddress
+      ? buildSuccessReply({
+          senderHandle: sender.xUsername,
+          recipientHandle: tip.recipient.xUsername,
+          amountRaw: tip.amountRaw,
+          receiptId: tip.receiptId,
+        })
+      : buildClaimableReply({
+          senderHandle: sender.xUsername,
+          recipientHandle: tip.recipient.xUsername,
+          amountRaw: tip.amountRaw,
+          receiptId: tip.receiptId,
+        });
+    await markProcessed(
+      post.id,
+      post.authorId,
+      "completed",
+      tip.recipient.userAddress ? undefined : "CLAIMABLE",
+      tip.receiptId,
+      replyText
+    );
+    return { tweetId: post.id, status: "completed", replyText, receiptId: tip.receiptId, txHash: submission.txHash };
+  } catch (err: unknown) {
+    if (err instanceof XTipConfirmationPendingError) {
+      const submission = err.submission;
+      const operationalError = sanitizeOperationalError(err.causeValue);
+      await persistXTipRecord({
+        tip,
+        sender,
+        tokenAddress,
+        submission,
+        status: "submitted",
+        lastError: operationalError,
+      }).catch((persistError) => {
+        console.error(`[XBot] Could not persist submitted tip ${post.id} (${submission.txHash}): ${sanitizeOperationalError(persistError)}`);
+      });
+      const replyText = buildSubmittedReply({
+        recipientHandle: tip.recipient.xUsername,
+        amountRaw: tip.amountRaw,
+        receiptId: tip.receiptId,
+      });
+      await markProcessed(post.id, post.authorId, "submitted", "CONFIRMATION_PENDING", tip.receiptId, replyText);
+      console.warn(`[XBot] Tip ${post.id} submitted as ${submission.txHash}; confirmation workflow pending: ${operationalError}`);
+      return {
+        tweetId: post.id,
+        status: "submitted",
+        code: "CONFIRMATION_PENDING",
+        replyText,
+        receiptId: tip.receiptId,
+        txHash: submission.txHash,
+      };
+    }
 
-    if (relayed.length === 1) {
-      const only = relayed[0];
-      const replyText = only.recipient.userAddress
+    if (confirmedSubmission) {
+      const operationalError = sanitizeOperationalError(err);
+      await persistXTipRecord({
+        tip,
+        sender,
+        tokenAddress,
+        submission: confirmedSubmission,
+        status: "completed",
+      });
+      const replyText = tip.recipient.userAddress
         ? buildSuccessReply({
             senderHandle: sender.xUsername,
-            recipientHandle: only.recipient.xUsername,
-            amountRaw: only.amountRaw,
-            receiptId: only.receiptId,
+            recipientHandle: tip.recipient.xUsername,
+            amountRaw: tip.amountRaw,
+            receiptId: tip.receiptId,
           })
         : buildClaimableReply({
             senderHandle: sender.xUsername,
-            recipientHandle: only.recipient.xUsername,
-            amountRaw: only.amountRaw,
-            receiptId: only.receiptId,
+            recipientHandle: tip.recipient.xUsername,
+            amountRaw: tip.amountRaw,
+            receiptId: tip.receiptId,
           });
       await markProcessed(
         post.id,
         post.authorId,
         "completed",
-        reserved.length ? "CLAIMABLE" : undefined,
-        firstReceiptId,
+        tip.recipient.userAddress ? undefined : "CLAIMABLE",
+        tip.receiptId,
         replyText
       );
-      return { tweetId: post.id, status: "completed", replyText, receiptId: firstReceiptId };
+      console.warn(`[XBot] Tip ${post.id} confirmed as ${confirmedSubmission.txHash}; recovered after post-confirmation error: ${operationalError}`);
+      return { tweetId: post.id, status: "completed", replyText, receiptId: tip.receiptId, txHash: confirmedSubmission.txHash };
     }
 
-    const replyText = buildBatchSuccessReply({
-      senderHandle: sender.xUsername,
-      completed: completed.map((tip) => ({
-        recipientHandle: tip.recipient.xUsername,
-        amountRaw: tip.amountRaw,
-        receiptId: tip.receiptId,
-      })),
-      reserved: reserved.map((tip) => ({
-        recipientHandle: tip.recipient.xUsername,
-        amountRaw: tip.amountRaw,
-        receiptId: tip.receiptId,
-      })),
-    });
-    await markProcessed(
-      post.id,
-      post.authorId,
-      "completed",
-      reserved.length ? "BATCH_WITH_CLAIMABLE" : "BATCH",
-      firstReceiptId,
-      replyText
-    );
-    return { tweetId: post.id, status: "completed", replyText, receiptId: firstReceiptId };
-  } catch (err: unknown) {
+    if (err instanceof XTipRevertedError) {
+      await persistXTipRecord({
+        tip,
+        sender,
+        tokenAddress,
+        submission: err.submission,
+        status: "failed",
+        lastError: "Transaction reverted",
+      });
+      const replyText = buildFailureReply("Arc rejected the transaction, so the tip was not transferred.");
+      await markProcessed(post.id, post.authorId, "failed", "X_TIP_REVERTED", tip.receiptId, replyText);
+      console.warn(`[XBot] Tip ${post.id} reverted as ${err.submission.txHash}`);
+      return { tweetId: post.id, status: "failed", code: "X_TIP_REVERTED", replyText, receiptId: tip.receiptId, txHash: err.submission.txHash };
+    }
+
     const message = err instanceof Error ? err.message : "UNKNOWN";
-    const replyText =
-      message === "INSUFFICIENT_BALANCE"
-        ? buildInsufficientBalanceReply(sender.xUsername, firstIntentContext(post, command.tips[0]))
-        : buildFailureReply("Something went wrong sending this tip.");
+    const safeError = sanitizeOperationalError(err);
+    const replyText = message === "INSUFFICIENT_BALANCE"
+      ? buildInsufficientBalanceReply(sender.xUsername, firstIntentContext(post, command.tips[0]))
+      : buildUncertainSubmissionReply();
     await markProcessed(post.id, post.authorId, "failed", message, undefined, replyText);
+    console.error(`[XBot] Tip submission failed before a transaction hash was available for ${post.id}: ${safeError}`);
     return { tweetId: post.id, status: "failed", code: message, replyText };
   }
 }

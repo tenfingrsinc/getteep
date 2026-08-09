@@ -54,6 +54,7 @@ type NotificationRecord = {
   title: string;
   body: string;
   status: "unread" | "read";
+  metadata?: { claimUrl?: string; [key: string]: unknown } | null;
 };
 
 export default function DashboardShell({
@@ -93,6 +94,7 @@ export default function DashboardShell({
     { to: "/creator/dashboard", icon: "dashboard", label: "Overview", active: pathname === "/creator/dashboard" },
     { to: "/creator/withdraw", icon: "account_balance_wallet", label: "Withdraw", active: pathname === "/creator/withdraw" || pathname === "/dashboard/withdraw" },
     { to: "/creator/performance", icon: "monitoring", label: "Performance", active: pathname === "/creator/performance" },
+    { to: "/creator/offers", icon: "redeem", label: "Offers", active: pathname === "/creator/offers" },
   ];
   const growTipsLinks: DashboardNavLink[] = [
     { to: "/creator/grow/earn", icon: "eco", label: "Grow Tips", active: pathname === "/creator/grow/earn" },
@@ -104,11 +106,13 @@ export default function DashboardShell({
   ];
   const creatorTipperDashboardLinks: DashboardNavLink[] = [
     { to: "/dashboard?view=tipper", icon: "account_balance_wallet", label: "Tipper Dashboard", active: pathname === "/dashboard" },
+    { to: "/dashboard/offers", icon: "redeem", label: "My Offers", active: pathname === "/dashboard/offers" },
   ];
   const tipperDashboardLinks: DashboardNavLink[] = [
     { to: "/dashboard", icon: "account_balance_wallet", label: "Tipper Dashboard", active: pathname === "/dashboard" },
     { to: "/dashboard/settings", icon: "manage_accounts", label: "Settings", active: pathname === "/dashboard/settings" },
     { to: "/dashboard/discover", icon: "explore", label: "Discover Creators", active: pathname === "/dashboard/discover" },
+    { to: "/dashboard/offers", icon: "redeem", label: "My Offers", active: pathname === "/dashboard/offers" },
     { to: "/dashboard/referrals", icon: "card_giftcard", label: "Referrals", active: pathname === "/dashboard/referrals" },
   ];
   const dynamicNavSections: DashboardNavSection[] = showCreatorNav
@@ -223,6 +227,21 @@ export default function DashboardShell({
     setNotificationUnread((count) => Math.max(0, count - 1));
   }, [address]);
 
+  const openNotification = useCallback(async (item: NotificationRecord) => {
+    await markNotificationRead(item.id);
+    setNotificationOpen(false);
+    if (item.metadata?.claimUrl) {
+      try {
+        const destination = new URL(item.metadata.claimUrl, window.location.origin);
+        if (destination.origin === window.location.origin || /(^|\.)getteep\.xyz$/i.test(destination.hostname)) {
+          window.location.assign(`${destination.pathname}${destination.search}`);
+        }
+      } catch {
+        // Ignore malformed notification destinations.
+      }
+    }
+  }, [markNotificationRead]);
+
   const handleCopyReferral = useCallback(async () => {
     if (!address) return;
     const copied = await copyReferralLink();
@@ -313,7 +332,7 @@ export default function DashboardShell({
                   ) : (
                     <div className="dashboard-notification-list">
                       {notifications.map((item) => (
-                        <button key={item.id} type="button" onClick={() => markNotificationRead(item.id)} className={item.status === "unread" ? "is-unread" : ""}>
+                        <button key={item.id} type="button" onClick={() => openNotification(item)} className={item.status === "unread" ? "is-unread" : ""}>
                           <strong>{item.title}</strong>
                           <span>{item.body}</span>
                         </button>

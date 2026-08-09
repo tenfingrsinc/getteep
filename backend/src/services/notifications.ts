@@ -11,6 +11,7 @@ export type NotificationType =
   | "deposit_confirmed"
   | "withdrawal_confirmed"
   | "grow_tips_status"
+  | "offer_unlocked"
   | "referral_earned"
   | "message";
 
@@ -24,7 +25,7 @@ async function isEnabled(userAddress: string, type: NotificationType) {
   if (type === "claim_wallet_activity") return settings.notifications.claimWalletActivity;
   if (type === "withdrawal_confirmed") return settings.notifications.withdrawalCompleted && settings.payout.notifications;
   if (type === "grow_tips_status") return settings.notifications.growTipsStatus;
-  if (type === "deposit_confirmed" || type === "referral_earned" || type === "message") return true;
+  if (type === "deposit_confirmed" || type === "referral_earned" || type === "offer_unlocked" || type === "message") return true;
   return false;
 }
 

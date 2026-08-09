@@ -15,6 +15,7 @@ export const creatorNavPaths = {
   settings: "/creator/settings",
   referrals: "/creator/referrals",
   performance: "/creator/performance",
+  offers: "/creator/offers",
   earn: "/creator/grow/earn",
   learn: "/creator/grow/learn",
   growSettings: "/creator/grow/settings",

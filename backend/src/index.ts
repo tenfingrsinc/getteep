@@ -26,8 +26,12 @@ import crossmintRouter from "./routes/crossmint";
 import xBotInternalRouter from "./routes/x-bot-internal";
 import xBalanceRouter from "./routes/x-balance";
 import liveRouter from "./routes/live";
+import creatorOffersRouter from "./routes/creatorOffers";
 import { mountWebProfileRenderer } from "./services/webProfileRenderer";
 import { CrossmintReconciler } from "./services/crossmintReconciliation";
+import { CreatorOfferWorker } from "./services/creatorOffers";
+import { RpcHealthMonitor } from "./services/rpcHealthMonitor";
+import { XTipReconciler } from "./services/xTipReconciliation";
 
 const PORT = parseInt(process.env.PORT || "3001");
 const LOCAL_URL_RE = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/|$)/i;
@@ -77,7 +81,7 @@ const corsOptions: CorsOptions = {
     }
     callback(null, false);
   },
-  methods: ["GET", "POST", "OPTIONS"],
+  methods: ["GET", "POST", "PATCH", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
   maxAge: 86400,
 };
@@ -331,6 +335,7 @@ app.use("/defi", defiIntentLimiter, defiRouter);
 app.use("/internal/x-bot", xBotInternalRouter);
 app.use("/x-balance", xBalanceRouter);
 app.use("/live", liveRouter);
+app.use("/offers", writeLimiter, creatorOffersRouter);
 
 // External API (versioned, documented)
 const apiLimiter = rateLimit({
@@ -374,6 +379,12 @@ async function main() {
   console.log(`[Chain data] Mode: ${indexerMode}`);
   const crossmintReconciler = new CrossmintReconciler();
   crossmintReconciler.start();
+  const creatorOfferWorker = new CreatorOfferWorker();
+  creatorOfferWorker.start();
+  const rpcHealthMonitor = new RpcHealthMonitor();
+  rpcHealthMonitor.start();
+  const xTipReconciler = new XTipReconciler();
+  xTipReconciler.start();
 
   // Start HTTP server
   app.listen(PORT, () => {
@@ -387,6 +398,9 @@ async function main() {
     indexer?.stop();
     projector?.stop();
     crossmintReconciler.stop();
+    creatorOfferWorker.stop();
+    rpcHealthMonitor.stop();
+    xTipReconciler.stop();
     process.exit(0);
   });
 }

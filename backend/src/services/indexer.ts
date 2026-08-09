@@ -8,6 +8,7 @@ import { createClaimWalletActivityNotification, createNewTipReceivedNotification
 import { createBackendPublicClient, isInsecureRpcTlsEnabled, warnIfInsecureRpcTlsEnabled } from "./rpcClient";
 import { publishDashboardUpdate } from "./dashboardUpdates";
 import { invalidateDisplayUsdcBalances } from "./balanceSnapshots";
+import { enqueueOfferEvaluation } from "./creatorOffers";
 
 // ABI for the Tipped event
 const TIPPED_EVENT = parseAbiItem(
@@ -215,11 +216,12 @@ export class Indexer {
         const amount = args.amount.toString();
         const txHash = String(log.transactionHash).toLowerCase();
         const contractAddr = String(log.address || "").toLowerCase();
-        const result = await txDb.prepare(`
+        const insertedTip = await txDb.prepare(`
           INSERT INTO tips (content_id, author_id, from_address, to_address, amount, tx_hash, block_number, log_index, timestamp, tip_contract_address)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT (tx_hash) DO NOTHING
-        `).run(
+          RETURNING id
+        `).get<{ id: string }>(
           contentId,
           authorId,
           from,
@@ -231,7 +233,8 @@ export class Indexer {
           Math.floor(Date.now() / 1000),
           contractAddr || null
         );
-        if (result.changes > 0) {
+        if (insertedTip) {
+          await enqueueOfferEvaluation(insertedTip.id, txDb);
           changedAddresses.push(from, to);
           changedAuthorIds.push(authorId);
           await inspectTipForAbuse({

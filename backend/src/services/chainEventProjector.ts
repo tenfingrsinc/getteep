@@ -13,6 +13,7 @@ import { getDb, one, run } from "../db/database";
 import { createDepositConfirmedNotification } from "./notifications";
 import { publishDashboardUpdate } from "./dashboardUpdates";
 import { invalidateDisplayUsdcBalances } from "./balanceSnapshots";
+import { enqueueOfferEvaluation } from "./creatorOffers";
 import { recordServiceFailure, recordServiceSuccess } from "./serviceHealth";
 
 const TIPPED_EVENT = parseAbiItem(
@@ -302,17 +303,22 @@ async function projectTip(input: {
   contentId: string; authorId: string; from: string; to: string; amount: string;
   txHash: string; blockNumber: number; logIndex: number; timestamp: number; contractAddress: string;
 }) {
-  const result = await getDb().prepare(
-    `INSERT INTO tips (
-       content_id, author_id, from_address, to_address, amount, tx_hash,
-       block_number, log_index, timestamp, tip_contract_address
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT (tx_hash) DO NOTHING`
-  ).run(
-    input.contentId, input.authorId, input.from, input.to, input.amount, input.txHash,
-    input.blockNumber, input.logIndex, input.timestamp, input.contractAddress
-  );
-  if (result.changes > 0) {
+  const insertedTip = await getDb().transaction(async (db) => {
+    const inserted = await db.prepare(
+      `INSERT INTO tips (
+         content_id, author_id, from_address, to_address, amount, tx_hash,
+         block_number, log_index, timestamp, tip_contract_address
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (tx_hash) DO NOTHING
+       RETURNING id`
+    ).get<{ id: string }>(
+      input.contentId, input.authorId, input.from, input.to, input.amount, input.txHash,
+      input.blockNumber, input.logIndex, input.timestamp, input.contractAddress
+    );
+    if (inserted) await enqueueOfferEvaluation(inserted.id, db);
+    return inserted;
+  })();
+  if (insertedTip) {
     invalidateDisplayUsdcBalances([input.from, input.to]);
     await publishDashboardUpdate({
       reason: "tip_confirmed",

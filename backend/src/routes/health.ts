@@ -2,6 +2,7 @@ import { Router, Request, Response } from "express";
 import { getDb } from "../db/database";
 import { summarizeOpenAbuseEvents } from "../services/abuse";
 import {
+  applyServiceHealthFreshness,
   getPublicServiceMessage,
   readGoldskyProjectionHealth,
   readServiceHealth,
@@ -11,6 +12,7 @@ import {
 const router = Router();
 const INDEXER_MAX_LAG_BLOCKS = Number(process.env.INDEXER_MAX_LAG_BLOCKS || 50);
 const INDEXER_MAX_STALE_MS = Number(process.env.INDEXER_MAX_STALE_MS || 5 * 60 * 1000);
+const RPC_HEALTH_MAX_STALE_MS = Math.max(15_000, Number(process.env.RPC_HEALTH_MAX_STALE_MS || 10 * 60_000));
 
 router.get("/live", (_req: Request, res: Response) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
@@ -33,22 +35,44 @@ router.get("/client", async (_req: Request, res: Response) => {
       } | undefined>,
     ]);
 
-    const serviceMap = Object.fromEntries(services.map((service) => [service.service, {
+    const checkedAt = Date.now();
+    const effectiveServices = services.map((service) => service.service === "arc_rpc"
+      ? applyServiceHealthFreshness(service, checkedAt, RPC_HEALTH_MAX_STALE_MS)
+      : { ...service, ageMs: Math.max(0, checkedAt - service.updatedAt), stale: false });
+    const serviceMap = Object.fromEntries(effectiveServices.map((service) => [service.service, {
       service: service.service,
       status: service.status,
       lastSuccessAt: service.lastSuccessAt,
       lastFailureAt: service.lastFailureAt,
       updatedAt: service.updatedAt,
+      ageMs: service.ageMs,
+      stale: service.stale,
     }]));
     const warnings: Array<{ service: string; status: string; message: string }> = [];
-    for (const service of services) {
-      if (service.status === "degraded" || service.status === "offline") {
+    for (const service of effectiveServices) {
+      if (service.status === "degraded" || service.status === "offline" || service.status === "unknown") {
         warnings.push({
           service: service.service,
           status: service.status,
           message: getPublicServiceMessage(service.service, service.status),
         });
       }
+    }
+    if (!serviceMap.arc_rpc) {
+      serviceMap.arc_rpc = {
+        service: "arc_rpc",
+        status: "unknown",
+        lastSuccessAt: null,
+        lastFailureAt: null,
+        updatedAt: 0,
+        ageMs: checkedAt,
+        stale: true,
+      };
+      warnings.push({
+        service: "arc_rpc",
+        status: "unknown",
+        message: getPublicServiceMessage("arc_rpc", "unknown"),
+      });
     }
     if (mode === "rpc" && indexer?.last_error) {
       warnings.push({
@@ -69,7 +93,7 @@ router.get("/client", async (_req: Request, res: Response) => {
         currentBlock: Number(indexer?.current_block || 0),
         lastSuccessAt: indexer?.last_success_at == null ? null : Number(indexer.last_success_at),
       },
-      checkedAt: Date.now(),
+      checkedAt,
     });
   } catch (error) {
     res.status(503).json({

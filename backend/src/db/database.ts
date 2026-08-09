@@ -271,6 +271,150 @@ const schemaSql = `
   CREATE INDEX IF NOT EXISTS idx_user_notifications_user_created ON user_notifications(user_address, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_user_notifications_status ON user_notifications(user_address, status);
 
+  CREATE TABLE IF NOT EXISTS creator_offers (
+    id TEXT PRIMARY KEY,
+    creator_author_id TEXT NOT NULL,
+    creator_owner_address TEXT NOT NULL,
+    creator_username TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    offer_type TEXT NOT NULL CHECK (offer_type IN ('ACCESS', 'CODE', 'LINK', 'CUSTOM')),
+    status TEXT NOT NULL CHECK (status IN ('DRAFT', 'SCHEDULED', 'ACTIVE', 'PAUSED', 'CLAIMED_OUT', 'ENDED', 'ARCHIVED')),
+    visibility TEXT NOT NULL DEFAULT 'PUBLIC' CHECK (visibility IN ('PUBLIC', 'HIDDEN')),
+    condition_type TEXT NOT NULL CHECK (condition_type IN ('SINGLE_TIP_MINIMUM', 'CUMULATIVE_TIPS_MINIMUM', 'SPECIFIC_X_POST_MINIMUM')),
+    condition_config_json TEXT NOT NULL,
+    max_claims INTEGER CHECK (max_claims IS NULL OR max_claims > 0),
+    claims_reserved INTEGER NOT NULL DEFAULT 0 CHECK (claims_reserved >= 0),
+    claims_completed INTEGER NOT NULL DEFAULT 0 CHECK (claims_completed >= 0),
+    one_per_supporter BOOLEAN NOT NULL DEFAULT TRUE,
+    starts_at BIGINT NOT NULL,
+    ends_at BIGINT,
+    claim_window_seconds INTEGER CHECK (claim_window_seconds IS NULL OR claim_window_seconds > 0),
+    version INTEGER NOT NULL DEFAULT 1,
+    activated_at BIGINT,
+    archived_at BIGINT,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    CHECK (ends_at IS NULL OR ends_at > starts_at),
+    CHECK (max_claims IS NULL OR claims_reserved <= max_claims),
+    CHECK (claims_completed <= claims_reserved)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_creator_offers_owner_status
+    ON creator_offers(creator_owner_address, status, updated_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_creator_offers_public
+    ON creator_offers(creator_username, status, visibility, starts_at, ends_at);
+  CREATE INDEX IF NOT EXISTS idx_creator_offers_evaluation
+    ON creator_offers(creator_author_id, status, starts_at, ends_at);
+
+  CREATE TABLE IF NOT EXISTS offer_fulfillment_configs (
+    offer_id TEXT PRIMARY KEY REFERENCES creator_offers(id) ON DELETE CASCADE,
+    fulfillment_type TEXT NOT NULL CHECK (fulfillment_type IN ('PROTECTED_LINK', 'SHARED_CODE', 'UNIQUE_CODE', 'INSTRUCTIONS', 'CUSTOM')),
+    protected_url_ciphertext TEXT,
+    shared_code_ciphertext TEXT,
+    instructions_ciphertext TEXT,
+    generated_by_teep BOOLEAN NOT NULL DEFAULT FALSE,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS offer_entitlements (
+    id TEXT PRIMARY KEY,
+    offer_id TEXT NOT NULL REFERENCES creator_offers(id) ON DELETE RESTRICT,
+    creator_author_id TEXT NOT NULL,
+    supporter_address TEXT NOT NULL,
+    qualifying_tip_id BIGINT NOT NULL REFERENCES tips(id) ON DELETE RESTRICT,
+    qualification_key TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL CHECK (status IN ('RESERVED_UNCLAIMED', 'CLAIMED', 'EXPIRED', 'REVOKED')),
+    offer_version INTEGER NOT NULL,
+    offer_snapshot_json TEXT NOT NULL,
+    claim_token_hash TEXT NOT NULL UNIQUE,
+    claim_token_ciphertext TEXT,
+    qualified_at BIGINT NOT NULL,
+    reserved_at BIGINT NOT NULL,
+    expires_at BIGINT,
+    claimed_at BIGINT,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    UNIQUE(offer_id, qualifying_tip_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_offer_entitlements_supporter
+    ON offer_entitlements(supporter_address, status, qualified_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_offer_entitlements_offer
+    ON offer_entitlements(offer_id, status, qualified_at DESC);
+
+  ALTER TABLE offer_entitlements
+    ADD COLUMN IF NOT EXISTS claim_token_ciphertext TEXT;
+
+  CREATE TABLE IF NOT EXISTS offer_codes (
+    id TEXT PRIMARY KEY,
+    offer_id TEXT NOT NULL REFERENCES creator_offers(id) ON DELETE CASCADE,
+    code_ciphertext TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('AVAILABLE', 'RESERVED', 'CLAIMED', 'INVALIDATED')),
+    reserved_entitlement_id TEXT REFERENCES offer_entitlements(id) ON DELETE SET NULL,
+    reserved_at BIGINT,
+    claimed_at BIGINT,
+    created_at BIGINT NOT NULL,
+    UNIQUE(offer_id, code_hash)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_offer_codes_inventory ON offer_codes(offer_id, status, created_at);
+
+  CREATE TABLE IF NOT EXISTS offer_claims (
+    id TEXT PRIMARY KEY,
+    entitlement_id TEXT NOT NULL UNIQUE REFERENCES offer_entitlements(id) ON DELETE RESTRICT,
+    offer_id TEXT NOT NULL REFERENCES creator_offers(id) ON DELETE RESTRICT,
+    supporter_address TEXT NOT NULL,
+    fulfillment_type TEXT NOT NULL,
+    assigned_code_id TEXT REFERENCES offer_codes(id) ON DELETE SET NULL,
+    claimed_at BIGINT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS offer_events (
+    id BIGSERIAL PRIMARY KEY,
+    offer_id TEXT NOT NULL REFERENCES creator_offers(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL,
+    actor_type TEXT NOT NULL,
+    actor_id TEXT,
+    metadata_json TEXT,
+    created_at BIGINT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_offer_events_offer_created ON offer_events(offer_id, created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS offer_tip_evaluations (
+    tip_id BIGINT PRIMARY KEY REFERENCES tips(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    next_attempt_at BIGINT NOT NULL DEFAULT 0,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_offer_tip_evaluations_pending
+    ON offer_tip_evaluations(status, next_attempt_at, tip_id);
+
+  CREATE TABLE IF NOT EXISTS offer_x_notifications (
+    id TEXT PRIMARY KEY,
+    source_tweet_id TEXT NOT NULL UNIQUE,
+    reply_text TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sending', 'delivered', 'failed')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at BIGINT NOT NULL DEFAULT 0,
+    lease_until BIGINT,
+    reply_tweet_id TEXT,
+    last_error TEXT,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_offer_x_notifications_pending
+    ON offer_x_notifications(status, next_attempt_at, lease_until, created_at);
+
   CREATE TABLE IF NOT EXISTS supporter_thank_yous (
     id BIGSERIAL PRIMARY KEY,
     supporter_address TEXT NOT NULL,
@@ -678,10 +822,22 @@ const schemaSql = `
   ALTER TABLE x_bot_tips
     ADD COLUMN IF NOT EXISTS context_author_profile_image_url TEXT;
 
+  ALTER TABLE x_bot_tips
+    ADD COLUMN IF NOT EXISTS updated_at BIGINT;
+
+  ALTER TABLE x_bot_tips
+    ADD COLUMN IF NOT EXISTS confirmed_at BIGINT;
+
+  ALTER TABLE x_bot_tips
+    ADD COLUMN IF NOT EXISTS last_error TEXT;
+
+  UPDATE x_bot_tips SET updated_at = created_at WHERE updated_at IS NULL;
+
   CREATE INDEX IF NOT EXISTS idx_x_bot_tips_sender ON x_bot_tips(sender_address, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_x_bot_tips_recipient ON x_bot_tips(recipient_address, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_x_bot_tips_tx_hash ON x_bot_tips(LOWER(tx_hash));
   CREATE INDEX IF NOT EXISTS idx_x_bot_tips_content_id ON x_bot_tips(LOWER(content_id));
+  CREATE INDEX IF NOT EXISTS idx_x_bot_tips_status_updated ON x_bot_tips(status, updated_at ASC);
 
   CREATE TABLE IF NOT EXISTS claimable_tips (
     id TEXT PRIMARY KEY,

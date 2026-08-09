@@ -44,7 +44,7 @@ export function ServiceHealthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     void refresh();
-    const interval = window.setInterval(() => void refresh(), 60_000);
+    const interval = window.setInterval(() => void refresh(), 30_000);
     const handleOnline = () => void refresh();
     const handleOffline = () => {
       setStatus("offline");

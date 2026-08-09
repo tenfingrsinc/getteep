@@ -239,6 +239,46 @@ export async function purgeTeepAccountData(address: string) {
     ).all<{ content_id: string }>(authorIdParam);
     const contentIds = contentRows.map((row) => row.content_id);
 
+    // Remove this supporter's private Creator Offer access records. Reserved unique
+    // codes return to inventory; already claimed codes stay consumed externally.
+    await txDb.prepare(
+      `UPDATE offer_codes c SET status = 'AVAILABLE', reserved_entitlement_id = NULL, reserved_at = NULL
+       FROM offer_entitlements e
+       WHERE c.reserved_entitlement_id = e.id AND e.supporter_address = ? AND c.status = 'RESERVED'`
+    ).run(normalized);
+    await txDb.prepare("UPDATE offer_claims SET supporter_address = ? WHERE supporter_address = ?").run(ZERO_ADDRESS, normalized);
+    await txDb.prepare(
+      `UPDATE offer_entitlements SET supporter_address = ?, claim_token_ciphertext = NULL,
+         status = CASE WHEN status = 'RESERVED_UNCLAIMED' THEN 'REVOKED' ELSE status END,
+         updated_at = ? WHERE supporter_address = ?`
+    ).run(ZERO_ADDRESS, Date.now(), normalized);
+
+    // Offers without earned entitlements can be deleted. Earned offers are archived
+    // and anonymized so supporters keep access to what they already unlocked.
+    await txDb.prepare(
+      `DELETE FROM creator_offers o
+       WHERE o.creator_owner_address = ?
+         AND NOT EXISTS (SELECT 1 FROM offer_entitlements e WHERE e.offer_id = o.id)`
+    ).run(normalized);
+    await txDb.prepare(
+      `UPDATE offer_entitlements e
+       SET creator_author_id = 'deleted',
+           offer_snapshot_json = jsonb_set(e.offer_snapshot_json::jsonb, '{creatorUsername}', '"deleted-creator"'::jsonb)::text,
+           updated_at = ?
+       FROM creator_offers o
+       WHERE e.offer_id = o.id AND o.creator_owner_address = ?`
+    ).run(Date.now(), normalized);
+    await txDb.prepare(
+      `UPDATE offer_events SET actor_id = NULL
+       WHERE actor_id = ? OR offer_id IN (SELECT id FROM creator_offers WHERE creator_owner_address = ?)`
+    ).run(normalized, normalized);
+    await txDb.prepare(
+      `UPDATE creator_offers SET creator_author_id = 'deleted', creator_owner_address = ?,
+         creator_username = 'deleted-creator', status = 'ARCHIVED', visibility = 'HIDDEN',
+         archived_at = COALESCE(archived_at, ?), updated_at = ?
+       WHERE creator_owner_address = ?`
+    ).run(ZERO_ADDRESS, Date.now(), Date.now(), normalized);
+
     if (sessionIds.length > 0) {
       await txDb.prepare("DELETE FROM funding_provider_webhooks WHERE session_id = ANY(?::text[])").run(sessionIds);
     }
@@ -271,6 +311,11 @@ export async function purgeTeepAccountData(address: string) {
     await txDb.prepare("DELETE FROM user_teep_balances WHERE LOWER(user_address) = ?").run(normalized);
     await txDb.prepare("DELETE FROM x_tipping_permissions WHERE LOWER(user_address) = ?").run(normalized);
     await txDb.prepare("DELETE FROM processed_x_posts WHERE author_x_user_id = ANY(?::text[])").run(authorIdParam);
+    await txDb.prepare(
+      `DELETE FROM offer_x_notifications n USING x_bot_tips x
+       WHERE n.source_tweet_id = x.source_tweet_id
+         AND (LOWER(x.sender_address) = ? OR x.recipient_x_user_id = ANY(?::text[]))`
+    ).run(normalized, authorIdParam);
     await txDb.prepare("DELETE FROM x_bot_tips WHERE (LOWER(sender_address) = ? OR recipient_x_user_id = ANY(?::text[])) AND tx_hash IS NULL").run(normalized, authorIdParam);
     await txDb.prepare(
       `UPDATE x_bot_tips

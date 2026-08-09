@@ -18,6 +18,8 @@ const allowedPurposes = new Set([
   "withdrawal",
   "defi-intent",
   "x-tipping-link",
+  "creator-offers",
+  "offer-claim",
 ]);
 
 type ChallengeRecord = {

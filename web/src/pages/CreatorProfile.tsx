@@ -15,6 +15,7 @@ import {
   TIP_CONTRACT_ADDRESS,
 } from "../lib/contracts";
 import { creatorAvatarUrl, localInitialsAvatar } from "../lib/avatar";
+import { conditionLabel, offerTypeLabel, type CreatorOffer } from "../lib/creatorOffers";
 
 type ProfileSupporter = {
   address: string | null;
@@ -166,6 +167,8 @@ export default function CreatorProfile() {
   const [tipError, setTipError] = useState<string | null>(null);
   const [tipSuccess, setTipSuccess] = useState(false);
   const [shareCopied, setShareCopied] = useState(false);
+  const [creatorOffers, setCreatorOffers] = useState<CreatorOffer[]>([]);
+  const [selectedOffer, setSelectedOffer] = useState<CreatorOffer | null>(null);
   const [rechargeRetryStatus, setRechargeRetryStatus] = useState<"idle" | "checking" | "insufficient">("idle");
   const [rechargeRetryMessage, setRechargeRetryMessage] = useState<string | null>(null);
 
@@ -186,6 +189,20 @@ export default function CreatorProfile() {
       .then((payload: Profile) => setProfile(payload))
       .catch((reason) => setError(reason instanceof Error ? reason.message : "Creator profile is unavailable"))
       .finally(() => setLoading(false));
+  }, [cleanUsername]);
+
+  useEffect(() => {
+    if (!cleanUsername) return;
+    let cancelled = false;
+    fetch(`${API_BASE}/offers/public/${encodeURIComponent(cleanUsername)}`)
+      .then((response) => response.ok ? response.json() : null)
+      .then((payload) => {
+        if (!cancelled) setCreatorOffers(Array.isArray(payload?.offers) ? payload.offers : []);
+      })
+      .catch(() => {
+        if (!cancelled) setCreatorOffers([]);
+      });
+    return () => { cancelled = true; };
   }, [cleanUsername]);
 
   useEffect(() => {
@@ -466,6 +483,17 @@ export default function CreatorProfile() {
     [amountNumber],
   );
 
+  const selectCreatorOffer = useCallback((offer: CreatorOffer) => {
+    setSelectedOffer(offer);
+    setTipAmount(Number(offer.condition.thresholdUsd).toFixed(2));
+    setTipError(null);
+    setTipSuccess(false);
+    window.requestAnimationFrame(() => {
+      document.getElementById("creator-tip-amount")?.focus({ preventScroll: true });
+      document.querySelector(".creator-public-tip-panel")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  }, []);
+
   if (loading) {
     return (
       <div className="creator-public-page creator-public-page--loading" aria-busy="true">
@@ -575,6 +603,39 @@ export default function CreatorProfile() {
                 <span>People backing this creator</span>
               </div>
             </section>
+
+            {creatorOffers.length > 0 && (
+              <section className="creator-public-section creator-public-offers" aria-labelledby="creator-offers-title">
+                <div className="creator-public-section-heading">
+                  <div>
+                    <h2 id="creator-offers-title">Creator Offers</h2>
+                    <p>See what your support can unlock before you tip.</p>
+                  </div>
+                  <span><span className="material-symbols-outlined" aria-hidden>redeem</span>{creatorOffers.length} available</span>
+                </div>
+                <div className="creator-public-offer-grid">
+                  {creatorOffers.map((offer) => (
+                    <article className="creator-public-offer" key={offer.id}>
+                      <div className="creator-public-offer-head">
+                        <span className="material-symbols-outlined" aria-hidden>{offer.offerType === "CODE" ? "confirmation_number" : offer.offerType === "LINK" ? "link" : "key"}</span>
+                        <div><small>{offerTypeLabel(offer.offerType)}</small><h3>{offer.name}</h3></div>
+                      </div>
+                      <p>{offer.description}</p>
+                      <div className="creator-public-offer-meta">
+                        <span><span className="material-symbols-outlined" aria-hidden>payments</span>{conditionLabel(offer)}</span>
+                        {offer.inventory.remaining !== null && <span><span className="material-symbols-outlined" aria-hidden>group</span>{offer.inventory.remaining} left</span>}
+                        {offer.endsAt && <span><span className="material-symbols-outlined" aria-hidden>schedule</span>Ends {new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(new Date(offer.endsAt))}</span>}
+                      </div>
+                      {offer.condition.type === "SPECIFIC_X_POST_MINIMUM" && offer.condition.postId ? <a href={`https://x.com/${profile.username}/status/${offer.condition.postId}`} target="_blank" rel="noopener noreferrer">View the qualifying X post<span className="material-symbols-outlined" aria-hidden>arrow_outward</span></a> : <button type="button" onClick={() => selectCreatorOffer(offer)}>
+                        Tip ${Number(offer.condition.thresholdUsd).toFixed(2)} to unlock
+                        <span className="material-symbols-outlined" aria-hidden>arrow_forward</span>
+                      </button>}
+                      <Link className="creator-public-offer-report" to={`/support?topic=creator-offer&offer=${encodeURIComponent(offer.id)}&creator=${encodeURIComponent(profile.username)}`}><span className="material-symbols-outlined" aria-hidden>flag</span>Report offer</Link>
+                    </article>
+                  ))}
+                </div>
+              </section>
+            )}
 
             <section className="creator-public-section" aria-labelledby="supported-posts-title">
               <div className="creator-public-section-heading">
@@ -743,6 +804,7 @@ export default function CreatorProfile() {
                   </button>
                 ))}
               </div>
+              {selectedOffer && <div className={`creator-public-offer-check ${selectedOffer.condition.type === "SINGLE_TIP_MINIMUM" && amountNumber < Number(selectedOffer.condition.thresholdUsd) ? "is-warning" : "is-ready"}`} role="status"><span className="material-symbols-outlined" aria-hidden>{selectedOffer.condition.type === "SINGLE_TIP_MINIMUM" && amountNumber < Number(selectedOffer.condition.thresholdUsd) ? "info" : "redeem"}</span><span><strong>{selectedOffer.name}</strong><small>{selectedOffer.condition.type === "CUMULATIVE_TIPS_MINIMUM" ? "Your confirmed support adds up over time toward this offer." : amountNumber >= Number(selectedOffer.condition.thresholdUsd) ? "This amount meets the offer's unlock minimum." : `This offer unlocks with one tip of $${Number(selectedOffer.condition.thresholdUsd).toFixed(2)} or more.`}</small></span></div>}
               <button className="btn-primary creator-public-tip-submit" type="button" onClick={prepareTip}>
                 Tip creator
                 <span className="material-symbols-outlined" aria-hidden>arrow_forward</span>
@@ -769,7 +831,7 @@ export default function CreatorProfile() {
 
       <div className="creator-public-mobile-tip">
         <label className="creator-public-mobile-amount" htmlFor="creator-mobile-tip-amount">
-          <small>Tip {creatorName}</small>
+          <small>{selectedOffer ? selectedOffer.condition.type === "CUMULATIVE_TIPS_MINIMUM" ? `${selectedOffer.name} · support adds up` : amountNumber >= Number(selectedOffer.condition.thresholdUsd) ? `${selectedOffer.name} · minimum met` : `${selectedOffer.name} · needs $${Number(selectedOffer.condition.thresholdUsd).toFixed(2)}` : `Tip ${creatorName}`}</small>
           <span>
             <span aria-hidden>$</span>
             <input

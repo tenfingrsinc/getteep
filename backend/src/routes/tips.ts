@@ -9,6 +9,7 @@ import { getAccountActivity } from "../services/accountActivity";
 import { verifyWalletProof } from "../services/walletAuth";
 import { publishDashboardUpdate } from "../services/dashboardUpdates";
 import { invalidateDisplayUsdcBalances } from "../services/balanceSnapshots";
+import { requeueOfferEvaluationsForContent } from "../services/creatorOffers";
 
 const router = Router();
 
@@ -23,6 +24,7 @@ type XBotTipReceiptRow = {
   source_tweet_id: string;
   receipt_id: string;
   tx_hash: string | null;
+  status: string;
   created_at: number;
   tip_kind?: string | null;
   content_id?: string | null;
@@ -174,7 +176,7 @@ async function buildXBotReceiptPayload(db: ReturnType<typeof getDb>, row: XBotTi
     tweetAuthorProfileImageUrl: row.context_author_profile_image_url || null,
     tweetId,
     source: "x_bot",
-    status: "completed",
+    status: row.status,
     creatorClaimStatus: creatorState.creatorClaimStatus,
     creatorVerified: creatorState.creatorVerified,
     creatorOwnerAddress: creatorState.creatorOwnerAddress,
@@ -340,7 +342,7 @@ router.get("/receipt/x/:receiptId", async (req: Request, res: Response) => {
   const row = await db
     .prepare(
       `SELECT sender_address, recipient_address, recipient_x_user_id, recipient_x_username,
-              amount_raw, source_tweet_id, receipt_id, tx_hash, created_at,
+              amount_raw, source_tweet_id, receipt_id, tx_hash, status, created_at,
               COALESCE(tip_kind, 'direct_creator_tip') as tip_kind,
               content_id, context_tweet_id, context_author_id, context_author_username,
               context_author_name, context_author_profile_image_url
@@ -383,7 +385,7 @@ router.get("/receipt/:txHash", async (req: Request, res: Response) => {
   const xBotTip = await db
     .prepare(
       `SELECT sender_address, recipient_address, recipient_x_user_id, recipient_x_username,
-              amount_raw, source_tweet_id, receipt_id, tx_hash, created_at,
+              amount_raw, source_tweet_id, receipt_id, tx_hash, status, created_at,
               COALESCE(tip_kind, 'direct_creator_tip') as tip_kind,
               content_id, context_tweet_id, context_author_id, context_author_username,
               context_author_name, context_author_profile_image_url
@@ -760,6 +762,7 @@ router.post("/metadata", async (req: Request, res: Response) => {
        VALUES (?, ?, ?, ?)
        ON CONFLICT (content_id) DO NOTHING`
     ).run(contentId.toLowerCase(), handle, normalizedTweetId || "", metadataKind);
+    await requeueOfferEvaluationsForContent(contentId.toLowerCase());
     res.json({ success: true });
   } catch (err: any) {
     console.error("[Tips] Error storing metadata:", err);

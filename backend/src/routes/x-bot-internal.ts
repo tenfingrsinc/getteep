@@ -2,6 +2,7 @@ import { Router, Request, Response } from "express";
 import crypto from "crypto";
 import { processIncomingPost, recordXReplyDelivery } from "../services/xBot/processPost";
 import type { XIncomingPost } from "../services/xBot/types";
+import { claimPendingOfferXNotification, recordOfferXNotificationResult } from "../services/creatorOffers";
 
 const router = Router();
 
@@ -77,6 +78,34 @@ router.post("/reply-result", async (req: Request, res: Response) => {
   } catch (err: unknown) {
     console.error("[XBot] reply-result failed:", err);
     res.status(500).json({ error: "Failed to record reply result" });
+  }
+});
+
+router.post("/offer-replies/claim", async (req: Request, res: Response) => {
+  if (!requireAgentToken(req, res)) return;
+  try {
+    res.json({ notification: await claimPendingOfferXNotification() || null });
+  } catch (err: unknown) {
+    console.error("[XBot] offer reply claim failed:", err);
+    res.status(500).json({ error: "Failed to claim offer reply" });
+  }
+});
+
+router.post("/offer-replies/result", async (req: Request, res: Response) => {
+  if (!requireAgentToken(req, res)) return;
+  const id = typeof req.body?.id === "string" ? req.body.id : "";
+  const replyTweetId = typeof req.body?.replyTweetId === "string" ? req.body.replyTweetId : undefined;
+  const error = typeof req.body?.error === "string" ? req.body.error : undefined;
+  if (!/^[0-9a-f-]{36}$/i.test(id) || (replyTweetId && !/^\d+$/.test(replyTweetId)) || (!replyTweetId && !error)) {
+    res.status(400).json({ error: "Invalid offer reply result payload" });
+    return;
+  }
+  try {
+    await recordOfferXNotificationResult({ id, replyTweetId, error });
+    res.json({ ok: true });
+  } catch (err: unknown) {
+    console.error("[XBot] offer reply result failed:", err);
+    res.status(500).json({ error: "Failed to record offer reply result" });
   }
 });
 

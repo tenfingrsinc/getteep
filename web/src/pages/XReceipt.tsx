@@ -44,15 +44,38 @@ export default function XReceipt() {
       setLoading(false);
       return;
     }
-    setLoading(true);
-    fetch(`${API_BASE}/tips/receipt/x/${receiptId}`, { headers: { Accept: "application/json" } })
-      .then((response) => {
+    let cancelled = false;
+    let hasLoaded = false;
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    const loadReceipt = async () => {
+      try {
+        const response = await fetch(`${API_BASE}/tips/receipt/x/${receiptId}`, {
+          headers: { Accept: "application/json" },
+          cache: "no-store",
+        });
         if (!response.ok) throw new Error(response.status === 404 ? "Receipt not found." : "Could not load receipt.");
-        return response.json();
-      })
-      .then((payload) => setData(payload))
-      .catch((err) => setError(err instanceof Error ? err.message : "Could not load receipt."))
-      .finally(() => setLoading(false));
+        const payload = await response.json() as XReceiptData;
+        if (cancelled) return;
+        hasLoaded = true;
+        setData(payload);
+        setError("");
+        if (payload.status === "submitted") refreshTimer = setTimeout(() => void loadReceipt(), 5_000);
+      } catch (err) {
+        if (!cancelled && !hasLoaded) {
+          setError(err instanceof Error ? err.message : "Could not load receipt.");
+        } else if (!cancelled && hasLoaded) {
+          refreshTimer = setTimeout(() => void loadReceipt(), 5_000);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    setLoading(true);
+    void loadReceipt();
+    return () => {
+      cancelled = true;
+      if (refreshTimer) clearTimeout(refreshTimer);
+    };
   }, [receiptId]);
 
   const amount = data ? formatUsdRaw(data.amount) : "0.00";
@@ -62,8 +85,10 @@ export default function XReceipt() {
   const tweetUrl = tweetAuthorHandle && data?.tweetId ? `https://x.com/${tweetAuthorHandle}/status/${data.tweetId.split(":")[0]}` : "";
   const date = data ? new Date(data.timestamp * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "";
   const completed = data?.status === "completed";
+  const submitted = data?.status === "submitted";
+  const failed = data?.status === "failed";
 
-  if (data?.txHash) {
+  if (completed && data?.txHash) {
     return <Navigate to={`/tx/${data.txHash}`} replace />;
   }
 
@@ -100,10 +125,12 @@ export default function XReceipt() {
             <div className="tx-receipt-hero">
               <div className="tx-receipt-success-icon">
                 <span className="material-symbols-outlined" aria-hidden style={{ fontSize: 40 }}>
-                  {completed ? "check_circle" : "schedule"}
+                  {completed ? "check_circle" : failed ? "error" : "schedule"}
                 </span>
               </div>
-              <h1 className="tx-receipt-title">{completed ? "X Tip Sent" : "X Tip Reserved"}</h1>
+              <h1 className="tx-receipt-title">
+                {completed ? "X Tip Sent" : submitted ? "X Tip Submitted" : failed ? "Tip Not Confirmed" : "X Tip Reserved"}
+              </h1>
               <p className="tx-receipt-line">
                 <span className="tx-receipt-handle">{shortAddress(data.fromAddress)}</span> tipped{" "}
                 <span className="tx-receipt-handle">{creator}</span>
@@ -127,7 +154,11 @@ export default function XReceipt() {
               <p className="tx-receipt-tweet-snippet">
                 {completed
                   ? "This X tip has been processed by Teep."
-                  : "This X tip is waiting for the creator to connect Teep."}
+                  : submitted
+                    ? "The transaction was submitted to Arc. Confirmation is delayed; Teep will update this receipt automatically. Do not send the command again."
+                    : failed
+                      ? "The transaction could not be confirmed. Check your Teep activity and balance before sending another tip."
+                      : "This X tip is waiting for the creator to connect Teep."}
               </p>
               {tweetUrl && (
                 <a href={tweetUrl} target="_blank" rel="noopener noreferrer" style={{ fontSize: 12, color: "var(--accent)" }}>
@@ -136,7 +167,7 @@ export default function XReceipt() {
               )}
             </div>
 
-            {!completed && (
+            {!completed && !submitted && !failed && (
               <div className="tx-receipt-claim-card">
                 <h3 className="tx-receipt-claim-title">
                   <span className="material-symbols-outlined" aria-hidden style={{ color: "var(--accent)", fontSize: 28 }}>

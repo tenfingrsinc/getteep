@@ -27,6 +27,9 @@ import GrowTips from "./pages/GrowTipsLive";
 import AdminOps from "./pages/AdminOps";
 import NotFound from "./pages/NotFound";
 import TxReceipt from "./pages/TxReceipt";
+import CreatorOffers from "./pages/CreatorOffers";
+import SupporterOffers from "./pages/SupporterOffers";
+import OfferClaim from "./pages/OfferClaim";
 import { useAccountRole } from "./context/AccountRoleContext";
 import { DashboardPreparingPage } from "./components/DashboardAuthState";
 import { API_BASE } from "./config";
@@ -45,6 +48,7 @@ const RESERVED_TOP_LEVEL_ROUTES = new Set([
   "leaderboard",
   "milestones",
   "ops",
+  "offers",
   "privacy",
   "profile",
   "referral",
@@ -154,6 +158,7 @@ export default function App() {
         <Route path="/dashboard/referrals" element={<DashboardReferral />} />
         <Route path="/dashboard/settings" element={<DashboardSettings />} />
         <Route path="/dashboard/grow-tips" element={<GrowTips />} />
+        <Route path="/dashboard/offers" element={<SupporterOffers />} />
         <Route path="/creator/dashboard" element={<CreatorDashboardHome />} />
         <Route path="/creator/withdraw" element={<DashboardWithdraw />} />
         <Route path="/creator/settings" element={<DashboardSettings />} />
@@ -162,6 +167,8 @@ export default function App() {
         <Route path="/creator/grow/earn" element={<GrowTips />} />
         <Route path="/creator/grow/learn" element={<CreatorGrowLearn />} />
         <Route path="/creator/grow/settings" element={<CreatorGrowSettings />} />
+        <Route path="/creator/offers" element={<CreatorOffers />} />
+        <Route path="/offers/claim/:token" element={<OfferClaim />} />
         <Route path="/t/:handle/:tweetId" element={<TipPost />} />
         <Route path="/creator/:username" element={<CreatorProfile />} />
         <Route path="/profile/creator/:username" element={<LegacyCreatorProfileRedirect />} />

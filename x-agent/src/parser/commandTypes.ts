@@ -34,10 +34,11 @@ export type XIncomingPost = {
 
 export type ProcessPostResult = {
   tweetId: string;
-  status: "completed" | "failed" | "ignored";
+  status: "completed" | "submitted" | "failed" | "ignored";
   code?: string;
   replyText?: string;
   receiptId?: string;
+  txHash?: string;
   originalStatus?: string;
   originalReason?: string;
   replyDeliveryStatus?: string;

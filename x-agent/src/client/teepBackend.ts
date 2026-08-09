@@ -39,3 +39,29 @@ export async function reportReplyResult(params: {
     throw new Error(`Backend reply-result failed: HTTP ${response.status} ${body.slice(0, 300)}`);
   }
 }
+
+export async function claimPendingOfferReply(): Promise<{
+  id: string;
+  sourceTweetId: string;
+  replyText: string;
+} | null> {
+  const response = await fetch(`${config.backendUrl}/internal/x-bot/offer-replies/claim`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-agent-token": config.agentToken },
+    body: "{}",
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!response.ok) throw new Error(`Backend offer-reply claim failed: HTTP ${response.status}`);
+  const payload = await response.json() as { notification?: { id: string; sourceTweetId: string; replyText: string } | null };
+  return payload.notification || null;
+}
+
+export async function reportOfferReplyResult(params: { id: string; replyTweetId?: string; error?: string }) {
+  const response = await fetch(`${config.backendUrl}/internal/x-bot/offer-replies/result`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-agent-token": config.agentToken },
+    body: JSON.stringify(params),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!response.ok) throw new Error(`Backend offer-reply result failed: HTTP ${response.status}`);
+}

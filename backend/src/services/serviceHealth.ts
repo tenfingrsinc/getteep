@@ -12,6 +12,26 @@ export type ServiceHealthRecord = {
   updatedAt: number;
 };
 
+export type EffectiveServiceHealthRecord = ServiceHealthRecord & {
+  ageMs: number;
+  stale: boolean;
+};
+
+export function applyServiceHealthFreshness(
+  service: ServiceHealthRecord,
+  now: number,
+  maxStaleMs: number
+): EffectiveServiceHealthRecord {
+  const ageMs = Math.max(0, now - service.updatedAt);
+  const stale = ageMs > maxStaleMs;
+  return {
+    ...service,
+    status: stale && service.status === "healthy" ? "degraded" : service.status,
+    ageMs,
+    stale,
+  };
+}
+
 const failureThreshold = Math.max(1, Number(process.env.SERVICE_OFFLINE_FAILURE_THRESHOLD || 3));
 const consecutiveFailures = new Map<string, number>();
 

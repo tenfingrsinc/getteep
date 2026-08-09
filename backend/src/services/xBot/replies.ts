@@ -100,14 +100,60 @@ export function buildFailureReply(reason: string) {
   return lines.join("\n");
 }
 
+export function buildSubmittedReply(params: {
+  recipientHandle: string;
+  amountRaw: bigint;
+  receiptId: string;
+}) {
+  const recipient = `@${params.recipientHandle.replace(/^@/, "")}`;
+  return [
+    "Tip submitted",
+    "",
+    `${formatUsdcRaw(params.amountRaw)} USD was submitted for ${recipient}.`,
+    "",
+    "Arc confirmation is taking longer than usual. Don't send this command again; Teep will update the receipt automatically.",
+    "",
+    `Track: ${RECEIPT_BASE_URL}/x/${params.receiptId}`,
+  ].join("\n");
+}
+
+export function buildUncertainSubmissionReply() {
+  return [
+    "Tip status uncertain",
+    "",
+    "Teep couldn't confirm whether Arc received this command.",
+    "",
+    "Don't send it again yet. Check your Teep balance and activity first.",
+  ].join("\n");
+}
+
 export function buildAlreadyProcessedReply(params: {
   status: string;
   reason?: string | null;
   receiptId?: string | null;
 }) {
-  if (params.receiptId) {
+  if (params.receiptId && params.status === "submitted") {
+    return [
+      "This tip was already submitted.",
+      "",
+      "Arc confirmation is still pending. Don't send this command again.",
+      "",
+      `Track: ${RECEIPT_BASE_URL}/x/${params.receiptId}`,
+    ].join("\n");
+  }
+  if (params.receiptId && params.status === "completed") {
     return [
       "This command was already completed.",
+      "",
+      `Receipt: ${RECEIPT_BASE_URL}/x/${params.receiptId}`,
+    ].join("\n");
+  }
+
+  if (params.receiptId && params.status === "failed") {
+    return [
+      "This command was already checked.",
+      "",
+      "The submitted transaction was not confirmed.",
       "",
       `Receipt: ${RECEIPT_BASE_URL}/x/${params.receiptId}`,
     ].join("\n");
