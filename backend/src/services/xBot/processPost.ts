@@ -19,6 +19,7 @@ import { amountToRaw, classifyIgnoredMention, formatUsdcRaw, parseTipCommand } f
 import {
   buildBalanceReply,
   buildBatchSuccessReply,
+  buildAlreadyProcessedReply,
   buildClaimableReply,
   buildConnectReply,
   buildFailureReply,
@@ -116,19 +117,123 @@ async function markProcessed(
   authorXUserId: string,
   status: string,
   reason?: string,
-  receiptId?: string
+  receiptId?: string,
+  replyText?: string
 ) {
   const db = getDb();
   const now = nowMs();
+  const replyStatus = replyText ? "pending" : "not_required";
   await db.prepare(
-    `INSERT INTO processed_x_posts (tweet_id, author_x_user_id, status, reason, receipt_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO processed_x_posts (
+       tweet_id, author_x_user_id, status, reason, receipt_id,
+       reply_text, reply_status, created_at, updated_at
+     )
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(tweet_id) DO UPDATE SET
        status = excluded.status,
        reason = excluded.reason,
-       receipt_id = excluded.receipt_id,
+       receipt_id = COALESCE(excluded.receipt_id, processed_x_posts.receipt_id),
+       reply_text = COALESCE(excluded.reply_text, processed_x_posts.reply_text),
+       reply_status = CASE
+         WHEN processed_x_posts.reply_tweet_id IS NOT NULL THEN 'delivered'
+         WHEN excluded.reply_text IS NOT NULL THEN 'pending'
+         ELSE processed_x_posts.reply_status
+       END,
        updated_at = excluded.updated_at`
-  ).run(tweetId, authorXUserId, status, reason ?? null, receiptId ?? null, now, now);
+  ).run(
+    tweetId,
+    authorXUserId,
+    status,
+    reason ?? null,
+    receiptId ?? null,
+    replyText ?? null,
+    replyStatus,
+    now,
+    now
+  );
+}
+
+type ProcessedPostRow = {
+  status: string;
+  reason: string | null;
+  receipt_id: string | null;
+  reply_text: string | null;
+  reply_status: string;
+  reply_tweet_id: string | null;
+  updated_at: number | string;
+};
+
+async function claimPostForProcessing(tweetId: string, authorXUserId: string) {
+  const db = getDb();
+  const now = nowMs();
+  const inserted = await db.prepare(
+    `INSERT INTO processed_x_posts (
+       tweet_id, author_x_user_id, status, reply_status, created_at, updated_at
+     )
+     VALUES (?, ?, 'processing', 'not_required', ?, ?)
+     ON CONFLICT(tweet_id) DO NOTHING
+     RETURNING tweet_id`
+  ).get<{ tweet_id: string }>(tweetId, authorXUserId, now, now);
+  if (inserted) return { claimed: true as const };
+
+  let existing = await db.prepare(
+    `SELECT status, reason, receipt_id, reply_text, reply_status, reply_tweet_id, updated_at
+     FROM processed_x_posts WHERE tweet_id = ?`
+  ).get<ProcessedPostRow>(tweetId);
+  if (!existing) return { claimed: false as const, existing: undefined };
+
+  const isStaleProcessing =
+    existing.status === "processing" && now - Number(existing.updated_at) > PROCESSING_STALE_MS;
+  if (isStaleProcessing) {
+    const reclaimed = await db.prepare(
+      `UPDATE processed_x_posts
+       SET author_x_user_id = ?, status = 'processing', reason = NULL, updated_at = ?
+       WHERE tweet_id = ? AND status = 'processing' AND updated_at = ?
+       RETURNING tweet_id`
+    ).get<{ tweet_id: string }>(authorXUserId, now, tweetId, existing.updated_at);
+    if (reclaimed) return { claimed: true as const };
+    existing = await db.prepare(
+      `SELECT status, reason, receipt_id, reply_text, reply_status, reply_tweet_id, updated_at
+       FROM processed_x_posts WHERE tweet_id = ?`
+    ).get<ProcessedPostRow>(tweetId);
+  }
+
+  return { claimed: false as const, existing };
+}
+
+async function ensurePendingReply(tweetId: string, replyText: string) {
+  await getDb().prepare(
+    `UPDATE processed_x_posts
+     SET reply_text = COALESCE(reply_text, ?),
+         reply_status = CASE WHEN reply_tweet_id IS NULL THEN 'pending' ELSE 'delivered' END,
+         updated_at = ?
+     WHERE tweet_id = ?`
+  ).run(replyText, nowMs(), tweetId);
+}
+
+export async function recordXReplyDelivery(params: {
+  tweetId: string;
+  replyTweetId?: string;
+  error?: string;
+}) {
+  const delivered = Boolean(params.replyTweetId);
+  if (delivered) {
+    await getDb().prepare(
+      `UPDATE processed_x_posts
+       SET reply_status = 'delivered', reply_tweet_id = ?, reply_error = NULL,
+           reply_attempts = reply_attempts + 1, replied_at = ?, updated_at = ?
+       WHERE tweet_id = ?`
+    ).run(params.replyTweetId, nowMs(), nowMs(), params.tweetId);
+    return;
+  }
+
+  await getDb().prepare(
+    `UPDATE processed_x_posts
+     SET reply_status = CASE WHEN reply_tweet_id IS NULL THEN 'failed' ELSE 'delivered' END,
+         reply_error = CASE WHEN reply_tweet_id IS NULL THEN ? ELSE reply_error END,
+         reply_attempts = reply_attempts + 1, updated_at = ?
+     WHERE tweet_id = ?`
+  ).run((params.error || "Unknown X reply failure").slice(0, 1000), nowMs(), params.tweetId);
 }
 
 async function resolveSender(authorId: string): Promise<SenderAccount | null> {
@@ -340,18 +445,31 @@ export async function processIncomingPost(post: XIncomingPost): Promise<ProcessP
     return { tweetId: post.id, status: "ignored", code: "BOT_SELF_POST" };
   }
 
-  const existing = await db
-    .prepare(`SELECT status, updated_at FROM processed_x_posts WHERE tweet_id = ?`)
-    .get(post.id) as { status: string; updated_at: number } | undefined;
-  if (existing) {
-    const isStaleProcessing =
-      existing.status === "processing" && nowMs() - Number(existing.updated_at) > PROCESSING_STALE_MS;
-    if (!isStaleProcessing) {
-      return { tweetId: post.id, status: "ignored", code: "ALREADY_PROCESSED" };
+  const claim = await claimPostForProcessing(post.id, post.authorId);
+  if (!claim.claimed) {
+    const existing = claim.existing;
+    const needsReply = Boolean(existing && !existing.reply_tweet_id && existing.reply_status !== "delivered");
+    const replyText = needsReply
+      ? existing?.reply_text || buildAlreadyProcessedReply({
+          status: existing?.status || "unknown",
+          reason: existing?.reason,
+          receiptId: existing?.receipt_id,
+        })
+      : undefined;
+    if (replyText && existing && !existing.reply_text) {
+      await ensurePendingReply(post.id, replyText);
     }
+    return {
+      tweetId: post.id,
+      status: "ignored",
+      code: "ALREADY_PROCESSED",
+      replyText,
+      receiptId: existing?.receipt_id || undefined,
+      originalStatus: existing?.status,
+      originalReason: existing?.reason || undefined,
+      replyDeliveryStatus: existing?.reply_status,
+    };
   }
-
-  await markProcessed(post.id, post.authorId, "processing");
 
   const command = parseTipCommand(post.text);
   if (!command) {
@@ -362,13 +480,13 @@ export async function processIncomingPost(post: XIncomingPost): Promise<ProcessP
 
   if (command.type === "HELP") {
     const replyText = buildHelpReply();
-    await markProcessed(post.id, post.authorId, "completed", "HELP");
+    await markProcessed(post.id, post.authorId, "completed", "HELP", undefined, replyText);
     return { tweetId: post.id, status: "completed", replyText };
   }
 
   if (command.type === "INVALID_COMMAND") {
     const replyText = buildInvalidCommandReply(command.reason);
-    await markProcessed(post.id, post.authorId, "failed", command.reason);
+    await markProcessed(post.id, post.authorId, "failed", command.reason, undefined, replyText);
     return { tweetId: post.id, status: "failed", code: command.reason, replyText };
   }
 
@@ -376,24 +494,24 @@ export async function processIncomingPost(post: XIncomingPost): Promise<ProcessP
     const sender = await resolveSender(post.authorId);
     if (!sender) {
       const replyText = buildConnectReply(post.authorUsername, { tweetId: post.id, intent: "x-balance" });
-      await markProcessed(post.id, post.authorId, "failed", "SENDER_NOT_REGISTERED");
+      await markProcessed(post.id, post.authorId, "failed", "SENDER_NOT_REGISTERED", undefined, replyText);
       return { tweetId: post.id, status: "failed", code: "SENDER_NOT_REGISTERED", replyText };
     }
     const balance = await getOnchainTeepBalance(sender.userAddress);
     const replyText = buildBalanceReply(sender.xUsername, balance);
-    await markProcessed(post.id, post.authorId, "completed", "BALANCE");
+    await markProcessed(post.id, post.authorId, "completed", "BALANCE", undefined, replyText);
     return { tweetId: post.id, status: "completed", replyText };
   }
 
   const sender = await resolveSender(post.authorId);
   if (!sender) {
     const replyText = buildConnectReply(post.authorUsername, firstIntentContext(post, command.tips[0]));
-    await markProcessed(post.id, post.authorId, "failed", "SENDER_NOT_REGISTERED");
+    await markProcessed(post.id, post.authorId, "failed", "SENDER_NOT_REGISTERED", undefined, replyText);
     return { tweetId: post.id, status: "failed", code: "SENDER_NOT_REGISTERED", replyText };
   }
   if (command.tips.length > 1) {
     const replyText = buildFailureReply("Send one X tip command at a time.");
-    await markProcessed(post.id, post.authorId, "failed", "BATCH_NOT_SUPPORTED");
+    await markProcessed(post.id, post.authorId, "failed", "BATCH_NOT_SUPPORTED", undefined, replyText);
     return { tweetId: post.id, status: "failed", code: "BATCH_NOT_SUPPORTED", replyText };
   }
 
@@ -405,7 +523,7 @@ export async function processIncomingPost(post: XIncomingPost): Promise<ProcessP
       amountsRaw.push(amountToRaw(intent.amount));
     } catch {
       const replyText = buildFailureReply("Invalid tip amount.");
-      await markProcessed(post.id, post.authorId, "failed", "INVALID_AMOUNT");
+      await markProcessed(post.id, post.authorId, "failed", "INVALID_AMOUNT", undefined, replyText);
       return { tweetId: post.id, status: "failed", code: "INVALID_AMOUNT", replyText };
     }
   }
@@ -416,7 +534,7 @@ export async function processIncomingPost(post: XIncomingPost): Promise<ProcessP
       validation.code === "INSUFFICIENT_BALANCE"
         ? buildInsufficientBalanceReply(sender.xUsername, firstIntentContext(post, command.tips[0]))
         : buildFailureReply(validation.reason);
-    await markProcessed(post.id, post.authorId, "failed", validation.code);
+    await markProcessed(post.id, post.authorId, "failed", validation.code, undefined, replyText);
     return { tweetId: post.id, status: "failed", code: validation.code, replyText };
   }
 
@@ -425,26 +543,26 @@ export async function processIncomingPost(post: XIncomingPost): Promise<ProcessP
     const intent = command.tips[index];
     if (intent.targetType === "post" && (!post.parentTweetId || !post.parentAuthorId || !post.parentAuthorUsername)) {
       const replyText = buildFailureReply("Reply to the post you want to tip, then use @teepagent tip this post $2.");
-      await markProcessed(post.id, post.authorId, "failed", "MISSING_POST_CONTEXT");
+      await markProcessed(post.id, post.authorId, "failed", "MISSING_POST_CONTEXT", undefined, replyText);
       return { tweetId: post.id, status: "failed", code: "MISSING_POST_CONTEXT", replyText };
     }
 
     const recipient = await resolveRecipient(intent, post);
     if (!recipient) {
       const replyText = buildFailureReply("I couldn't find that creator on X.");
-      await markProcessed(post.id, post.authorId, "failed", "RECIPIENT_NOT_FOUND");
+      await markProcessed(post.id, post.authorId, "failed", "RECIPIENT_NOT_FOUND", undefined, replyText);
       return { tweetId: post.id, status: "failed", code: "RECIPIENT_NOT_FOUND", replyText };
     }
     if (recipient.userAddress && recipient.userAddress === sender.userAddress) {
       const replyText = buildFailureReply("You can't tip yourself.");
-      await markProcessed(post.id, post.authorId, "failed", "SELF_TIP");
+      await markProcessed(post.id, post.authorId, "failed", "SELF_TIP", undefined, replyText);
       return { tweetId: post.id, status: "failed", code: "SELF_TIP", replyText };
     }
 
     const context = getTipContext({ intent, post, recipient, sender });
     if (!context) {
       const replyText = buildFailureReply("I couldn't identify the post to tip.");
-      await markProcessed(post.id, post.authorId, "failed", "MISSING_POST_CONTEXT");
+      await markProcessed(post.id, post.authorId, "failed", "MISSING_POST_CONTEXT", undefined, replyText);
       return { tweetId: post.id, status: "failed", code: "MISSING_POST_CONTEXT", replyText };
     }
 
@@ -553,7 +671,14 @@ export async function processIncomingPost(post: XIncomingPost): Promise<ProcessP
             amountRaw: only.amountRaw,
             receiptId: only.receiptId,
           });
-      await markProcessed(post.id, post.authorId, "completed", reserved.length ? "CLAIMABLE" : undefined, firstReceiptId);
+      await markProcessed(
+        post.id,
+        post.authorId,
+        "completed",
+        reserved.length ? "CLAIMABLE" : undefined,
+        firstReceiptId,
+        replyText
+      );
       return { tweetId: post.id, status: "completed", replyText, receiptId: firstReceiptId };
     }
 
@@ -570,7 +695,14 @@ export async function processIncomingPost(post: XIncomingPost): Promise<ProcessP
         receiptId: tip.receiptId,
       })),
     });
-    await markProcessed(post.id, post.authorId, "completed", reserved.length ? "BATCH_WITH_CLAIMABLE" : "BATCH", firstReceiptId);
+    await markProcessed(
+      post.id,
+      post.authorId,
+      "completed",
+      reserved.length ? "BATCH_WITH_CLAIMABLE" : "BATCH",
+      firstReceiptId,
+      replyText
+    );
     return { tweetId: post.id, status: "completed", replyText, receiptId: firstReceiptId };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "UNKNOWN";
@@ -578,7 +710,7 @@ export async function processIncomingPost(post: XIncomingPost): Promise<ProcessP
       message === "INSUFFICIENT_BALANCE"
         ? buildInsufficientBalanceReply(sender.xUsername, firstIntentContext(post, command.tips[0]))
         : buildFailureReply("Something went wrong sending this tip.");
-    await markProcessed(post.id, post.authorId, "failed", message);
+    await markProcessed(post.id, post.authorId, "failed", message, undefined, replyText);
     return { tweetId: post.id, status: "failed", code: message, replyText };
   }
 }

@@ -100,6 +100,31 @@ export function buildFailureReply(reason: string) {
   return lines.join("\n");
 }
 
+export function buildAlreadyProcessedReply(params: {
+  status: string;
+  reason?: string | null;
+  receiptId?: string | null;
+}) {
+  if (params.receiptId) {
+    return [
+      "This command was already completed.",
+      "",
+      `Receipt: ${RECEIPT_BASE_URL}/x/${params.receiptId}`,
+    ].join("\n");
+  }
+
+  const outcome = params.reason
+    ? `Previous result: ${params.reason.replaceAll("_", " ").toLowerCase()}.`
+    : `Previous status: ${params.status.toLowerCase()}.`;
+  return [
+    "This command was already checked.",
+    "",
+    outcome,
+    "",
+    "Send a new tip command if you still want to try again.",
+  ].join("\n");
+}
+
 export function buildInvalidCommandReply(reason: "MISSING_AMOUNT" | "MISSING_RECIPIENT" | "UNSUPPORTED_ASSET" | "MALFORMED") {
   const reasonText =
     reason === "MISSING_AMOUNT"

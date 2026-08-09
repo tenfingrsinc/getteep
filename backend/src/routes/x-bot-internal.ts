@@ -1,6 +1,6 @@
 import { Router, Request, Response } from "express";
 import crypto from "crypto";
-import { processIncomingPost } from "../services/xBot/processPost";
+import { processIncomingPost, recordXReplyDelivery } from "../services/xBot/processPost";
 import type { XIncomingPost } from "../services/xBot/types";
 
 const router = Router();
@@ -53,6 +53,30 @@ router.post("/process-post", async (req: Request, res: Response) => {
   } catch (err: unknown) {
     console.error("[XBot] process-post failed:", err);
     res.status(500).json({ error: "Failed to process post" });
+  }
+});
+
+/**
+ * POST /internal/x-bot/reply-result
+ * Persists whether the user-facing X reply was delivered so backend
+ * idempotency never silently discards an undelivered outcome.
+ */
+router.post("/reply-result", async (req: Request, res: Response) => {
+  if (!requireAgentToken(req, res)) return;
+  const tweetId = typeof req.body?.tweetId === "string" ? req.body.tweetId : "";
+  const replyTweetId = typeof req.body?.replyTweetId === "string" ? req.body.replyTweetId : undefined;
+  const error = typeof req.body?.error === "string" ? req.body.error : undefined;
+  if (!/^\d+$/.test(tweetId) || (replyTweetId && !/^\d+$/.test(replyTweetId)) || (!replyTweetId && !error)) {
+    res.status(400).json({ error: "Invalid reply result payload" });
+    return;
+  }
+
+  try {
+    await recordXReplyDelivery({ tweetId, replyTweetId, error });
+    res.json({ ok: true });
+  } catch (err: unknown) {
+    console.error("[XBot] reply-result failed:", err);
+    res.status(500).json({ error: "Failed to record reply result" });
   }
 });
 

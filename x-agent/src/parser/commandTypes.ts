@@ -38,4 +38,7 @@ export type ProcessPostResult = {
   code?: string;
   replyText?: string;
   receiptId?: string;
+  originalStatus?: string;
+  originalReason?: string;
+  replyDeliveryStatus?: string;
 };

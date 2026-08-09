@@ -613,11 +613,31 @@ const schemaSql = `
     status TEXT NOT NULL,
     reason TEXT,
     receipt_id TEXT,
+    reply_text TEXT,
+    reply_status TEXT NOT NULL DEFAULT 'not_required',
+    reply_tweet_id TEXT,
+    reply_error TEXT,
+    reply_attempts INTEGER NOT NULL DEFAULT 0,
+    replied_at BIGINT,
     created_at BIGINT NOT NULL,
     updated_at BIGINT NOT NULL
   );
 
+  ALTER TABLE processed_x_posts
+    ADD COLUMN IF NOT EXISTS reply_text TEXT;
+  ALTER TABLE processed_x_posts
+    ADD COLUMN IF NOT EXISTS reply_status TEXT NOT NULL DEFAULT 'not_required';
+  ALTER TABLE processed_x_posts
+    ADD COLUMN IF NOT EXISTS reply_tweet_id TEXT;
+  ALTER TABLE processed_x_posts
+    ADD COLUMN IF NOT EXISTS reply_error TEXT;
+  ALTER TABLE processed_x_posts
+    ADD COLUMN IF NOT EXISTS reply_attempts INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE processed_x_posts
+    ADD COLUMN IF NOT EXISTS replied_at BIGINT;
+
   CREATE INDEX IF NOT EXISTS idx_processed_x_posts_status ON processed_x_posts(status, updated_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_processed_x_posts_reply_status ON processed_x_posts(reply_status, updated_at DESC);
 
   CREATE TABLE IF NOT EXISTS x_bot_tips (
     id TEXT PRIMARY KEY,

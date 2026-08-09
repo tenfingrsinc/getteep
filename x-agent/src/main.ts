@@ -1,5 +1,5 @@
 import { assertConfig, config } from "./config";
-import { processPostOnBackend } from "./client/teepBackend";
+import { processPostOnBackend, reportReplyResult } from "./client/teepBackend";
 import { pollMentions, type PollingState } from "./listeners/xPollingListener";
 import { startFilteredStream } from "./listeners/xStreamListener";
 import { parseTipCommand } from "./parser/parseTipCommand";
@@ -22,12 +22,46 @@ async function handlePost(post: Awaited<ReturnType<typeof pollMentions>>["posts"
     return;
   }
 
+  let replyId: string;
   try {
-    const replyId = await postReplyToX(post.id, result.replyText);
-    console.log(`[x-agent] Replied to ${post.id} with ${replyId}`);
+    replyId = await postReplyToX(post.id, result.replyText);
   } catch (err: unknown) {
-    console.error(`[x-agent] Reply failed for ${post.id}:`, err instanceof Error ? err.message : err);
+    const message = err instanceof Error ? err.message : String(err);
+    await reportReplyResultWithRetry({ tweetId: post.id, error: message }).catch((reportError: unknown) => {
+      console.error(
+        `[x-agent] Could not record reply failure for ${post.id}:`,
+        reportError instanceof Error ? reportError.message : reportError
+      );
+    });
+    console.error(`[x-agent] Reply failed for ${post.id}:`, message);
+    return;
   }
+
+  await reportReplyResultWithRetry({ tweetId: post.id, replyTweetId: replyId }).catch((reportError: unknown) => {
+    console.error(
+      `[x-agent] Reply ${replyId} was sent but its delivery receipt could not be stored for ${post.id}:`,
+      reportError instanceof Error ? reportError.message : reportError
+    );
+  });
+  console.log(`[x-agent] Replied to ${post.id} with ${replyId}`);
+}
+
+async function reportReplyResultWithRetry(params: {
+  tweetId: string;
+  replyTweetId?: string;
+  error?: string;
+}) {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      await reportReplyResult(params);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, attempt * 500));
+    }
+  }
+  throw lastError;
 }
 
 async function runPollingLoop() {
