@@ -9,6 +9,7 @@ const router = Router();
 function requireAgentToken(req: Request, res: Response): boolean {
   const expected = process.env.X_AGENT_TOKEN;
   if (!expected) {
+    console.warn(`[XBot] Rejected ${req.path}: X agent is not configured`);
     res.status(503).json({ error: "X agent not configured" });
     return false;
   }
@@ -20,6 +21,7 @@ function requireAgentToken(req: Request, res: Response): boolean {
     expectedBuffer.length !== providedBuffer.length ||
     !crypto.timingSafeEqual(expectedBuffer, providedBuffer)
   ) {
+    console.warn(`[XBot] Rejected ${req.path}: invalid agent token`);
     res.status(401).json({ error: "Unauthorized" });
     return false;
   }
@@ -49,7 +51,9 @@ router.post("/process-post", async (req: Request, res: Response) => {
   }
 
   try {
+    console.log(`[XBot] Received post ${req.body.id} from X agent`);
     const result = await processIncomingPost(req.body);
+    console.log(`[XBot] Processed post ${req.body.id}: ${result.status}${result.code ? ` (${result.code})` : ""}`);
     res.json(result);
   } catch (err: unknown) {
     console.error("[XBot] process-post failed:", err);

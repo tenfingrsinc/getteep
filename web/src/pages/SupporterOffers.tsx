@@ -127,7 +127,7 @@ export default function SupporterOffers() {
 
   return (
     <DashboardShell address={address} title="My Offers">
-      <main className="supporter-offers-page">
+      <main className="dashboard-body-inner supporter-offers-page">
         <header className="supporter-offers-head">
           <span>Unlocked Offers</span>
           <h1>What your support unlocked.</h1>

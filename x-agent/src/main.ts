@@ -13,11 +13,19 @@ import { postReplyToX } from "./replies/postReplyToX";
 const processedLocally = new Set<string>();
 
 async function handlePost(post: Awaited<ReturnType<typeof pollMentions>>["posts"][number]) {
-  if (processedLocally.has(post.id)) return;
-  processedLocally.add(post.id);
+  if (processedLocally.has(post.id)) {
+    console.log(`[x-agent] Tweet ${post.id}: ignored (ALREADY_SEEN_LOCALLY)`);
+    return;
+  }
+
+  console.log(`[x-agent] Received mention ${post.id} from @${post.authorUsername || post.authorId}`);
 
   const command = parseTipCommand(post.text);
-  if (!command) return;
+  if (!command) {
+    console.warn(`[x-agent] Tweet ${post.id}: ignored (COMMAND_NOT_RECOGNIZED; expected @${config.botUsername})`);
+    return;
+  }
+  processedLocally.add(post.id);
 
   console.log(`[x-agent] Processing tweet ${post.id} from @${post.authorUsername || post.authorId}`);
 
@@ -76,11 +84,16 @@ async function reportReplyResultWithRetry(params: {
 
 async function runPollingLoop() {
   let state: PollingState = {};
+  let pollCount = 0;
   console.log(`[x-agent] Polling @${config.botUsername} mentions every ${config.pollIntervalMs}ms`);
 
   for (;;) {
     try {
       const { posts, state: nextState } = await pollMentions(state);
+      pollCount += 1;
+      if (posts.length > 0 || pollCount === 1 || pollCount % 10 === 0) {
+        console.log(`[x-agent] Poll ${pollCount}: received ${posts.length} mention(s)${state.lastSeenId ? ` after ${state.lastSeenId}` : ""}`);
+      }
       state = nextState;
       for (const post of posts) {
         await handlePost(post);
@@ -122,6 +135,7 @@ async function runOfferReplyLoop() {
 }
 
 async function main() {
+  console.log("[x-agent] Worker process started; validating configuration");
   assertConfig();
   console.log(`[x-agent] Teep X agent starting (backend: ${config.backendUrl})`);
 

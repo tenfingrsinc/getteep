@@ -41,6 +41,7 @@ export function assertConfig() {
   if (!config.botRefreshToken) missing.push("X_BOT_REFRESH_TOKEN");
   if (!config.xClientId) missing.push("X_BOT_CLIENT_ID");
   if (!config.xClientSecret) missing.push("X_BOT_CLIENT_SECRET");
+  if (!env("X_BOT_USERNAME")) missing.push("X_BOT_USERNAME");
   if (missing.length) {
     throw new Error(`x-agent missing required env: ${missing.join(", ")}`);
   }
