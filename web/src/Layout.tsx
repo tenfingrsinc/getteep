@@ -15,6 +15,7 @@ export default function Layout({ children }: { children: ReactNode }) {
     location.pathname === "/creator/settings" ||
     location.pathname === "/creator/referrals" ||
     location.pathname === "/creator/performance" ||
+    location.pathname === "/creator/offers" ||
     location.pathname.startsWith("/creator/grow/");
   const isDashboard = location.pathname.startsWith("/dashboard") || isCreatorDashboard;
   const isReceipt = location.pathname.startsWith("/tx");

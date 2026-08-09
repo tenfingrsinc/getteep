@@ -1,6 +1,6 @@
 import https from "node:https";
-import { createPublicClient, http, type HttpTransportConfig } from "viem";
-import { getConfiguredChain, getRpcUrl } from "../config/chain";
+import { createPublicClient, fallback, http, type HttpTransportConfig } from "viem";
+import { getConfiguredChain, getRpcUrl, getRpcUrls } from "../config/chain";
 
 const DEFAULT_RPC_TIMEOUT_MS = parseInt(process.env.RPC_TIMEOUT_MS || "30000", 10) || 30000;
 const ALLOW_INSECURE_RPC_TLS = process.env.ALLOW_INSECURE_RPC_TLS === "true" && process.env.NODE_ENV !== "production";
@@ -21,7 +21,8 @@ export function createBackendHttpTransport(url = getRpcUrl(), timeoutMs = DEFAUL
     timeout: timeoutMs,
     fetchFn: ALLOW_INSECURE_RPC_TLS ? createInsecureRpcFetch(timeoutMs) : undefined,
   };
-  return http(url, config);
+  const transports = getRpcUrls(url).map((rpcUrl) => http(rpcUrl, config));
+  return transports.length === 1 ? transports[0] : fallback(transports);
 }
 
 export function createBackendPublicClient(options: { timeoutMs?: number; url?: string } = {}) {

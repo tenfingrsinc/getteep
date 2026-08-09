@@ -24,6 +24,7 @@ function localUrl(value) {
 
 function requireReleaseEnvironment() {
   const required = ["API_BASE_URL", "WEB_APP_URL", "PRIVY_APP_ID", "TIP_CONTRACT_ADDRESS", "USDC_ADDRESS"];
+  if (!process.env.RPC_URL && !process.env.ARC_RPC_URL) required.push("RPC_URL or ARC_RPC_URL");
   const missing = required.filter((name) => !process.env[name]);
   if (!process.env.WALLET_FACTORY_ADDRESS && !process.env.FACTORY_ADDRESS) {
     missing.push("WALLET_FACTORY_ADDRESS");
@@ -57,7 +58,8 @@ function expectedHostPermissions() {
     "https://*.zerodev.app/*",
     "https://*.pimlico.io/*",
     hostPermissionFromUrl(process.env.API_BASE_URL),
-    hostPermissionFromUrl(process.env.RPC_URL || process.env.ARC_RPC_URL || "https://rpc.testnet.arc.network"),
+    hostPermissionFromUrl(process.env.RPC_URL || process.env.ARC_RPC_URL),
+    hostPermissionFromUrl(process.env.RPC_FALLBACK_URL || process.env.ARC_FALLBACK_RPC_URL || "https://rpc.testnet.arc.network"),
   ].filter((value, index, values) => values.indexOf(value) === index);
 }
 

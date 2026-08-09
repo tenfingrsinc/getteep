@@ -5,6 +5,7 @@ import {
   createPublicClient,
   decodeFunctionData,
   encodeFunctionData,
+  fallback,
   http,
   isAddressEqual,
   parseUnits,
@@ -63,7 +64,7 @@ const APPROVE_SELECTOR = toFunctionSelector("approve(address,uint256)");
 const TIP_SELECTOR = toFunctionSelector("tip(bytes32,uint256,uint256)");
 const receiptClient = createPublicClient({
   chain: CONFIG.CHAIN,
-  transport: http(CONFIG.RPC_URL),
+  transport: fallback(CONFIG.RPC_URLS.map((rpcUrl) => http(rpcUrl))),
 });
 
 function sameHex(left: string, right: string) {

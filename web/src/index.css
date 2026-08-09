@@ -5851,7 +5851,7 @@ body:has(.dashboard-layout),
     bottom: calc(10px + env(safe-area-inset-bottom));
     z-index: 80;
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 4px;
     padding: 7px;
     border: 1px solid var(--border);
@@ -6347,7 +6347,7 @@ body:has(.dashboard-layout),
     bottom: calc(12px + env(safe-area-inset-bottom));
     z-index: 80;
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 5px;
     padding: 8px;
     border: 1px solid var(--border);

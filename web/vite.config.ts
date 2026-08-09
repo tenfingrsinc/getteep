@@ -43,7 +43,7 @@ function assertProductionEnv(env: Record<string, string>) {
     throw new Error(`Production web build is missing required env: ${missing.join(", ")}`);
   }
 
-  for (const key of ["VITE_API_URL", "VITE_WEB_APP_URL", "VITE_RECEIPT_BASE_URL", "VITE_ARC_RPC_URL"]) {
+  for (const key of ["VITE_API_URL", "VITE_WEB_APP_URL", "VITE_RECEIPT_BASE_URL", "VITE_ARC_RPC_URL", "VITE_ARC_FALLBACK_RPC_URL"]) {
     const value = env[key];
     if (!value) continue;
   
@@ -51,15 +51,19 @@ function assertProductionEnv(env: Record<string, string>) {
     try {
       parsed = new URL(value);
     } catch {
-      throw new Error(`Production web build has an invalid ${key}: ${value}`);
+      throw new Error(`Production web build has an invalid ${key}.`);
     }
   
     if (parsed.protocol !== "https:") {
-      throw new Error(`Production web build requires an https ${key}: ${value}`);
+      throw new Error(`Production web build requires an https ${key}.`);
     }
   
     if (LOCAL_URL_RE.test(value)) {
-      throw new Error(`Production web build cannot use a local ${key}: ${value}`);
+      throw new Error(`Production web build cannot use a local ${key}.`);
+    }
+
+    if ((key === "VITE_ARC_RPC_URL" || key === "VITE_ARC_FALLBACK_RPC_URL") && !parsed.hostname.includes(".") && !parsed.hostname.includes(":")) {
+      throw new Error(`Production web build requires ${key} to contain a complete hostname, not an API key or host fragment.`);
     }
   }
 
@@ -68,10 +72,13 @@ function assertProductionEnv(env: Record<string, string>) {
     try {
       parsed = new URL(env.VITE_ARC_WS_URL);
     } catch {
-      throw new Error(`Production web build has an invalid VITE_ARC_WS_URL: ${env.VITE_ARC_WS_URL}`);
+      throw new Error("Production web build has an invalid VITE_ARC_WS_URL.");
     }
     if (parsed.protocol !== "wss:") {
-      throw new Error(`Production web build requires a wss VITE_ARC_WS_URL: ${env.VITE_ARC_WS_URL}`);
+      throw new Error("Production web build requires a wss VITE_ARC_WS_URL.");
+    }
+    if (!parsed.hostname.includes(".") && !parsed.hostname.includes(":")) {
+      throw new Error("Production web build requires VITE_ARC_WS_URL to contain a complete hostname, not an API key or host fragment.");
     }
   }
 }

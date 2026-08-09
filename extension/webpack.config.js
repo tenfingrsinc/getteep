@@ -16,6 +16,7 @@ function assertProductionEnv(env) {
   if (env.ALLOW_INSECURE_EXTENSION_BUILD === "true") return;
 
   const required = ["API_BASE_URL", "WEB_APP_URL", "PRIVY_APP_ID", "TIP_CONTRACT_ADDRESS", "USDC_ADDRESS"];
+  if (!env.RPC_URL && !env.ARC_RPC_URL) required.push("RPC_URL or ARC_RPC_URL");
   const missing = required.filter((key) => !env[key]);
   if (!env.WALLET_FACTORY_ADDRESS && !env.FACTORY_ADDRESS) {
     missing.push("WALLET_FACTORY_ADDRESS");
@@ -99,7 +100,6 @@ function walletLabReleaseGuard(isProduction) {
 
 function buildManifest(source, isProduction) {
   const manifest = JSON.parse(source.toString());
-  if (!isProduction) return JSON.stringify(manifest, null, 2);
 
   manifest.host_permissions = unique([
     "https://x.com/*",
@@ -111,7 +111,8 @@ function buildManifest(source, isProduction) {
     "https://*.zerodev.app/*",
     "https://*.pimlico.io/*",
     hostPermissionFromUrl(process.env.API_BASE_URL),
-    hostPermissionFromUrl(process.env.RPC_URL || process.env.ARC_RPC_URL || "https://rpc.testnet.arc.network"),
+    hostPermissionFromUrl(process.env.RPC_URL || process.env.ARC_RPC_URL),
+    hostPermissionFromUrl(process.env.RPC_FALLBACK_URL || process.env.ARC_FALLBACK_RPC_URL || "https://rpc.testnet.arc.network"),
   ]);
 
   const connectSources = unique([
@@ -127,7 +128,8 @@ function buildManifest(source, isProduction) {
     "https://*.zerodev.app",
     "https://*.pimlico.io",
     cspSourceFromUrl(process.env.API_BASE_URL),
-    cspSourceFromUrl(process.env.RPC_URL || process.env.ARC_RPC_URL || "https://rpc.testnet.arc.network"),
+    cspSourceFromUrl(process.env.RPC_URL || process.env.ARC_RPC_URL),
+    cspSourceFromUrl(process.env.RPC_FALLBACK_URL || process.env.ARC_FALLBACK_RPC_URL || "https://rpc.testnet.arc.network"),
   ]);
   manifest.content_security_policy = {
     extension_pages: `script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; connect-src ${connectSources.join(" ")};`,
@@ -233,6 +235,8 @@ module.exports = (_env, argv) => {
       "process.env.API_BASE_URL": JSON.stringify(process.env.API_BASE_URL || "http://127.0.0.1:3001"),
       "process.env.RPC_URL": JSON.stringify(process.env.RPC_URL || ""),
       "process.env.ARC_RPC_URL": JSON.stringify(process.env.ARC_RPC_URL || ""),
+      "process.env.RPC_FALLBACK_URL": JSON.stringify(process.env.RPC_FALLBACK_URL || ""),
+      "process.env.ARC_FALLBACK_RPC_URL": JSON.stringify(process.env.ARC_FALLBACK_RPC_URL || ""),
       "process.env.PRIVY_APP_ID": JSON.stringify(process.env.PRIVY_APP_ID || ""),
       "process.env.USDC_ADDRESS": JSON.stringify(process.env.USDC_ADDRESS || ""),
       "process.env.TIP_CONTRACT_ADDRESS": JSON.stringify(process.env.TIP_CONTRACT_ADDRESS || ""),

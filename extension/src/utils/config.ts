@@ -14,6 +14,7 @@ export const CONFIG = {
   CHAIN_ID: arcTestnet.id,
   CHAIN_NAME: arcTestnet.name,
   RPC_URL: process.env.RPC_URL || process.env.ARC_RPC_URL || arcTestnet.rpcUrls.default.http[0],
+  RPC_URLS: arcTestnet.rpcUrls.default.http,
   EXPLORER_TX_URL: `${arcTestnet.blockExplorers.default.url}/tx`,
 
   // Contract addresses (set after Arc deployment)

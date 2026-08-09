@@ -5,7 +5,7 @@ import * as dotenv from "dotenv";
 dotenv.config();
 
 const PRIVATE_KEY = process.env.DEPLOYER_PRIVATE_KEY || "0x" + "0".repeat(64);
-const ARC_TESTNET_RPC = process.env.ARC_RPC_URL || process.env.RPC_URL || "https://rpc.testnet.arc.network";
+const ARC_TESTNET_RPC = process.env.ARC_RPC_URL || process.env.RPC_URL;
 const BASE_RPC = process.env.BASE_RPC_URL || "https://mainnet.base.org";
 const BASE_SEPOLIA_RPC = process.env.BASE_SEPOLIA_RPC_URL || "https://sepolia.base.org";
 const BASESCAN_API_KEY = process.env.BASESCAN_API_KEY || "";
@@ -23,11 +23,11 @@ const config: HardhatUserConfig = {
   },
   networks: {
     hardhat: {},
-    arcTestnet: {
+    ...(ARC_TESTNET_RPC ? { arcTestnet: {
       url: ARC_TESTNET_RPC,
       accounts: [PRIVATE_KEY],
       chainId: 5042002,
-    },
+    } } : {}),
     baseSepolia: {
       url: BASE_SEPOLIA_RPC,
       accounts: [PRIVATE_KEY],

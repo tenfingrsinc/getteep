@@ -1,5 +1,11 @@
 import { defineChain } from "viem";
 
+const configuredArcRpcUrl = import.meta.env.VITE_ARC_RPC_URL;
+
+if (!configuredArcRpcUrl) {
+  throw new Error("Missing VITE_ARC_RPC_URL for the Arc smoke test");
+}
+
 export const arcTestnet = defineChain({
   id: 5_042_002,
   name: "Arc Testnet",
@@ -10,7 +16,7 @@ export const arcTestnet = defineChain({
   },
   rpcUrls: {
     default: {
-      http: [import.meta.env.VITE_ARC_RPC_URL || "https://rpc.testnet.arc.network"],
+      http: [configuredArcRpcUrl],
     },
   },
   blockExplorers: {

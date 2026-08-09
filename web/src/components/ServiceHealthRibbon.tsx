@@ -7,6 +7,8 @@ export default function ServiceHealthRibbon() {
   const offline = status === "offline";
   const serviceLabels: Record<string, string> = {
     arc_rpc: "Arc network",
+    client_arc_rpc: "Arc network in this browser",
+    client_arc_rpc_primary: "primary Arc RPC",
     chain_indexer: "activity index",
     chain_projector: "activity index",
     goldsky_ingest: "activity feed",

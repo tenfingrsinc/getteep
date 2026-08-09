@@ -38,8 +38,11 @@ DATABASE_URL=${{Postgres.DATABASE_URL}}
 CORS_ORIGIN=https://YOUR_WEB_DOMAIN
 WEB_APP_URL=https://YOUR_WEB_DOMAIN
 RECEIPT_BASE_URL=https://YOUR_WEB_DOMAIN
-RPC_URL=https://rpc.testnet.arc.network
-ARC_RPC_URL=https://rpc.testnet.arc.network
+RPC_URL=<your-provisioned-arc-rpc-url>
+ARC_RPC_URL=<your-provisioned-arc-rpc-url>
+# Optional; otherwise Arc's public RPC is used only as the fallback.
+RPC_FALLBACK_URL=<your-secondary-arc-rpc-url>
+ARC_FALLBACK_RPC_URL=<your-secondary-arc-rpc-url>
 CHAIN=arcTestnet
 CHAIN_ID=5042002
 USDC_ADDRESS=0x3600000000000000000000000000000000000000

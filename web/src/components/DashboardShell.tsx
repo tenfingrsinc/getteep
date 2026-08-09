@@ -99,7 +99,7 @@ export default function DashboardShell({
   const growTipsLinks: DashboardNavLink[] = [
     { to: "/creator/grow/earn", icon: "eco", label: "Grow Tips", active: pathname === "/creator/grow/earn" },
     { to: "/creator/grow/learn", icon: "school", label: "Learn", active: pathname === "/creator/grow/learn" },
-    { to: "/creator/referrals", icon: "card_giftcard", label: "Referrals", active: pathname === "/creator/referrals" },
+    { to: "/creator/referrals", icon: "group_add", label: "Referrals", active: pathname === "/creator/referrals" },
   ];
   const creatorAccountLinks: DashboardNavLink[] = [
     { to: "/creator/settings", icon: "settings", label: "Settings", active: pathname === "/creator/settings" || pathname === "/creator/grow/settings" },
@@ -113,7 +113,7 @@ export default function DashboardShell({
     { to: "/dashboard/settings", icon: "manage_accounts", label: "Settings", active: pathname === "/dashboard/settings" },
     { to: "/dashboard/discover", icon: "explore", label: "Discover Creators", active: pathname === "/dashboard/discover" },
     { to: "/dashboard/offers", icon: "redeem", label: "My Offers", active: pathname === "/dashboard/offers" },
-    { to: "/dashboard/referrals", icon: "card_giftcard", label: "Referrals", active: pathname === "/dashboard/referrals" },
+    { to: "/dashboard/referrals", icon: "group_add", label: "Referrals", active: pathname === "/dashboard/referrals" },
   ];
   const dynamicNavSections: DashboardNavSection[] = showCreatorNav
     ? [
@@ -125,7 +125,7 @@ export default function DashboardShell({
     : [{ title: "Tipper Dashboard", links: tipperDashboardLinks }];
   const resolvedNavSections = navSections || dynamicNavSections;
   const defaultMobileLinks = showCreatorNav
-    ? [creatorDashboardLinks[0], creatorDashboardLinks[1], creatorDashboardLinks[2], growTipsLinks[0]]
+    ? [creatorDashboardLinks[0], creatorDashboardLinks[1], creatorDashboardLinks[3], growTipsLinks[0]]
     : tipperDashboardLinks;
   const resolvedMobileLinks = mobileNavLinks || defaultMobileLinks;
   const isLinkActive = (link: DashboardNavLink) => link.active ?? pathname === link.to;
@@ -287,7 +287,7 @@ export default function DashboardShell({
           <div className="dashboard-sidebar-block dashboard-sidebar-referral-card">
             <div style={{ display: "flex", gap: "var(--space-2)", marginBottom: "var(--space-3)" }}>
               <div className="dashboard-sidebar-referral-icon">
-                <span className="material-symbols-outlined" style={{ fontSize: 18 }}>card_giftcard</span>
+                <span className="material-symbols-outlined" style={{ fontSize: 18 }}>group_add</span>
               </div>
               <div>
                 <div className="dashboard-sidebar-referral-title">Refer and Earn</div>

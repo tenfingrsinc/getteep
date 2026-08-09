@@ -53,7 +53,7 @@ Arc testnet is the active deployment target for the current beta track.
 | Item | Value |
 | --- | --- |
 | Chain ID | `5042002` |
-| RPC | `https://rpc.testnet.arc.network` |
+| RPC | Provisioned through `ARC_RPC_URL` / `RPC_URL` |
 | Explorer | `https://testnet.arcscan.app` |
 | ERC-20 USDC | `0x3600000000000000000000000000000000000000` |
 | Tip contract | `0xFAF11e9b2242927E996f0ff6a0239Da2B742893C` |
@@ -155,7 +155,9 @@ API_BASE_URL=https://api.getteep.xyz
 WEB_APP_URL=https://getteep.xyz
 RECEIPT_BASE_URL=https://getteep.xyz
 PRIVY_APP_ID=...
-ARC_RPC_URL=https://rpc.testnet.arc.network
+ARC_RPC_URL=<your-provisioned-arc-rpc-url>
+# Optional; otherwise Arc's public RPC is used only as the fallback.
+ARC_FALLBACK_RPC_URL=<your-secondary-arc-rpc-url>
 ```
 
 Build:

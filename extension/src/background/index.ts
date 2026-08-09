@@ -9,7 +9,7 @@
 
 import "../utils/process-polyfill";
 
-import { createPublicClient, http, encodeFunctionData, isAddress } from "viem";
+import { createPublicClient, fallback, http, encodeFunctionData, isAddress } from "viem";
 import { CONFIG, TIP_CONTRACT_ABI, USDC_ABI, FACTORY_ABI } from "../utils/config";
 import { parseTipAmount } from "../utils/tipAmount";
 import {
@@ -35,7 +35,7 @@ bgLog("Init", "Background service worker started");
 
 const publicClient = createPublicClient({
   chain: CONFIG.CHAIN,
-  transport: http(CONFIG.RPC_URL),
+  transport: fallback(CONFIG.RPC_URLS.map((rpcUrl) => http(rpcUrl))),
 });
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {

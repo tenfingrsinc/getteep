@@ -15,7 +15,7 @@ Edit `.env` if you want a different Privy app:
 
 ```env
 VITE_PRIVY_APP_ID=cmoslas9401se0cjx2g6mk2a3
-VITE_ARC_RPC_URL=https://rpc.testnet.arc.network
+VITE_ARC_RPC_URL=<your-provisioned-arc-rpc-url>
 VITE_ARC_BUNDLER_URL=
 VITE_ARC_PAYMASTER_URL=
 ```
