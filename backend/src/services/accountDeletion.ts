@@ -296,5 +296,5 @@ export async function purgeTeepAccountData(address: string) {
     await txDb.prepare("DELETE FROM verified_claims WHERE LOWER(owner_address) = ?").run(normalized);
     await txDb.prepare("DELETE FROM x_accounts WHERE LOWER(user_address) = ?").run(normalized);
     await txDb.prepare("DELETE FROM user_settings WHERE LOWER(address) = ?").run(normalized);
-  })();
+  });
 }

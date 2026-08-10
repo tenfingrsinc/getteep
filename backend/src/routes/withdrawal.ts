@@ -524,7 +524,7 @@ router.post("/record", async (req: Request, res: Response) => {
           Math.floor(now / 1000)
         );
       }
-    })();
+    });
     await createWithdrawalConfirmedNotification({ userAddress: ownerAddress, amountRaw: row.amount_raw, txHash });
     if (referrerAddress && referrerAmount > 0n) {
       await createReferralEarnedNotification({ userAddress: referrerAddress, amountRaw: referrerAmount.toString(), txHash, referredAddress: ownerAddress });

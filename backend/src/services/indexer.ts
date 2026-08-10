@@ -206,7 +206,7 @@ export class Indexer {
     const changedAddresses: string[] = [];
     const changedAuthorIds: string[] = [];
 
-    const tx = db.transaction(async (txDb) => {
+    await db.transaction(async (txDb) => {
       for (const log of logs) {
         const args = (log as any).args;
         const from = args.from.toLowerCase();
@@ -283,7 +283,6 @@ export class Indexer {
       }
     });
 
-    await tx();
     if (changedAddresses.length) {
       invalidateDisplayUsdcBalances(changedAddresses);
       await publishDashboardUpdate({
@@ -298,7 +297,7 @@ export class Indexer {
     const db = getDb();
     const changedOwners: string[] = [];
 
-    const tx = db.transaction(async (txDb) => {
+    await db.transaction(async (txDb) => {
       for (const log of logs) {
         const args = (log as any).args;
         const authorId = args.authorId.toString();
@@ -327,7 +326,6 @@ export class Indexer {
       }
     });
 
-    await tx();
     if (changedOwners.length) {
       await publishDashboardUpdate({
         reason: "claim_wallet_deployed",

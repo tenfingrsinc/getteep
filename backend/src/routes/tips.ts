@@ -10,6 +10,7 @@ import { verifyWalletProof } from "../services/walletAuth";
 import { publishDashboardUpdate } from "../services/dashboardUpdates";
 import { invalidateDisplayUsdcBalances } from "../services/balanceSnapshots";
 import { requeueOfferEvaluationsForContent } from "../services/creatorOffers";
+import { recoverCompletedXTipByReceipt } from "../services/xTipLedgerRecovery";
 
 const router = Router();
 
@@ -339,7 +340,7 @@ router.get("/receipt/x/:receiptId", async (req: Request, res: Response) => {
     return;
   }
   const db = getDb();
-  const row = await db
+  let row = await db
     .prepare(
       `SELECT sender_address, recipient_address, recipient_x_user_id, recipient_x_username,
               amount_raw, source_tweet_id, receipt_id, tx_hash, status, created_at,
@@ -349,6 +350,19 @@ router.get("/receipt/x/:receiptId", async (req: Request, res: Response) => {
        FROM x_bot_tips WHERE receipt_id = ?`
     )
     .get(receiptId) as XBotTipReceiptRow | undefined;
+
+  if (!row && await recoverCompletedXTipByReceipt(receiptId)) {
+    row = await db
+      .prepare(
+        `SELECT sender_address, recipient_address, recipient_x_user_id, recipient_x_username,
+                amount_raw, source_tweet_id, receipt_id, tx_hash, status, created_at,
+                COALESCE(tip_kind, 'direct_creator_tip') as tip_kind,
+                content_id, context_tweet_id, context_author_id, context_author_username,
+                context_author_name, context_author_profile_image_url
+         FROM x_bot_tips WHERE receipt_id = ?`
+      )
+      .get(receiptId) as XBotTipReceiptRow | undefined;
+  }
 
   if (row) {
     res.json(await buildXBotReceiptPayload(db, row));

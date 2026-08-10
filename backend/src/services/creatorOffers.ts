@@ -491,7 +491,7 @@ export async function createCreatorOffer(ownerAddress: string, rawInput: OfferIn
       `INSERT INTO offer_events (offer_id, event_type, actor_type, actor_id, metadata_json, created_at)
        VALUES (?, 'OFFER_CREATED', 'CREATOR', ?, ?, ?)`
     ).run(id, creator.ownerAddress, JSON.stringify({ version: 1 }), now);
-  })();
+  });
   return getCreatorOffer(ownerAddress, id);
 }
 
@@ -617,7 +617,7 @@ export async function updateCreatorOffer(ownerAddress: string, offerId: string, 
       `INSERT INTO offer_events (offer_id, event_type, actor_type, actor_id, metadata_json, created_at)
        VALUES (?, 'OFFER_UPDATED', 'CREATOR', ?, NULL, ?)`
     ).run(offerId, creator.ownerAddress, now);
-  })();
+  });
   return getCreatorOffer(ownerAddress, offerId);
 }
 
@@ -655,7 +655,7 @@ export async function changeOfferStatus(ownerAddress: string, offerId: string, a
       `INSERT INTO offer_events (offer_id, event_type, actor_type, actor_id, metadata_json, created_at)
        VALUES (?, ?, 'CREATOR', ?, NULL, ?)`
     ).run(offerId, `OFFER_${status}`, creator.ownerAddress, now);
-  })();
+  });
   await publishDashboardUpdate({ reason: "creator_offer_updated", addresses: [creator.ownerAddress], authorIds: [creator.authorId] }).catch(() => undefined);
   return getCreatorOffer(ownerAddress, offerId);
 }
@@ -700,7 +700,7 @@ export async function addOfferCodes(ownerAddress: string, offerId: string, value
       `INSERT INTO offer_events (offer_id, event_type, actor_type, actor_id, metadata_json, created_at)
        VALUES (?, 'CODE_IMPORTED', 'CREATOR', ?, ?, ?)`
     ).run(offerId, creator.ownerAddress, JSON.stringify({ added, submitted: codes.size }), now);
-  })();
+  });
   return { added, duplicates: codes.size - added };
 }
 
@@ -846,7 +846,7 @@ async function reserveEntitlement(offerId: string, tip: {
       creatorOwnerAddress: offer.creator_owner_address as string,
       supporterAddress: tip.fromAddress.toLowerCase(),
     };
-  })();
+  });
 }
 
 async function evaluateTip(tipId: string) {
@@ -1191,7 +1191,7 @@ export async function claimOffer(token: string, supporterAddress: string) {
       supporterAddress: supporterAddress.toLowerCase(),
       alreadyClaimed: false,
     };
-  })();
+  });
   await publishDashboardUpdate({ reason: "creator_offer_claimed", addresses: [result.supporterAddress] }).catch(() => undefined);
   return result;
 }

@@ -44,7 +44,7 @@ async function main() {
       deleted += removal.changes;
     }
     return { archived, deleted };
-  })();
+  });
 
   console.log(JSON.stringify({
     scanned: rows.length,

@@ -18,7 +18,9 @@ export default function Layout({ children }: { children: ReactNode }) {
     location.pathname === "/creator/offers" ||
     location.pathname.startsWith("/creator/grow/");
   const isDashboard = location.pathname.startsWith("/dashboard") || isCreatorDashboard;
-  const isReceipt = location.pathname.startsWith("/tx");
+  const isReceipt =
+    location.pathname.startsWith("/tx/") ||
+    /^\/x\/[a-f0-9]{16}\/?$/i.test(location.pathname);
   const isHome = location.pathname === "/";
   const isTipPost = location.pathname.startsWith("/t/");
   const isOps = location.pathname.startsWith("/ops");

@@ -7,6 +7,7 @@ import {
   sanitizeOperationalError,
 } from "./serviceHealth";
 import { requeueOfferEvaluationsForContent } from "./creatorOffers";
+import { recoverMissingCompletedXTips } from "./xTipLedgerRecovery";
 
 type SubmittedXTip = {
   sourceTweetId: string;
@@ -135,6 +136,8 @@ export class XTipReconciler {
       if (this.running) return;
       this.running = true;
       try {
+        const recovered = await recoverMissingCompletedXTips();
+        if (recovered > 0) console.log(`[XBot] Recovered ${recovered} missing completed X-tip ledger row(s)`);
         await reconcileSubmittedXTips();
       } catch (error) {
         console.error(`[XBot] Reconciliation failed: ${sanitizeOperationalError(error)}`);

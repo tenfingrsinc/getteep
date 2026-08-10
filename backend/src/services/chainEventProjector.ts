@@ -317,7 +317,7 @@ async function projectTip(input: {
     );
     if (inserted) await enqueueOfferEvaluation(inserted.id, db);
     return inserted;
-  })();
+  });
   if (insertedTip) {
     invalidateDisplayUsdcBalances([input.from, input.to]);
     await publishDashboardUpdate({

@@ -9,7 +9,7 @@ export type DbFacade = {
     get<T extends QueryResultRow = QueryResultRow>(...params: unknown[]): Promise<T | undefined>;
     run(...params: unknown[]): Promise<{ changes: number }>;
   };
-  transaction<T>(fn: (db: DbFacade) => Promise<T>): () => Promise<T>;
+  transaction<T>(fn: (db: DbFacade) => Promise<T>): Promise<T>;
 };
 
 const DATABASE_URL = process.env.DATABASE_URL || process.env.POSTGRES_URL;
@@ -103,7 +103,7 @@ export function getDb(client: DbClient = getPool()): DbFacade {
       };
     },
     transaction<T>(fn: (db: DbFacade) => Promise<T>) {
-      return () => transaction((txClient) => fn(getDb(txClient)));
+      return transaction((txClient) => fn(getDb(txClient)));
     },
   };
 }

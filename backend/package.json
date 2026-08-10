@@ -16,7 +16,7 @@
     "test:defi-intents": "node --test -r ts-node/register src/services/defiIntents.test.ts",
     "test:crossmint": "node --test -r ts-node/register src/services/crossmint.test.ts",
     "test:creator-offers": "node --test -r ts-node/register src/services/creatorOffers.test.ts src/services/privyAuth.test.ts",
-    "test:x-tip-ux": "node --test -r ts-node/register src/services/xBot/replies.test.ts src/services/serviceHealth.test.ts"
+    "test:x-tip-ux": "node --test -r ts-node/register src/services/xBot/replies.test.ts src/services/xTipLedgerRecovery.test.ts src/services/serviceHealth.test.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",

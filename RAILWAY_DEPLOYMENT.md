@@ -131,7 +131,7 @@ x-agent/railway.json
 ```env
 TEEP_RAILWAY_SERVICE=x-agent
 NODE_ENV=production
-TEEP_BACKEND_URL=https://YOUR_BACKEND_DOMAIN
+TEEP_BACKEND_URL=https://api.getteep.xyz
 X_AGENT_TOKEN=...
 X_BOT_USER_ID=2071517645308903424
 X_BOT_USERNAME=teepagent

@@ -78,25 +78,18 @@ function mergeClaimStatus(
 export async function getUnifiedTipperStats(addressParam: string): Promise<UnifiedTipperStats> {
   const address = addressParam.toLowerCase();
   const db = getDb();
-  const currentContract = (process.env.TIP_CONTRACT_ADDRESS || "").toLowerCase();
 
-  const indexedTips = (currentContract
-    ? await db.prepare(
-        `SELECT t.content_id, t.author_id, t.amount, t.tx_hash, t.timestamp,
-                m.author_handle
-         FROM tips t
-         LEFT JOIN tip_metadata m ON t.content_id = m.content_id
-         WHERE t.from_address = ? AND LOWER(t.tip_contract_address) = ?
-         ORDER BY t.timestamp DESC`
-      ).all(address, currentContract)
-    : await db.prepare(
-        `SELECT t.content_id, t.author_id, t.amount, t.tx_hash, t.timestamp,
-                m.author_handle
-         FROM tips t
-         LEFT JOIN tip_metadata m ON t.content_id = m.content_id
-         WHERE t.from_address = ?
-         ORDER BY t.timestamp DESC`
-      ).all(address)) as IndexedTipRow[];
+  // `tips` is already a validated Teep event projection. Do not narrow it to the
+  // latest web-tip contract here: X-router tips and legitimate legacy deployments
+  // emit the same indexed Tipped event and belong in the supporter's history.
+  const indexedTips = await db.prepare(
+    `SELECT t.content_id, t.author_id, t.amount, t.tx_hash, t.timestamp,
+            m.author_handle
+     FROM tips t
+     LEFT JOIN tip_metadata m ON t.content_id = m.content_id
+     WHERE LOWER(t.from_address) = ?
+     ORDER BY t.timestamp DESC`
+  ).all<IndexedTipRow>(address);
 
   const xBotTips = await db.prepare(
     `SELECT

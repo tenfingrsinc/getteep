@@ -86,7 +86,7 @@ async function recordDeployment(params: {
       params.blockNumber.toString(),
       params.txHash.toLowerCase(),
     );
-  })();
+  });
 }
 
 export async function provisionClaimWallet(params: {
