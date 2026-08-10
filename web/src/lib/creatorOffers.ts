@@ -33,7 +33,7 @@ export type CreatorOffer = {
 
 export function offerTypeLabel(type: CreatorOffer["offerType"]) {
   if (type === "CODE") return "Code";
-  if (type === "LINK") return "Private link";
+  if (type === "LINK") return "Access";
   if (type === "CUSTOM") return "Custom access";
   return "Access";
 }

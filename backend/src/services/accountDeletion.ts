@@ -2,6 +2,7 @@ import { erc20Abi, formatUnits, parseAbi } from "viem";
 import { ARC_TESTNET_USDC, getRpcUrl } from "../config/chain";
 import { getDb, type DbFacade } from "../db/database";
 import { createBackendPublicClient } from "./rpcClient";
+export { deletePrivyUser, verifyPrivyUserOwnsAddress } from "./privyAuth";
 import { getXTippingRouterAddress } from "./xTippingRouter";
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
@@ -176,46 +177,6 @@ export async function getAccountDeleteReadiness(address: string) {
     blockingOperations: blockers,
     router,
   };
-}
-
-function privyHeaders(appId: string, appSecret: string) {
-  return {
-    Authorization: `Basic ${Buffer.from(`${appId}:${appSecret}`).toString("base64")}`,
-    "privy-app-id": appId,
-    "Content-Type": "application/json",
-  };
-}
-
-function getPrivyConfig() {
-  const appId = process.env.PRIVY_APP_ID || process.env.VITE_PRIVY_APP_ID || "";
-  const appSecret = process.env.PRIVY_APP_SECRET || "";
-  if (!appId || !appSecret) throw Object.assign(new Error("Privy account deletion is not configured."), { status: 501 });
-  return { appId, appSecret };
-}
-
-export async function verifyPrivyUserOwnsAddress(userId: string, address: string) {
-  if (!/^did:privy:[a-zA-Z0-9_-]+$/.test(userId)) throw Object.assign(new Error("Invalid Privy user id"), { status: 400 });
-  const { appId, appSecret } = getPrivyConfig();
-  const response = await fetch(`https://api.privy.io/v1/users/${encodeURIComponent(userId)}`, {
-    headers: privyHeaders(appId, appSecret),
-  });
-  if (!response.ok) throw Object.assign(new Error("Could not verify the Privy account owner."), { status: response.status });
-  const payload = await response.json() as { linked_accounts?: Array<{ address?: string }> };
-  const ownsAddress = (payload.linked_accounts || []).some(
-    (account) => typeof account.address === "string" && account.address.toLowerCase() === address.toLowerCase()
-  );
-  if (!ownsAddress) throw Object.assign(new Error("The Privy user does not own the connected Teep wallet."), { status: 403 });
-}
-
-export async function deletePrivyUser(userId: string) {
-  const { appId, appSecret } = getPrivyConfig();
-  const response = await fetch(`https://api.privy.io/v1/users/${encodeURIComponent(userId)}`, {
-    method: "DELETE",
-    headers: privyHeaders(appId, appSecret),
-  });
-  if (response.ok || response.status === 404) return;
-  const payload = await response.json().catch(() => null) as { message?: string; error?: string } | null;
-  throw Object.assign(new Error(payload?.message || payload?.error || "Privy account deletion failed"), { status: response.status });
 }
 
 export async function purgeTeepAccountData(address: string) {

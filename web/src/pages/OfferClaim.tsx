@@ -3,6 +3,7 @@ import { useParams } from "react-router-dom";
 import { usePrivy } from "@privy-io/react-auth";
 import { useSmartWallets } from "@privy-io/react-auth/smart-wallets";
 import { API_BASE } from "../config";
+import { privyAuthorizedFetch } from "../lib/privyApi";
 
 type ClaimPreview = {
   status: string;
@@ -21,7 +22,7 @@ type Fulfillment = {
 
 export default function OfferClaim() {
   const { token = "" } = useParams<{ token: string }>();
-  const { ready, authenticated, login } = usePrivy();
+  const { ready, authenticated, login, getAccessToken } = usePrivy();
   const { client: smartWalletClient } = useSmartWallets();
   const address = (smartWalletClient?.account?.address || "").toLowerCase();
   const [preview, setPreview] = useState<ClaimPreview | null>(null);
@@ -48,22 +49,14 @@ export default function OfferClaim() {
       login();
       return;
     }
-    if (!address || !smartWalletClient?.account) return;
+    if (!address) return;
     setClaiming(true);
     setError("");
     try {
-      const challengeResponse = await fetch(`${API_BASE}/auth/wallet/challenge`, {
+      const response = await privyAuthorizedFetch(getAccessToken, `${API_BASE}/offers/claim/${encodeURIComponent(token)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ address, purpose: "offer-claim" }),
-      });
-      const challenge = await challengeResponse.json().catch(() => ({}));
-      if (!challengeResponse.ok || !challenge.message) throw new Error(challenge.error || "Could not verify your account.");
-      const signature = await smartWalletClient.signMessage({ account: smartWalletClient.account, message: challenge.message } as Parameters<typeof smartWalletClient.signMessage>[0]);
-      const response = await fetch(`${API_BASE}/offers/claim/${encodeURIComponent(token)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ supporterAddress: address, walletProof: { message: challenge.message, signature } }),
+        body: JSON.stringify({ supporterAddress: address }),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error || "This offer could not be claimed.");
@@ -73,7 +66,7 @@ export default function OfferClaim() {
     } finally {
       setClaiming(false);
     }
-  }, [address, authenticated, login, ready, smartWalletClient, token]);
+  }, [address, authenticated, getAccessToken, login, ready, token]);
 
   const copy = async (label: string, value: string) => {
     await navigator.clipboard.writeText(value);

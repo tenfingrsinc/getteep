@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from "express";
 import { verifyWalletProof } from "../services/walletAuth";
+import { authorizePrivyWallet, bearerToken, PrivyAuthError } from "../services/privyAuth";
 import {
   CreatorOfferError,
   addOfferCodes,
@@ -30,27 +31,60 @@ function sendError(res: Response, error: unknown) {
   res.status(500).json({ error: "Creator Offers is temporarily unavailable.", code: "OFFER_INTERNAL_ERROR" });
 }
 
-async function requireProof(req: Request, res: Response, address: string, purpose: "creator-offers" | "offer-claim") {
+function sendAuthorizationError(res: Response, error: unknown) {
+  if (error instanceof PrivyAuthError) {
+    res.status(error.status).json({ error: error.message, code: error.code });
+    return;
+  }
+  console.error("[Creator offers] Account authorization failed:", error);
+  res.status(503).json({ error: "Account verification is temporarily unavailable.", code: "OFFER_AUTH_UNAVAILABLE" });
+}
+
+async function requireAuthorization(req: Request, res: Response, address: string, purpose: "creator-offers" | "offer-claim") {
   if (!isAddress(address)) {
     res.status(400).json({ error: "Invalid account address.", code: "INVALID_ADDRESS" });
     return false;
   }
+
+  // New clients authorize with Privy's short-lived session token. This is silent
+  // across refresh/navigation and remains bound to the requested linked wallet.
+  if (bearerToken(req.headers.authorization)) {
+    try {
+      await authorizePrivyWallet(req.headers.authorization, address);
+      return true;
+    } catch (error) {
+      sendAuthorizationError(res, error);
+      return false;
+    }
+  }
+
+  // Rolling-deploy compatibility for clients that still send one-time wallet proofs.
   const verified = await verifyWalletProof(address, purpose, req.body?.walletProof);
   if (!verified) {
-    res.status(401).json({ error: "Account verification failed.", code: "WALLET_PROOF_FAILED" });
+    res.status(401).json({ error: "Sign in to your Teep account to continue.", code: "PRIVY_SESSION_REQUIRED" });
     return false;
   }
   return true;
 }
 
-function requireReadSession(req: Request, res: Response, address: string, scope: "creator" | "supporter") {
-  const authorization = String(req.headers.authorization || "");
-  const token = authorization.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
-  if (!verifyOfferReadSession(token, address, scope)) {
-    res.status(401).json({ error: "Verify the connected Teep account to continue.", code: "OFFER_SESSION_REQUIRED" });
+async function requireReadAuthorization(req: Request, res: Response, address: string, scope: "creator" | "supporter") {
+  if (!isAddress(address)) {
+    res.status(400).json({ error: "Invalid account address.", code: "INVALID_ADDRESS" });
     return false;
   }
-  return true;
+  const token = bearerToken(req.headers.authorization);
+
+  // Accept the former scoped session during rolling deployments only. New web
+  // clients use Privy access tokens and never persist a Teep bearer token.
+  if (verifyOfferReadSession(token, address, scope)) return true;
+
+  try {
+    await authorizePrivyWallet(req.headers.authorization, address);
+    return true;
+  } catch (error) {
+    sendAuthorizationError(res, error);
+    return false;
+  }
 }
 
 router.get("/public/:username", async (req, res) => {
@@ -64,7 +98,7 @@ router.get("/public/:username", async (req, res) => {
 
 router.post("/creator/:ownerAddress/session", async (req, res) => {
   const ownerAddress = String(req.params.ownerAddress || "").toLowerCase();
-  if (!(await requireProof(req, res, ownerAddress, "creator-offers"))) return;
+  if (!(await requireAuthorization(req, res, ownerAddress, "creator-offers"))) return;
   try {
     res.set("Cache-Control", "private, no-store");
     res.json(createOfferReadSession(ownerAddress, "creator"));
@@ -75,7 +109,7 @@ router.post("/creator/:ownerAddress/session", async (req, res) => {
 
 router.get("/creator/:ownerAddress", async (req, res) => {
   const ownerAddress = String(req.params.ownerAddress || "").toLowerCase();
-  if (!requireReadSession(req, res, ownerAddress, "creator")) return;
+  if (!(await requireReadAuthorization(req, res, ownerAddress, "creator"))) return;
   try {
     res.set("Cache-Control", "private, no-store");
     res.json(await listCreatorOffers(ownerAddress));
@@ -86,7 +120,7 @@ router.get("/creator/:ownerAddress", async (req, res) => {
 
 router.get("/creator/:ownerAddress/:offerId", async (req, res) => {
   const ownerAddress = String(req.params.ownerAddress || "").toLowerCase();
-  if (!requireReadSession(req, res, ownerAddress, "creator")) return;
+  if (!(await requireReadAuthorization(req, res, ownerAddress, "creator"))) return;
   try {
     res.set("Cache-Control", "private, no-store");
     res.json(await getCreatorOffer(ownerAddress, String(req.params.offerId || "")));
@@ -97,7 +131,7 @@ router.get("/creator/:ownerAddress/:offerId", async (req, res) => {
 
 router.post("/creator/:ownerAddress", async (req, res) => {
   const ownerAddress = String(req.params.ownerAddress || "").toLowerCase();
-  if (!(await requireProof(req, res, ownerAddress, "creator-offers"))) return;
+  if (!(await requireAuthorization(req, res, ownerAddress, "creator-offers"))) return;
   try {
     res.status(201).json(await createCreatorOffer(ownerAddress, req.body?.offer || req.body));
   } catch (error) {
@@ -107,7 +141,7 @@ router.post("/creator/:ownerAddress", async (req, res) => {
 
 router.patch("/creator/:ownerAddress/:offerId", async (req, res) => {
   const ownerAddress = String(req.params.ownerAddress || "").toLowerCase();
-  if (!(await requireProof(req, res, ownerAddress, "creator-offers"))) return;
+  if (!(await requireAuthorization(req, res, ownerAddress, "creator-offers"))) return;
   try {
     res.json(await updateCreatorOffer(ownerAddress, String(req.params.offerId || ""), req.body?.offer || req.body));
   } catch (error) {
@@ -118,7 +152,7 @@ router.patch("/creator/:ownerAddress/:offerId", async (req, res) => {
 function offerStatusHandler(action: "activate" | "pause" | "archive") {
   return async (req: Request, res: Response) => {
     const ownerAddress = String(req.params.ownerAddress || "").toLowerCase();
-    if (!(await requireProof(req, res, ownerAddress, "creator-offers"))) return;
+    if (!(await requireAuthorization(req, res, ownerAddress, "creator-offers"))) return;
     try {
       res.json(await changeOfferStatus(ownerAddress, String(req.params.offerId || ""), action));
     } catch (error) {
@@ -133,7 +167,7 @@ router.post("/creator/:ownerAddress/:offerId/archive", offerStatusHandler("archi
 
 router.post("/creator/:ownerAddress/:offerId/codes", async (req, res) => {
   const ownerAddress = String(req.params.ownerAddress || "").toLowerCase();
-  if (!(await requireProof(req, res, ownerAddress, "creator-offers"))) return;
+  if (!(await requireAuthorization(req, res, ownerAddress, "creator-offers"))) return;
   try {
     res.json(await addOfferCodes(ownerAddress, String(req.params.offerId || ""), req.body?.codes));
   } catch (error) {
@@ -143,7 +177,7 @@ router.post("/creator/:ownerAddress/:offerId/codes", async (req, res) => {
 
 router.post("/creator/:ownerAddress/:offerId/codes/generate", async (req, res) => {
   const ownerAddress = String(req.params.ownerAddress || "").toLowerCase();
-  if (!(await requireProof(req, res, ownerAddress, "creator-offers"))) return;
+  if (!(await requireAuthorization(req, res, ownerAddress, "creator-offers"))) return;
   try {
     res.json(await generateOfferCodes(ownerAddress, String(req.params.offerId || ""), req.body?.count));
   } catch (error) {
@@ -153,7 +187,7 @@ router.post("/creator/:ownerAddress/:offerId/codes/generate", async (req, res) =
 
 router.post("/creator/:ownerAddress/:offerId/codes/export", async (req, res) => {
   const ownerAddress = String(req.params.ownerAddress || "").toLowerCase();
-  if (!(await requireProof(req, res, ownerAddress, "creator-offers"))) return;
+  if (!(await requireAuthorization(req, res, ownerAddress, "creator-offers"))) return;
   try {
     const exported = await exportOfferCodes(ownerAddress, String(req.params.offerId || ""));
     res.set("Cache-Control", "private, no-store");
@@ -167,7 +201,7 @@ router.post("/creator/:ownerAddress/:offerId/codes/export", async (req, res) => 
 
 router.post("/supporter/:address/session", async (req, res) => {
   const address = String(req.params.address || "").toLowerCase();
-  if (!(await requireProof(req, res, address, "offer-claim"))) return;
+  if (!(await requireAuthorization(req, res, address, "offer-claim"))) return;
   try {
     res.set("Cache-Control", "private, no-store");
     res.json(createOfferReadSession(address, "supporter"));
@@ -178,7 +212,7 @@ router.post("/supporter/:address/session", async (req, res) => {
 
 router.get("/supporter/:address", async (req, res) => {
   const address = String(req.params.address || "").toLowerCase();
-  if (!requireReadSession(req, res, address, "supporter")) return;
+  if (!(await requireReadAuthorization(req, res, address, "supporter"))) return;
   try {
     res.set("Cache-Control", "private, no-store");
     res.json({ entitlements: await listSupporterEntitlements(address) });
@@ -189,7 +223,7 @@ router.get("/supporter/:address", async (req, res) => {
 
 router.post("/supporter/:address/claim-links", async (req, res) => {
   const address = String(req.params.address || "").toLowerCase();
-  if (!(await requireProof(req, res, address, "offer-claim"))) return;
+  if (!(await requireAuthorization(req, res, address, "offer-claim"))) return;
   try {
     res.set("Cache-Control", "private, no-store");
     res.json({ entitlements: await listSupporterEntitlements(address, true) });
@@ -209,7 +243,7 @@ router.get("/claim/:token", async (req, res) => {
 
 router.post("/claim/:token", async (req, res) => {
   const supporterAddress = String(req.body?.supporterAddress || "").toLowerCase();
-  if (!(await requireProof(req, res, supporterAddress, "offer-claim"))) return;
+  if (!(await requireAuthorization(req, res, supporterAddress, "offer-claim"))) return;
   try {
     res.set("Cache-Control", "private, no-store");
     res.json(await claimOffer(String(req.params.token || ""), supporterAddress));

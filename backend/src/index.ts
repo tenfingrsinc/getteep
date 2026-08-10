@@ -105,6 +105,8 @@ function assertProductionEnv() {
     "TIP_CONTRACT_ADDRESS",
     "FACTORY_ADDRESS",
     "INDEXER_START_BLOCK",
+    "PRIVY_APP_ID",
+    "PRIVY_APP_SECRET",
   ];
   if (!process.env.RPC_URL && !process.env.ARC_RPC_URL) required.push("RPC_URL");
 

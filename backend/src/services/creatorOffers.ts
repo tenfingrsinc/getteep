@@ -525,8 +525,22 @@ export async function getCreatorOffer(ownerAddress: string, offerId: string) {
 
 export async function updateCreatorOffer(ownerAddress: string, offerId: string, rawInput: OfferInput) {
   const creator = await requireCreator(ownerAddress);
-  const current = await one<{ status: string; claimsReserved: number | string; maxClaims: number | null; endsAt: number | string | null }>(
-    `SELECT status, claims_reserved as "claimsReserved", max_claims as "maxClaims", ends_at as "endsAt"
+  const current = await one<{
+    status: string;
+    claimsReserved: number | string;
+    maxClaims: number | null;
+    endsAt: number | string | null;
+    offerType: OfferType;
+    conditionType: ConditionType;
+    conditionConfigJson: string;
+    onePerSupporter: boolean;
+    startsAt: number | string;
+    claimWindowSeconds: number | string | null;
+  }>(
+    `SELECT status, claims_reserved as "claimsReserved", max_claims as "maxClaims", ends_at as "endsAt",
+            offer_type as "offerType", condition_type as "conditionType",
+            condition_config_json as "conditionConfigJson", one_per_supporter as "onePerSupporter",
+            starts_at as "startsAt", claim_window_seconds as "claimWindowSeconds"
      FROM creator_offers WHERE id = ? AND creator_owner_address = ?`,
     [offerId, creator.ownerAddress]
   );
@@ -539,7 +553,22 @@ export async function updateCreatorOffer(ownerAddress: string, offerId: string, 
   if (input.maxClaims !== null && input.maxClaims < reserved) {
     throw new CreatorOfferError(409, "INVALID_INVENTORY", "Maximum claims cannot be lower than already reserved claims.");
   }
-  const termsLocked = reserved > 0 && current.status !== "DRAFT";
+  const termsLocked = reserved > 0;
+  if (termsLocked) {
+    const condition = JSON.parse(current.conditionConfigJson) as ConditionConfig;
+    const currentClaimWindow = current.claimWindowSeconds === null ? null : Number(current.claimWindowSeconds);
+    const protectedTermsChanged =
+      input.offerType !== current.offerType ||
+      input.conditionType !== current.conditionType ||
+      input.conditionConfig.amountRaw !== condition.amountRaw ||
+      (input.conditionConfig.postId || null) !== (condition.postId || null) ||
+      input.onePerSupporter !== Boolean(current.onePerSupporter) ||
+      input.startsAt !== Number(current.startsAt) ||
+      input.claimWindowSeconds !== currentClaimWindow;
+    if (protectedTermsChanged) {
+      throw new CreatorOfferError(409, "OFFER_TERMS_LOCKED", "The unlock rule cannot change after a supporter qualifies. Duplicate this offer to create different terms.");
+    }
+  }
   if (termsLocked && current.maxClaims === null && input.maxClaims !== null) {
     throw new CreatorOfferError(409, "OFFER_TERMS_LOCKED", "An unlimited offer cannot become limited after supporters qualify.");
   }
@@ -548,6 +577,9 @@ export async function updateCreatorOffer(ownerAddress: string, offerId: string, 
   }
   if (termsLocked && current.endsAt !== null && input.endsAt !== null && input.endsAt < Number(current.endsAt)) {
     throw new CreatorOfferError(409, "OFFER_TERMS_LOCKED", "You can extend the end date after supporters qualify, but not shorten it.");
+  }
+  if (termsLocked && current.endsAt === null && input.endsAt !== null) {
+    throw new CreatorOfferError(409, "OFFER_TERMS_LOCKED", "An offer without an end date cannot be shortened after supporters qualify.");
   }
   if (termsLocked && input.fulfillment) {
     throw new CreatorOfferError(409, "OFFER_TERMS_LOCKED", "Private delivery details are locked after the first supporter qualifies.");

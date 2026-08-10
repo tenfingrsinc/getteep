@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { usePrivy } from "@privy-io/react-auth";
 import { useSmartWallets } from "@privy-io/react-auth/smart-wallets";
@@ -6,6 +6,7 @@ import DashboardShell from "../components/DashboardShell";
 import { DashboardConnectPage, DashboardPreparingPage } from "../components/DashboardAuthState";
 import { API_BASE } from "../config";
 import { useDashboardLiveUpdates } from "../hooks/useDashboardLiveUpdates";
+import { privyAuthorizedFetch } from "../lib/privyApi";
 
 type Entitlement = {
   id: string;
@@ -32,7 +33,7 @@ function stateCopy(status: Entitlement["status"]) {
 }
 
 export default function SupporterOffers() {
-  const { ready, authenticated } = usePrivy();
+  const { ready, authenticated, getAccessToken } = usePrivy();
   const { client: smartWalletClient } = useSmartWallets();
   const navigate = useNavigate();
   const address = (smartWalletClient?.account?.address || "").toLowerCase();
@@ -40,52 +41,9 @@ export default function SupporterOffers() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [openingId, setOpeningId] = useState("");
-  const readSessionRef = useRef<{ address: string; token: string; expiresAt: number } | null>(null);
-  const readSessionPromiseRef = useRef<Promise<string> | null>(null);
-
-  const walletProof = useCallback(async () => {
-    if (!smartWalletClient?.account || !address) throw new Error("Connect your Teep account first.");
-    const challengeResponse = await fetch(`${API_BASE}/auth/wallet/challenge`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ address, purpose: "offer-claim" }),
-    });
-    const challenge = await challengeResponse.json().catch(() => ({}));
-    if (!challengeResponse.ok || !challenge.message) throw new Error(challenge.error || "Could not verify your account.");
-    const signature = await smartWalletClient.signMessage({
-      account: smartWalletClient.account,
-      message: challenge.message,
-    } as Parameters<typeof smartWalletClient.signMessage>[0]);
-    return { message: challenge.message, signature };
-  }, [address, smartWalletClient]);
-
-  const getReadSession = useCallback(async () => {
-    const current = readSessionRef.current;
-    if (current && current.address === address && current.expiresAt > Date.now() + 10_000) return current.token;
-    if (readSessionPromiseRef.current) return readSessionPromiseRef.current;
-    readSessionPromiseRef.current = (async () => {
-      const proof = await walletProof();
-      const response = await fetch(`${API_BASE}/offers/supporter/${address}/session`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ walletProof: proof }),
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok || !payload.token) throw new Error(payload.error || "Could not verify your Teep account.");
-      readSessionRef.current = { address, token: payload.token, expiresAt: Number(payload.expiresAt || 0) };
-      return payload.token as string;
-    })();
-    try {
-      return await readSessionPromiseRef.current;
-    } finally {
-      readSessionPromiseRef.current = null;
-    }
-  }, [address, walletProof]);
-
   const load = useCallback(() => {
     if (!address) return;
-    getReadSession()
-      .then((token) => fetch(`${API_BASE}/offers/supporter/${address}`, { headers: { Authorization: `Bearer ${token}` } }))
+    privyAuthorizedFetch(getAccessToken, `${API_BASE}/offers/supporter/${address}`)
       .then(async (response) => {
         const payload = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(payload.error || "Could not load your offers.");
@@ -94,21 +52,20 @@ export default function SupporterOffers() {
       })
       .catch((reason) => setError(reason instanceof Error ? reason.message : "Could not load your offers."))
       .finally(() => setLoading(false));
-  }, [address, getReadSession]);
+  }, [address, getAccessToken]);
 
   useEffect(load, [load]);
   useDashboardLiveUpdates(address, load);
 
   const openClaim = async (entitlementId: string) => {
-    if (!smartWalletClient?.account || !address) return;
+    if (!address) return;
     setOpeningId(entitlementId);
     setError("");
     try {
-      const proof = await walletProof();
-      const response = await fetch(`${API_BASE}/offers/supporter/${address}/claim-links`, {
+      const response = await privyAuthorizedFetch(getAccessToken, `${API_BASE}/offers/supporter/${address}/claim-links`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ walletProof: proof }),
+        body: JSON.stringify({}),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error || "Could not open this claim.");
