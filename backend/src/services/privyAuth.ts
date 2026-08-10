@@ -1,8 +1,11 @@
-import type * as PrivyNodeSdk from "@privy-io/node";
+import crypto, { type JsonWebKey as NodeJsonWebKey, type KeyObject } from "crypto";
+import jwt, { JsonWebTokenError, TokenExpiredError, type JwtHeader, type JwtPayload } from "jsonwebtoken";
 import { isAddress } from "../utils/security";
 
 const PRIVY_API_URL = "https://api.privy.io";
+const PRIVY_AUTH_URL = "https://auth.privy.io";
 const PRIVY_REQUEST_TIMEOUT_MS = Math.max(1_000, Number(process.env.PRIVY_REQUEST_TIMEOUT_MS || 5_000));
+const PRIVY_JWKS_CACHE_TTL_MS = Math.max(60_000, Number(process.env.PRIVY_JWKS_CACHE_TTL_MS || 15 * 60_000));
 const PRIVY_OWNERSHIP_CACHE_TTL_MS = Math.max(
   5_000,
   Math.min(5 * 60_000, Number(process.env.PRIVY_OWNERSHIP_CACHE_TTL_MS || 60_000))
@@ -26,20 +29,16 @@ type PrivyUser = {
   linked_accounts?: unknown;
 };
 
-type PrivySdk = typeof PrivyNodeSdk;
-type PrivyClientInstance = InstanceType<PrivySdk["PrivyClient"]>;
+type PrivyJwk = NodeJsonWebKey & {
+  kid?: string;
+  alg?: string;
+  use?: string;
+};
 
-// The Privy SDK currently publishes a CommonJS entry that requires its
-// ESM-only jose dependency. Node 18 cannot execute that combination. Keeping
-// the import native selects Privy's ESM entry and works on both Node 18 and 22.
-// Function receives only this fixed, developer-controlled package name.
-const nativeImport = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<PrivySdk>;
-let privySdkPromise: Promise<PrivySdk> | null = null;
-
-function getPrivySdk() {
-  privySdkPromise ??= nativeImport("@privy-io/node");
-  return privySdkPromise;
-}
+type JwksCache = {
+  expiresAt: number;
+  keys: Map<string, KeyObject>;
+};
 
 export class PrivyAuthError extends Error {
   constructor(public status: number, public code: string, message: string) {
@@ -47,7 +46,7 @@ export class PrivyAuthError extends Error {
   }
 }
 
-let cachedClient: { fingerprint: string; client: PrivyClientInstance } | null = null;
+let jwksCache: JwksCache | null = null;
 const ownershipCache = new Map<string, number>();
 
 function getPrivyConfig() {
@@ -67,30 +66,6 @@ function privyHeaders(appId: string, appSecret: string) {
   };
 }
 
-async function getPrivyClient() {
-  const { appId, appSecret } = getPrivyConfig();
-  if (!appSecret) {
-    throw new PrivyAuthError(503, "PRIVY_AUTH_NOT_CONFIGURED", "Offers authentication is not configured on the server.");
-  }
-  const verificationKey = (process.env.PRIVY_JWT_VERIFICATION_KEY || process.env.PRIVY_VERIFICATION_KEY || "")
-    .trim()
-    .replace(/\\n/g, "\n");
-  const fingerprint = `${appId}:${appSecret}:${verificationKey}`;
-  if (cachedClient?.fingerprint === fingerprint) return cachedClient.client;
-
-  const { PrivyClient } = await getPrivySdk();
-  const client = new PrivyClient({
-    appId,
-    appSecret,
-    apiUrl: PRIVY_API_URL,
-    jwtVerificationKey: verificationKey || undefined,
-    timeout: PRIVY_REQUEST_TIMEOUT_MS,
-    maxRetries: 1,
-  });
-  cachedClient = { fingerprint, client };
-  return client;
-}
-
 async function fetchWithTimeout(url: string, init?: RequestInit) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), PRIVY_REQUEST_TIMEOUT_MS);
@@ -99,6 +74,105 @@ async function fetchWithTimeout(url: string, init?: RequestInit) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+function configuredVerificationKey(): KeyObject | null {
+  const value = (process.env.PRIVY_JWT_VERIFICATION_KEY || process.env.PRIVY_VERIFICATION_KEY || "").trim();
+  if (!value) return null;
+  try {
+    const normalized = value.replace(/\\n/g, "\n");
+    if (normalized.startsWith("{")) {
+      return crypto.createPublicKey({ key: JSON.parse(normalized) as NodeJsonWebKey, format: "jwk" });
+    }
+    return crypto.createPublicKey(normalized);
+  } catch {
+    throw new PrivyAuthError(503, "PRIVY_AUTH_MISCONFIGURED", "Account verification is temporarily unavailable.");
+  }
+}
+
+async function refreshJwks(appId: string): Promise<JwksCache> {
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(`${PRIVY_AUTH_URL}/api/v1/apps/${encodeURIComponent(appId)}/jwks.json`, {
+      headers: { Accept: "application/json", "privy-app-id": appId },
+    });
+  } catch {
+    throw new PrivyAuthError(503, "PRIVY_AUTH_UNAVAILABLE", "Account verification is temporarily unavailable.");
+  }
+  if (!response.ok) {
+    throw new PrivyAuthError(503, "PRIVY_AUTH_UNAVAILABLE", "Account verification is temporarily unavailable.");
+  }
+
+  const payload = await response.json().catch(() => null) as { keys?: unknown } | null;
+  if (!payload || !Array.isArray(payload.keys) || payload.keys.length === 0 || payload.keys.length > 20) {
+    throw new PrivyAuthError(503, "PRIVY_AUTH_UNAVAILABLE", "Account verification is temporarily unavailable.");
+  }
+
+  const keys = new Map<string, KeyObject>();
+  for (const candidate of payload.keys as PrivyJwk[]) {
+    if (
+      !candidate ||
+      typeof candidate.kid !== "string" ||
+      candidate.kid.length > 256 ||
+      candidate.kty !== "EC" ||
+      candidate.crv !== "P-256" ||
+      (candidate.alg && candidate.alg !== "ES256") ||
+      (candidate.use && candidate.use !== "sig")
+    ) continue;
+    try {
+      keys.set(candidate.kid, crypto.createPublicKey({ key: candidate, format: "jwk" }));
+    } catch {
+      // Ignore malformed keys; a valid matching key is still required below.
+    }
+  }
+  if (keys.size === 0) {
+    throw new PrivyAuthError(503, "PRIVY_AUTH_UNAVAILABLE", "Account verification is temporarily unavailable.");
+  }
+  jwksCache = { expiresAt: Date.now() + PRIVY_JWKS_CACHE_TTL_MS, keys };
+  return jwksCache;
+}
+
+async function verificationKey(header: JwtHeader, appId: string): Promise<KeyObject> {
+  const configured = configuredVerificationKey();
+  if (configured) return configured;
+  if (typeof header.kid !== "string" || !header.kid || header.kid.length > 256) {
+    throw new PrivyAuthError(401, "INVALID_PRIVY_TOKEN", "Your Teep session is invalid. Sign in again.");
+  }
+
+  let cache = jwksCache;
+  if (!cache || cache.expiresAt <= Date.now()) cache = await refreshJwks(appId);
+  let key = cache.keys.get(header.kid);
+  if (!key) {
+    cache = await refreshJwks(appId);
+    key = cache.keys.get(header.kid);
+  }
+  if (!key) throw new PrivyAuthError(401, "INVALID_PRIVY_TOKEN", "Your Teep session is invalid. Sign in again.");
+  return key;
+}
+
+function decodeTokenHeader(token: string): JwtHeader {
+  const decoded = jwt.decode(token, { complete: true });
+  if (
+    !decoded ||
+    typeof decoded !== "object" ||
+    !decoded.header ||
+    decoded.header.alg !== "ES256" ||
+    (decoded.header.typ !== undefined && decoded.header.typ !== "JWT")
+  ) {
+    throw new PrivyAuthError(401, "INVALID_PRIVY_TOKEN", "Your Teep session is invalid. Sign in again.");
+  }
+  return decoded.header;
+}
+
+function invalidTokenReason(error: unknown) {
+  if (error instanceof TokenExpiredError) return "expired";
+  if (error instanceof JsonWebTokenError) {
+    if (error.message.startsWith("jwt audience invalid")) return "audience_mismatch";
+    if (error.message.startsWith("jwt issuer invalid")) return "issuer_mismatch";
+    if (error.message === "invalid signature") return "signature_invalid";
+    return "jwt_invalid";
+  }
+  return "claims_invalid";
 }
 
 export function bearerToken(authorization: unknown): string {
@@ -111,23 +185,32 @@ export async function verifyPrivyAccessToken(token: string): Promise<PrivyAccess
   if (!token || token.length > MAX_ACCESS_TOKEN_LENGTH) {
     throw new PrivyAuthError(401, "PRIVY_SESSION_REQUIRED", "Sign in to your Teep account to continue.");
   }
-  let verified;
+  const { appId } = getPrivyConfig();
+  const header = decodeTokenHeader(token);
+  const key = await verificationKey(header, appId);
+
+  let payload: JwtPayload;
   try {
-    const client = await getPrivyClient();
-    verified = await client.utils().auth().verifyAccessToken(token);
+    const verified = jwt.verify(token, key, {
+      algorithms: ["ES256"],
+      audience: appId,
+      issuer: "privy.io",
+      clockTolerance: 5,
+    });
+    if (typeof verified === "string") throw new Error("Unexpected token payload");
+    payload = verified;
   } catch (error) {
-    const { InvalidAuthTokenError } = await getPrivySdk().catch(() => ({ InvalidAuthTokenError: null }));
-    if (!InvalidAuthTokenError || !(error instanceof InvalidAuthTokenError)) {
-      throw new PrivyAuthError(503, "PRIVY_AUTH_UNAVAILABLE", "Account verification is temporarily unavailable.");
-    }
+    console.warn(`[Privy auth] Access token rejected (${invalidTokenReason(error)}).`);
     throw new PrivyAuthError(401, "INVALID_PRIVY_TOKEN", "Your Teep session expired. Sign in again.");
   }
 
-  const { user_id: userId, session_id: sessionId, app_id: appId, expiration } = verified;
-  if (!/^did:privy:[a-zA-Z0-9_-]+$/.test(userId) || !sessionId || sessionId.length > 256 || !expiration) {
+  const userId = typeof payload.sub === "string" ? payload.sub : "";
+  const sessionId = typeof payload.sid === "string" ? payload.sid : "";
+  if (!/^did:privy:[a-zA-Z0-9_-]+$/.test(userId) || !sessionId || sessionId.length > 256 || !payload.exp) {
+    console.warn("[Privy auth] Access token rejected (required_claims_invalid).");
     throw new PrivyAuthError(401, "INVALID_PRIVY_TOKEN", "Your Teep session is invalid. Sign in again.");
   }
-  return { userId, sessionId, appId, expiration };
+  return { userId, sessionId, appId, expiration: payload.exp };
 }
 
 async function getPrivyUser(userId: string): Promise<PrivyUser> {

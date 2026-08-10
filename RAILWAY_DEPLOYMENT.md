@@ -33,6 +33,8 @@ and should not restart the service.
 TEEP_RAILWAY_SERVICE=backend
 NODE_ENV=production
 TRUST_PROXY=true
+# Allows the backend to drain HTTP/SSE connections after Railway sends SIGTERM.
+RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30
 PORT=3001
 DATABASE_URL=${{Postgres.DATABASE_URL}}
 CORS_ORIGIN=https://YOUR_WEB_DOMAIN

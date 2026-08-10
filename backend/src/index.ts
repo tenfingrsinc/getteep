@@ -34,6 +34,12 @@ import { RpcHealthMonitor } from "./services/rpcHealthMonitor";
 import { XTipReconciler } from "./services/xTipReconciliation";
 
 const PORT = parseInt(process.env.PORT || "3001");
+// Railway's edge keeps upstream HTTP connections alive for 60 seconds. Node's
+// much shorter default can close an otherwise reusable socket underneath the
+// proxy and surface as an intermittent Railway 502 with no application error.
+const HTTP_KEEP_ALIVE_TIMEOUT_MS = 65_000;
+const HTTP_HEADERS_TIMEOUT_MS = 70_000;
+const HTTP_SHUTDOWN_GRACE_MS = 25_000;
 const LOCAL_URL_RE = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/|$)/i;
 const DEFAULT_PRODUCTION_CORS_ORIGINS = [
   "https://getteep.xyz",
@@ -389,22 +395,46 @@ async function main() {
   xTipReconciler.start();
 
   // Start HTTP server
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`[Server] Teep backend running on port ${PORT}`);
     console.log(`[Server] Health: http://localhost:${PORT}/health`);
+    console.log(`[Server] HTTP keep-alive: ${HTTP_KEEP_ALIVE_TIMEOUT_MS}ms`);
   });
+  server.keepAliveTimeout = HTTP_KEEP_ALIVE_TIMEOUT_MS;
+  server.headersTimeout = HTTP_HEADERS_TIMEOUT_MS;
 
   // Graceful shutdown
-  process.on("SIGINT", () => {
-    console.log("\n[Server] Shutting down...");
+  let shuttingDown = false;
+  const shutdown = (signal: NodeJS.Signals) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`\n[Server] ${signal} received; draining HTTP connections...`);
     indexer?.stop();
     projector?.stop();
     crossmintReconciler.stop();
     creatorOfferWorker.stop();
     rpcHealthMonitor.stop();
     xTipReconciler.stop();
-    process.exit(0);
-  });
+
+    const forceExit = setTimeout(() => {
+      console.error("[Server] Graceful shutdown timed out; forcing exit.");
+      process.exit(1);
+    }, HTTP_SHUTDOWN_GRACE_MS);
+    forceExit.unref();
+
+    server.close((error) => {
+      clearTimeout(forceExit);
+      if (error) {
+        console.error("[Server] HTTP shutdown failed:", error);
+        process.exit(1);
+      }
+      console.log("[Server] Shutdown complete.");
+      process.exit(0);
+    });
+    server.closeIdleConnections?.();
+  };
+  process.once("SIGINT", () => shutdown("SIGINT"));
+  process.once("SIGTERM", () => shutdown("SIGTERM"));
 }
 
 main().catch((err) => {
