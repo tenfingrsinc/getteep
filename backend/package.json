@@ -19,6 +19,7 @@
     "test:x-tip-ux": "node --test -r ts-node/register src/services/xBot/replies.test.ts src/services/serviceHealth.test.ts"
   },
   "dependencies": {
+    "@privy-io/node": "^0.28.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.0",
     "ethers": "^6.13.0",

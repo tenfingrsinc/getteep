@@ -2,9 +2,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import { useSmartWallets } from "@privy-io/react-auth/smart-wallets";
 import CreatorDashboardShell from "../components/CreatorDashboardShell";
-import { API_BASE } from "../config";
+import { API_BASE, WEB_APP_URL } from "../config";
 import { useDashboardLiveUpdates } from "../hooks/useDashboardLiveUpdates";
-import { conditionLabel, offerTypeLabel, statusLabel, type CreatorOffer } from "../lib/creatorOffers";
+import { conditionLabel, creatorOfferXIntentUrl, offerTypeLabel, statusLabel, type CreatorOffer } from "../lib/creatorOffers";
 import { privyAuthorizedFetch } from "../lib/privyApi";
 
 type OfferFilter = "ACTIVE" | "SCHEDULED" | "DRAFT" | "PAUSED" | "PAST";
@@ -441,6 +441,20 @@ export default function CreatorOffers() {
                   </dl>
                   <div className="creator-offer-actions">
                     <button className="btn-primary creator-offer-report-action" type="button" onClick={() => void openDetails(offer)}><span className="material-symbols-outlined" aria-hidden>analytics</span>View report</button>
+                    {offer.status === "ACTIVE" && <a
+                      className="btn-secondary creator-offer-share-action"
+                      href={creatorOfferXIntentUrl({
+                        creatorUsername: offer.creator.username,
+                        name: offer.name,
+                        visibility: offer.visibility,
+                        conditionType: offer.condition.type,
+                        thresholdUsd: offer.condition.thresholdUsd,
+                        webAppUrl: WEB_APP_URL,
+                      })}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      aria-label={`Share ${offer.visibility === "PUBLIC" ? offer.name : "this private supporter offer"} on X`}
+                    ><span className="creator-offer-x-mark" aria-hidden>𝕏</span><span>Share to X</span></a>}
                     <details className="creator-offer-manage">
                       <summary><span className="material-symbols-outlined" aria-hidden>tune</span>Manage<span className="material-symbols-outlined creator-offer-manage-chevron" aria-hidden>expand_more</span></summary>
                       <div className="creator-offer-manage-menu">

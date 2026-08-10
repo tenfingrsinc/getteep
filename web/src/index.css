@@ -1799,26 +1799,40 @@ a:hover {
 }
 
 .creator-offers-summary {
-  display: flex;
-  align-items: stretch;
-  border-block: 1px solid var(--border);
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
 }
 
 .creator-offers-summary > div {
   display: grid;
-  grid-template-columns: auto auto;
+  grid-template-columns: 38px minmax(0, 1fr);
   grid-template-areas: "icon label" "icon value";
   align-items: center;
   column-gap: 10px;
   min-width: 0;
-  padding: 15px 28px;
+  min-height: 86px;
+  padding: 15px 17px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(31, 28, 39, 0.52);
 }
 
-.creator-offers-summary > div:first-child { padding-left: 0; }
+.creator-offers-summary > div:first-child { padding-left: 17px; }
 .creator-offers-summary > div + div { border-left: 1px solid var(--border); }
-.creator-offers-summary .material-symbols-outlined { grid-area: icon; color: #9a73ff; font-size: 21px; }
+.creator-offers-summary .material-symbols-outlined {
+  grid-area: icon;
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  background: rgba(99, 36, 235, 0.16);
+  color: #a783ff;
+  font-size: 20px;
+}
 .creator-offers-summary small { grid-area: label; display: block; color: var(--text-secondary); font-size: 0.72rem; font-weight: 650; }
-.creator-offers-summary strong { grid-area: value; display: block; margin-top: 2px; font-size: 1.18rem; line-height: 1; }
+.creator-offers-summary strong { grid-area: value; display: block; margin-top: 3px; font-size: 1.35rem; line-height: 1; }
 .creator-offers-funnel-note { display: flex; align-items: center; gap: 6px; margin: 9px 0 0; color: var(--text-secondary); font-size: 0.72rem; }
 .creator-offers-funnel-note .material-symbols-outlined { color: #8f7aaa; font-size: 15px; }
 
@@ -1905,9 +1919,11 @@ a:hover {
 .creator-offer-code-row .material-symbols-outlined { font-size: 17px; }
 .creator-offer-actions { position: relative; gap: 8px; margin-top: 17px; }
 .creator-offer-actions .btn-primary,
-.creator-offer-actions .btn-secondary { min-height: 38px; padding: 8px 13px; font-size: 0.76rem; }
+.creator-offer-actions .btn-secondary { min-height: 38px; padding: 8px 13px; font-size: 0.76rem; text-decoration: none; }
 .creator-offer-actions .material-symbols-outlined { font-size: 17px; }
 .creator-offer-report-action { flex: 1; }
+.creator-offer-share-action { flex: 0 0 auto; white-space: nowrap; }
+.creator-offer-x-mark { color: #fff; font-size: 0.92rem; font-weight: 900; line-height: 1; }
 .creator-offer-manage { position: relative; }
 .creator-offer-manage > summary { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 38px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; color: var(--text-primary); background: #18151e; font-size: 0.76rem; font-weight: 750; cursor: pointer; list-style: none; }
 .creator-offer-manage > summary::-webkit-details-marker { display: none; }
@@ -1989,9 +2005,10 @@ a:hover {
   .creator-offers-head { align-items: flex-start; flex-direction: column; gap: 18px; }
   .creator-offers-head .btn-primary { width: 100%; }
   .creator-offers-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .creator-offers-summary > div { grid-template-columns: auto; grid-template-areas: "icon" "label" "value"; align-content: start; gap: 3px; padding: 13px 10px; }
-  .creator-offers-summary > div:first-child { padding-left: 0; }
-  .creator-offers-summary .material-symbols-outlined { margin-bottom: 3px; font-size: 18px; }
+  .creator-offers-summary { gap: 7px; }
+  .creator-offers-summary > div { grid-template-columns: auto; grid-template-areas: "icon" "label" "value"; align-content: start; gap: 3px; min-height: 98px; padding: 12px 9px; }
+  .creator-offers-summary > div:first-child { padding-left: 9px; }
+  .creator-offers-summary .material-symbols-outlined { width: 30px; height: 30px; margin-bottom: 3px; font-size: 17px; }
   .creator-offers-summary small { font-size: 0.64rem; }
   .creator-offers-summary strong { font-size: 1.15rem; }
   .creator-offers-funnel-note { align-items: flex-start; line-height: 1.45; }
@@ -2014,6 +2031,14 @@ a:hover {
   .creator-offer-modal-card > footer .btn-primary,
   .creator-offer-modal-card > footer .btn-secondary,
   .creator-offer-modal-card > footer .btn-danger { flex: 1; }
+}
+
+@media (max-width: 420px) {
+  .creator-offer-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; }
+  .creator-offer-report-action,
+  .creator-offer-manage { min-width: 0; }
+  .creator-offer-share-action { width: 38px; padding: 8px; }
+  .creator-offer-share-action > span:last-child { display: none; }
 }
 
 /* Supporter offer inbox and secure claim */
