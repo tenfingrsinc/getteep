@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "description": "Non-custodial X post tipping on Arc with USDC",
+  "engines": {
+    "node": "22.x"
+  },
   "workspaces": ["contracts", "backend", "extension", "web", "shared", "x-agent"],
   "scripts": {
     "contracts:compile": "npm run compile --workspace=contracts",
