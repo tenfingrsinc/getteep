@@ -12,6 +12,7 @@ import {
   generateOfferCodes,
   getClaimPreview,
   getCreatorOffer,
+  getSupporterUnclaimedEntitlementCount,
   listCreatorOffers,
   listPublicOffers,
   listSupporterEntitlements,
@@ -216,6 +217,17 @@ router.get("/supporter/:address", async (req, res) => {
   try {
     res.set("Cache-Control", "private, no-store");
     res.json({ entitlements: await listSupporterEntitlements(address) });
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+router.get("/supporter/:address/unclaimed-count", async (req, res) => {
+  const address = String(req.params.address || "").toLowerCase();
+  if (!(await requireReadAuthorization(req, res, address, "supporter"))) return;
+  try {
+    res.set("Cache-Control", "private, no-store");
+    res.json(await getSupporterUnclaimedEntitlementCount(address));
   } catch (error) {
     sendError(res, error);
   }

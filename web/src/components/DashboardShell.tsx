@@ -4,6 +4,8 @@ import { usePrivy } from "@privy-io/react-auth";
 import { API_BASE } from "../config";
 import { useAccountRole } from "../context/AccountRoleContext";
 import { useReferral } from "../context/ReferralContext";
+import { useDashboardLiveUpdates } from "../hooks/useDashboardLiveUpdates";
+import { privyAuthorizedFetch } from "../lib/privyApi";
 
 type DashboardShellProps = {
   address?: string;
@@ -20,6 +22,7 @@ export type DashboardNavLink = {
   icon: string;
   label: string;
   active?: boolean;
+  badge?: string;
 };
 
 export type DashboardNavSection = {
@@ -66,7 +69,7 @@ export default function DashboardShell({
   mobileNavLinks,
 }: DashboardShellProps) {
   const { pathname } = useLocation();
-  const { logout, user } = usePrivy();
+  const { ready, authenticated, getAccessToken, logout, user } = usePrivy();
   const accountRole = useAccountRole();
   const {
     code: referralCode,
@@ -82,6 +85,8 @@ export default function DashboardShell({
   const [notificationUnread, setNotificationUnread] = useState(0);
   const [referralCopied, setReferralCopied] = useState(false);
   const [accountDisplayName, setAccountDisplayName] = useState("Teep account");
+  const [unclaimedOfferCount, setUnclaimedOfferCount] = useState(0);
+  const [nextUnclaimedExpiryAt, setNextUnclaimedExpiryAt] = useState<number | null>(null);
   const routeForcesCreatorNav = pathname.startsWith("/creator");
   const notificationRef = useRef<HTMLDivElement>(null);
   const userMenuRef = useRef<HTMLDivElement>(null);
@@ -141,6 +146,41 @@ export default function DashboardShell({
   const mobileMoreActive = mobileMoreSections.some((section) => section.links.some(isLinkActive));
   const resolvedSidebarKicker = sidebarKicker || (showCreatorNav ? "Creator Dashboard" : "Tipper Dashboard");
   const dashboardHomePath = showCreatorNav ? "/creator/dashboard" : "/dashboard";
+  const unclaimedOfferBadge = unclaimedOfferCount > 0 ? (unclaimedOfferCount > 9 ? "9+" : String(unclaimedOfferCount)) : "";
+  const badgeForLink = (link: DashboardNavLink) => link.badge || (link.to === "/dashboard/offers" ? unclaimedOfferBadge : "");
+
+  const fetchUnclaimedOfferCount = useCallback(() => {
+    if (!ready || !authenticated || !address) {
+      setUnclaimedOfferCount(0);
+      setNextUnclaimedExpiryAt(null);
+      return;
+    }
+    privyAuthorizedFetch(getAccessToken, `${API_BASE}/offers/supporter/${address}/unclaimed-count`)
+      .then(async (response) => {
+        if (!response.ok) return null;
+        return await response.json().catch(() => null) as { unclaimedCount?: unknown; nextExpiryAt?: unknown } | null;
+      })
+      .then((payload) => {
+        if (!payload) return;
+        const nextCount = Number(payload.unclaimedCount);
+        setUnclaimedOfferCount(Number.isSafeInteger(nextCount) && nextCount > 0 ? nextCount : 0);
+        const nextExpiry = Number(payload.nextExpiryAt);
+        setNextUnclaimedExpiryAt(Number.isFinite(nextExpiry) && nextExpiry > Date.now() ? nextExpiry : null);
+      })
+      .catch(() => {
+        // Keep the last confirmed count during a temporary auth or network failure.
+      });
+  }, [address, authenticated, getAccessToken, ready]);
+
+  useEffect(fetchUnclaimedOfferCount, [fetchUnclaimedOfferCount]);
+  useDashboardLiveUpdates(ready && authenticated ? address : "", fetchUnclaimedOfferCount);
+
+  useEffect(() => {
+    if (!nextUnclaimedExpiryAt) return;
+    const delay = Math.min(Math.max(250, nextUnclaimedExpiryAt - Date.now() + 250), 2_147_483_647);
+    const timer = window.setTimeout(fetchUnclaimedOfferCount, delay);
+    return () => window.clearTimeout(timer);
+  }, [fetchUnclaimedOfferCount, nextUnclaimedExpiryAt]);
 
   const fetchNotifications = useCallback(() => {
     if (!address) return;
@@ -276,7 +316,8 @@ export default function DashboardShell({
               {section.links.map((link) => (
                 <Link key={link.to} to={link.to} className={`dashboard-sidebar-btn${isLinkActive(link) ? " dashboard-sidebar-btn--active" : ""}`}>
                   <span className="material-symbols-outlined" aria-hidden>{link.icon}</span>
-                  {link.label}
+                  <span className="dashboard-nav-label">{link.label}</span>
+                  {badgeForLink(link) && <span className="dashboard-nav-badge" aria-label={`${unclaimedOfferCount} unclaimed offers`}>{badgeForLink(link)}</span>}
                 </Link>
               ))}
             </div>
@@ -370,7 +411,10 @@ export default function DashboardShell({
       <nav className={`dashboard-mobile-nav${showCreatorNav ? " dashboard-mobile-nav--creator" : ""}`} aria-label="Dashboard navigation">
         {resolvedMobileLinks.map((link) => (
           <Link key={link.to} to={link.to} className={isLinkActive(link) ? "is-active" : ""}>
-            <span className="material-symbols-outlined" aria-hidden>{link.icon}</span>
+            <span className="dashboard-nav-icon-wrap">
+              <span className="material-symbols-outlined" aria-hidden>{link.icon}</span>
+              {badgeForLink(link) && <span className="dashboard-nav-badge" aria-label={`${unclaimedOfferCount} unclaimed offers`}>{badgeForLink(link)}</span>}
+            </span>
             <span>{link.label.replace(" Creators", "")}</span>
           </Link>
         ))}
@@ -422,7 +466,10 @@ export default function DashboardShell({
                   {section.links.map((link) => (
                     <Link key={link.to} to={link.to} className={isLinkActive(link) ? "is-active" : ""}>
                       <span className="material-symbols-outlined" aria-hidden>{link.icon}</span>
-                      <span>{link.label}</span>
+                      <span className="dashboard-mobile-more-label">
+                        <span>{link.label}</span>
+                        {badgeForLink(link) && <span className="dashboard-nav-badge" aria-label={`${unclaimedOfferCount} unclaimed offers`}>{badgeForLink(link)}</span>}
+                      </span>
                       <span className="material-symbols-outlined dashboard-mobile-more-chevron" aria-hidden>chevron_right</span>
                     </Link>
                   ))}

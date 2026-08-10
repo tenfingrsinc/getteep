@@ -29,6 +29,13 @@ export const config = {
   tokenStatePath: env("X_TOKEN_STATE_PATH", ".x-token-state.json"),
   pollIntervalMs: envInt("X_POLL_INTERVAL_MS", 45_000),
   mentionsPageSize: envInt("X_MENTIONS_PAGE_SIZE", 20),
+  searchPageSize: envInt("X_SEARCH_PAGE_SIZE", 100),
+  pollOverlapMs: Math.min(Math.max(envInt("X_POLL_OVERLAP_MS", 10 * 60_000), 0), 60 * 60_000),
+  pollBootstrapLookbackMs: Math.min(
+    Math.max(envInt("X_POLL_BOOTSTRAP_LOOKBACK_MS", 10 * 60_000), 0),
+    60 * 60_000
+  ),
+  pollStatePath: env("X_POLL_STATE_PATH", ".x-poll-state.json"),
   useFilteredStream: env("X_USE_FILTERED_STREAM") === "true",
 };
 

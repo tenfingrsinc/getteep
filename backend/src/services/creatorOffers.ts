@@ -1060,14 +1060,34 @@ export async function recordOfferXNotificationResult(params: { id: string; reply
   );
 }
 
-export async function listSupporterEntitlements(supporterAddress: string, includeClaimUrls = false) {
-  if (!isAddress(supporterAddress)) throw new CreatorOfferError(400, "INVALID_ADDRESS", "Invalid supporter address.");
-  const now = Date.now();
+async function expireSupporterEntitlements(supporterAddress: string, now: number) {
   await run(
     `UPDATE offer_entitlements SET status = 'EXPIRED', updated_at = ?
      WHERE supporter_address = ? AND status = 'RESERVED_UNCLAIMED' AND expires_at IS NOT NULL AND expires_at <= ?`,
     [now, supporterAddress.toLowerCase(), now]
   );
+}
+
+export async function getSupporterUnclaimedEntitlementCount(supporterAddress: string) {
+  if (!isAddress(supporterAddress)) throw new CreatorOfferError(400, "INVALID_ADDRESS", "Invalid supporter address.");
+  const now = Date.now();
+  const normalizedAddress = supporterAddress.toLowerCase();
+  await expireSupporterEntitlements(normalizedAddress, now);
+  const row = await one<{ total: number | string; nextExpiryAt: number | string | null }>(
+    `SELECT COUNT(*) AS total, MIN(expires_at) AS "nextExpiryAt" FROM offer_entitlements
+     WHERE supporter_address = ? AND status = 'RESERVED_UNCLAIMED'`,
+    [normalizedAddress]
+  );
+  return {
+    unclaimedCount: Math.max(0, Number(row?.total || 0)),
+    nextExpiryAt: row?.nextExpiryAt == null ? null : Number(row.nextExpiryAt),
+  };
+}
+
+export async function listSupporterEntitlements(supporterAddress: string, includeClaimUrls = false) {
+  if (!isAddress(supporterAddress)) throw new CreatorOfferError(400, "INVALID_ADDRESS", "Invalid supporter address.");
+  const now = Date.now();
+  await expireSupporterEntitlements(supporterAddress, now);
   const rows = await query<any>(
     `SELECT e.id, e.status, e.offer_snapshot_json as "offerSnapshotJson",
             e.claim_token_ciphertext as "claimTokenCiphertext", e.qualified_at as "qualifiedAt",

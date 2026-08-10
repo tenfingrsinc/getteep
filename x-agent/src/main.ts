@@ -5,12 +5,20 @@ import {
   reportOfferReplyResult,
   reportReplyResult,
 } from "./client/teepBackend";
-import { pollMentions, type PollingState } from "./listeners/xPollingListener";
+import { pollMentions, validateBotIdentity, type PollingState } from "./listeners/xPollingListener";
+import { loadPollingState, savePollingState } from "./listeners/xPollingState";
 import { startFilteredStream } from "./listeners/xStreamListener";
 import { parseTipCommand } from "./parser/parseTipCommand";
 import { postReplyToX } from "./replies/postReplyToX";
 
 const processedLocally = new Set<string>();
+
+function rememberProcessed(tweetId: string) {
+  processedLocally.add(tweetId);
+  if (processedLocally.size <= 10_000) return;
+  const oldest = processedLocally.values().next().value as string | undefined;
+  if (oldest) processedLocally.delete(oldest);
+}
 
 async function handlePost(post: Awaited<ReturnType<typeof pollMentions>>["posts"][number]) {
   if (processedLocally.has(post.id)) {
@@ -22,10 +30,10 @@ async function handlePost(post: Awaited<ReturnType<typeof pollMentions>>["posts"
 
   const command = parseTipCommand(post.text);
   if (!command) {
+    rememberProcessed(post.id);
     console.warn(`[x-agent] Tweet ${post.id}: ignored (COMMAND_NOT_RECOGNIZED; expected @${config.botUsername})`);
     return;
   }
-  processedLocally.add(post.id);
 
   console.log(`[x-agent] Processing tweet ${post.id} from @${post.authorUsername || post.authorId}`);
 
@@ -36,6 +44,7 @@ async function handlePost(post: Awaited<ReturnType<typeof pollMentions>>["posts"
     `${result.txHash ? ` ${result.txHash}` : ""}`
   );
   if (!result.replyText) {
+    rememberProcessed(post.id);
     console.log(`[x-agent] Tweet ${post.id}: ${result.status}${result.code ? ` (${result.code})` : ""}`);
     return;
   }
@@ -61,6 +70,7 @@ async function handlePost(post: Awaited<ReturnType<typeof pollMentions>>["posts"
       reportError instanceof Error ? reportError.message : reportError
     );
   });
+  rememberProcessed(post.id);
   console.log(`[x-agent] Replied to ${post.id} with ${replyId}`);
 }
 
@@ -83,22 +93,32 @@ async function reportReplyResultWithRetry(params: {
 }
 
 async function runPollingLoop() {
-  let state: PollingState = {};
+  let state: PollingState = await loadPollingState();
   let pollCount = 0;
-  console.log(`[x-agent] Polling @${config.botUsername} mentions every ${config.pollIntervalMs}ms`);
+  console.log(
+    `[x-agent] Polling @${config.botUsername} via mentions + recent search every ${config.pollIntervalMs}ms` +
+    ` (cursor state: ${config.pollStatePath})`
+  );
 
   for (;;) {
     try {
-      const { posts, state: nextState } = await pollMentions(state);
+      const { posts, state: nextState, sourceCounts, sourceErrors } = await pollMentions(state);
       pollCount += 1;
       if (posts.length > 0 || pollCount === 1 || pollCount % 10 === 0) {
-        console.log(`[x-agent] Poll ${pollCount}: received ${posts.length} mention(s)${state.lastSeenId ? ` after ${state.lastSeenId}` : ""}`);
+        console.log(`[x-agent] Poll ${pollCount}: mentions=${sourceCounts.mentions} search=${sourceCounts.search} merged=${posts.length}`);
       }
-      state = nextState;
+      for (const sourceError of sourceErrors) console.warn(`[x-agent] Poll source degraded: ${sourceError}`);
       for (const post of posts) {
         await handlePost(post);
       }
       await deliverPendingOfferReplies();
+      state = nextState;
+      await savePollingState(state).catch((error: unknown) => {
+        console.warn(
+          `[x-agent] Could not persist poll cursors to ${config.pollStatePath}:`,
+          error instanceof Error ? error.message : error
+        );
+      });
     } catch (err: unknown) {
       console.error("[x-agent] Poll cycle failed:", err instanceof Error ? err.message : err);
     }
@@ -137,6 +157,8 @@ async function runOfferReplyLoop() {
 async function main() {
   console.log("[x-agent] Worker process started; validating configuration");
   assertConfig();
+  await validateBotIdentity();
+  console.log(`[x-agent] Verified X identity @${config.botUsername} (${config.botUserId})`);
   console.log(`[x-agent] Teep X agent starting (backend: ${config.backendUrl})`);
 
   if (config.useFilteredStream) {

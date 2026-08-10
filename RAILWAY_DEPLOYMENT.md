@@ -133,17 +133,26 @@ TEEP_RAILWAY_SERVICE=x-agent
 NODE_ENV=production
 TEEP_BACKEND_URL=https://YOUR_BACKEND_DOMAIN
 X_AGENT_TOKEN=...
-X_BOT_USER_ID=...
+X_BOT_USER_ID=2071517645308903424
 X_BOT_USERNAME=teepagent
 X_BEARER_TOKEN=...
 X_BOT_ACCESS_TOKEN=...
 X_POLL_INTERVAL_MS=45000
 X_MENTIONS_PAGE_SIZE=20
+X_SEARCH_PAGE_SIZE=100
+X_POLL_OVERLAP_MS=600000
+X_POLL_BOOTSTRAP_LOOKBACK_MS=600000
+X_POLL_STATE_PATH=/data/x-poll-state.json
 X_USE_FILTERED_STREAM=false
 ```
 
 `X_AGENT_TOKEN` must be the same value on the backend and X agent services.
 Only the X agent service should receive `X_BOT_ACCESS_TOKEN`.
+
+The worker keeps separate cursors for the mentions timeline and recent search.
+Mount a small persistent Railway volume at `/data` if those cursors
+must survive a full service replacement. Without a saved state, the bounded
+bootstrap lookback prevents older financial commands from being replayed.
 
 For beta, start with polling:
 

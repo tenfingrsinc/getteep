@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/main.ts",
     "simulate": "ts-node src/dev/simulateCommand.ts",
+    "test": "node --test -r ts-node/register src/listeners/xPollingListener.test.ts",
     "build": "tsc",
     "start": "node dist/main.js"
   },

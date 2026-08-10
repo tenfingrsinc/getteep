@@ -16,6 +16,7 @@ contracts/typechain-types/
 .env.local
 .env.*
 !.env.example
+.x-poll-state.json
 
 # Database
 backend/data/
