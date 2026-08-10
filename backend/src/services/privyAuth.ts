@@ -1,4 +1,4 @@
-import { InvalidAuthTokenError, PrivyClient } from "@privy-io/node";
+import type * as PrivyNodeSdk from "@privy-io/node";
 import { isAddress } from "../utils/security";
 
 const PRIVY_API_URL = "https://api.privy.io";
@@ -26,13 +26,28 @@ type PrivyUser = {
   linked_accounts?: unknown;
 };
 
+type PrivySdk = typeof PrivyNodeSdk;
+type PrivyClientInstance = InstanceType<PrivySdk["PrivyClient"]>;
+
+// The Privy SDK currently publishes a CommonJS entry that requires its
+// ESM-only jose dependency. Node 18 cannot execute that combination. Keeping
+// the import native selects Privy's ESM entry and works on both Node 18 and 22.
+// Function receives only this fixed, developer-controlled package name.
+const nativeImport = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<PrivySdk>;
+let privySdkPromise: Promise<PrivySdk> | null = null;
+
+function getPrivySdk() {
+  privySdkPromise ??= nativeImport("@privy-io/node");
+  return privySdkPromise;
+}
+
 export class PrivyAuthError extends Error {
   constructor(public status: number, public code: string, message: string) {
     super(message);
   }
 }
 
-let cachedClient: { fingerprint: string; client: PrivyClient } | null = null;
+let cachedClient: { fingerprint: string; client: PrivyClientInstance } | null = null;
 const ownershipCache = new Map<string, number>();
 
 function getPrivyConfig() {
@@ -52,7 +67,7 @@ function privyHeaders(appId: string, appSecret: string) {
   };
 }
 
-function getPrivyClient() {
+async function getPrivyClient() {
   const { appId, appSecret } = getPrivyConfig();
   if (!appSecret) {
     throw new PrivyAuthError(503, "PRIVY_AUTH_NOT_CONFIGURED", "Offers authentication is not configured on the server.");
@@ -63,6 +78,7 @@ function getPrivyClient() {
   const fingerprint = `${appId}:${appSecret}:${verificationKey}`;
   if (cachedClient?.fingerprint === fingerprint) return cachedClient.client;
 
+  const { PrivyClient } = await getPrivySdk();
   const client = new PrivyClient({
     appId,
     appSecret,
@@ -97,9 +113,11 @@ export async function verifyPrivyAccessToken(token: string): Promise<PrivyAccess
   }
   let verified;
   try {
-    verified = await getPrivyClient().utils().auth().verifyAccessToken(token);
+    const client = await getPrivyClient();
+    verified = await client.utils().auth().verifyAccessToken(token);
   } catch (error) {
-    if (!(error instanceof InvalidAuthTokenError)) {
+    const { InvalidAuthTokenError } = await getPrivySdk().catch(() => ({ InvalidAuthTokenError: null }));
+    if (!InvalidAuthTokenError || !(error instanceof InvalidAuthTokenError)) {
       throw new PrivyAuthError(503, "PRIVY_AUTH_UNAVAILABLE", "Account verification is temporarily unavailable.");
     }
     throw new PrivyAuthError(401, "INVALID_PRIVY_TOKEN", "Your Teep session expired. Sign in again.");
